@@ -42,6 +42,29 @@ def sd_notify(state="READY=1"):
         pass
 
 
+def _build_whisper(cfg):
+    try:
+        from .asr import WhisperASR
+        w = WhisperASR(cfg)
+        if w.available:
+            log("spark", f"whisper ready: {w.model}")
+            return w
+        log("spark", "whisper unavailable — commands stay on vosk")
+    except Exception as e:
+        log("spark", f"whisper init failed: {e}")
+    return None
+
+
+class _Src:
+    """Adapt a frame-generator function to the MicStream .frames() interface."""
+
+    def __init__(self, gen):
+        self._gen = gen
+
+    def frames(self):
+        return self._gen()
+
+
 class Spark:
     def __init__(self, cfg, voice=True):
         self.cfg = cfg
@@ -52,6 +75,7 @@ class Spark:
             # text REPL: print whatever would have been spoken
             self.body._muted_sink = lambda t: print(f"spark> {t}")
         self.brain = Brain(cfg)
+        self.whisper = _build_whisper(cfg)
         self.memory = Memory(cfg)
         self.router = Router(cfg, self.body, self.brain, self.memory)
         self.router.llm_reply = self._llm_reply
@@ -63,11 +87,46 @@ class Spark:
         log("spark", f"brain_online={self.brain_online} hw={self.body.hw} subsystems={self.body.has}")
 
     def _wire_touch(self):
-        def _cb(side, state):
-            log("touch", f"side={side} state={state}")
-            if "Down" in str(state) and not self.listening:
-                self.body.pet_pulse()  # instant visible feedback
+        """Stock touch semantics:
+        - quick tap (<0.6s): start listening (talk trigger)
+        - pet (0.6-2.5s): happiness escalation + mood bump
+        - long-press (>=2.5s): grumpy mood
+        """
+        tstate = {"down_at": 0.0, "pets": []}
+
+        def _cb(side, state_):
+            log("touch", f"side={side} state={state_}")
+            now = time.time()
+            if "Down" in str(state_):
+                tstate["down_at"] = now
+                return
+            dur = now - tstate["down_at"]
+            sfx_map = self.cfg.get("sounds", {}).get("sfx_map", {})
+            if dur >= 2.5:  # long-press mood
+                self.body.mood_eyes("IRRITATED")
+                self.body._bump_mood(-1)
+                self.body.play_sfx(sfx_map.get("debuff", ""), defer=False)
+                log("spark", "long-press: grumpy")
+                return
+            if dur >= 0.6:  # petting -> happiness escalation
+                self.body._bump_mood(1)
+                tstate["pets"] = [t for t in tstate["pets"] if now - t < 30] + [now]
+                n = len(tstate["pets"])
+                if n >= 4:
+                    self.body.mood_eyes("HEARTS")
+                    self.body.play_sfx(sfx_map.get("collect", ""), defer=False)
+                elif n >= 2:
+                    self.body.mood_eyes("SPARKLING")
+                    self.body.play_sfx(sfx_map.get("pet", ""), defer=False)
+                else:
+                    self.body.pet_pulse()
+                log("spark", f"pet x{n}: happy")
+                return
+            # quick tap -> talk
+            if not self.listening:
+                self.body.pet_pulse()
                 self.talk_trigger.set()
+
         try:
             self.body._touch_cb = _cb
         except Exception:
@@ -83,15 +142,17 @@ class Spark:
     # ---------------------------------------------------------------- voice
     def voice_loop(self):
         from .asr import Recognizer
-        from .ear import MicStream, record_utterance
+        from .ear import MicStream, record_utterance, listen_for_wake
 
         recognizer = Recognizer(self.cfg)
-        log("spark", "ASR ready — tap Spark and talk")
+        wake_cfg = self.cfg.get("wake", {})
+        wake_enabled = wake_cfg.get("enabled", True)
+        wake_words = wake_cfg.get("words", ["spark", "hey spark"])
+        log("spark", f"ASR ready — wake={wake_words if wake_enabled else 'OFF'}, tap-to-talk always on")
+
         self.body.eyes("idle")
 
-        # readiness gate: mandatory subsystems + a verified live microphone.
-        # If this fails we do NOT notify systemd -> TimeoutStartSec -> the
-        # installer's rollback restores stock doly instead of parking it.
+        # readiness gate (unchanged): mandatory subsystems + verified mic
         mandatory = ["helper", "touch", "tts", "sound"]
         missing = [m for m in mandatory if not self.body.has.get(m)]
         if missing:
@@ -104,28 +165,168 @@ class Spark:
         log("spark", "microphone verified")
         sd_notify("READY=1")
 
-        while True:
-            self.talk_trigger.wait()
-            self.talk_trigger.clear()
-            self.listening = True
-            self.body.eyes("listening")
-            log("spark", "listening…")
+        # boot dock probe: she usually wakes up on her charger — know it now
+        try:
+            self.body.dock_probe()
+        except Exception as e:
+            log("spark", f"dock probe at boot failed: {e}")
 
-            recognizer.begin()
-            # fresh arecord per turn: nothing stale buffered, no self-hearing
-            with MicStream(self.cfg) as mic:
-                pcm = record_utterance(mic, self.cfg, on_frame=recognizer.feed,
-                                       should_stop=lambda: False)
-            text = recognizer.finish().strip()
-            self.listening = False
+        # ONE persistent mic stream: always drained (no stale buffers)
+        with MicStream(self.cfg) as mic:
+            idle_cfg = self.cfg.get("idle", {})
+            def _reset_idle():
+                t = time.time()
+                return (t, t + idle_cfg.get("flourish_s", 50), t + idle_cfg.get("wander_s", 240))
+            _, next_flourish, next_wander = _reset_idle()
+            idle_action = {"act": None}
 
-            if not text:
+            def _idle_or_tap():
+                if self.talk_trigger.is_set():
+                    idle_action["act"] = "tap"
+                    return True
+                now = time.time()
+                if now >= next_wander:
+                    idle_action["act"] = "wander"
+                    return True
+                if now >= next_flourish:
+                    idle_action["act"] = "flourish"
+                    return True
+                return False
+
+            # boot stretch: a tiny "good morning" so she feels alive at start
+            import threading as _th
+            def _stretch():
+                time.sleep(8)
+                try:
+                    self.body.mood_eyes("LOOK_AHEAD")
+                    self.body.arm_angle(130, speed=50)
+                    time.sleep(0.4)
+                    self.body.arm_angle(20, speed=50)
+                    self.body.mood_eyes("BLINK_BIG")
+                except Exception:
+                    pass
+            _th.Thread(target=_stretch, daemon=True).start()
+
+            follow_cfg = self.cfg.get("conversation", {})
+            follow_state = {"until": 0.0, "left": 0}
+
+            while True:
+                self.talk_trigger.clear()
+                idle_action["act"] = None  # stale idle flags must never eat a wake
                 self.body.eyes("idle")
-                log("spark", "(nothing understood)")
-                continue
 
-            log("spark", f"heard: '{text}'")
-            self.converse(text)
+                # follow-up window: right after she answers, keep listening —
+                # no wake word needed for back-and-forth (Alexa follow-up mode)
+                in_followup = (time.time() < follow_state["until"]
+                               and follow_state["left"] > 0)
+
+                triggered_by_wake = None
+                leftover_text = ""
+                if in_followup:
+                    follow_state["left"] -= 1
+                    triggered_by_wake = "(followup)"
+                elif wake_enabled:
+                    triggered_by_wake = self._wait_for_wake(
+                        mic, recognizer, wake_words, idle_check=_idle_or_tap)
+                if triggered_by_wake:
+                    # one-breath "spark what time is it": words after the wake
+                    # word ARE the command — skip the second listen entirely
+                    toks = triggered_by_wake.lower().split()
+                    wake_len = 2 if toks[:2] == ["hey", "spark"] else 1
+                    leftover = toks[wake_len:]
+                    if len(leftover) >= 2:
+                        leftover_text = " ".join(leftover)
+
+                if idle_action["act"] == "wander":
+                    log("spark", "idle: exploring")
+                    self.body.wander_step()
+                    _, next_flourish, next_wander = _reset_idle()
+                    continue
+                if idle_action["act"] == "flourish":
+                    self.body.idle_flourish()
+                    t = time.time()
+                    next_flourish = t + idle_cfg.get("flourish_s", 50)
+                    idle_action["act"] = None
+                    continue
+
+                self.listening = True
+                self.body.eyes("listening")
+                if triggered_by_wake:
+                    self.body.wake_reaction()
+                log("spark", "listening…" + (" (wake)" if triggered_by_wake else ""))
+
+                if leftover_text:
+                    text = leftover_text
+                else:
+                    recognizer.begin()
+                    pcm = record_utterance(
+                        mic, self.cfg, on_frame=recognizer.feed,
+                        should_stop=lambda: False,
+                        wait_timeout_s=wake_cfg.get("wait_timeout_s", 6.0),
+                    )
+                    if getattr(self, "whisper", None) and len(pcm) >= 8000:
+                        # whisper.cpp command transcription (vosk stays on wake)
+                        t0 = time.perf_counter()
+                        text = self.whisper.transcribe_pcm(pcm).strip()
+                        if text:
+                            log("spark", f"whisper {time.perf_counter()-t0:.1f}s: '{text}'")
+                        else:
+                            text = recognizer.finish().strip()  # vosk fallback
+                    else:
+                        text = recognizer.finish().strip()
+                self.listening = False
+
+                if not text:
+                    self.body.eyes("idle")
+                    self._misses = getattr(self, "_misses", 0) + 1
+                    log("spark", f"(nothing understood x{self._misses})")
+                    if self._misses == 2:
+                        self.body.speak("Still with you — just didn't catch that.")
+                        self._misses = 0
+                    continue
+                self._misses = 0
+
+                log("spark", f"heard: '{text}'")
+                self.converse(text)
+                _, next_flourish, next_wander = _reset_idle()
+                idle_action["act"] = None
+                # open the follow-up window after every answer
+                follow_state["until"] = time.time() + follow_cfg.get("follow_up_window_s", 8)
+                follow_state["left"] = follow_cfg.get("follow_ups", 2)
+
+    def _wait_for_wake(self, mic, recognizer, wake_words, idle_check=None):
+        """Block until wake word or tap. Always drains audio (keeps stream fresh)."""
+        from .ear import listen_for_wake, _rms
+
+        # echo suppression: wait out our own TTS before listening for wake
+        drain_frames = []
+        while self.body.speaking_recently():
+            drain_frames.append(next(mic.frames(), None))
+        if self.talk_trigger.is_set():
+            return False
+
+        # tap-aware frame source: stops when a tap arrives
+        import random as _random
+        blink_state = {"next": time.time() + _random.uniform(3, 7)}
+
+        def tap_frames():
+            if self.talk_trigger.is_set():
+                return
+            for f in mic.frames():
+                self.body.flush_sfx()  # main-thread playback of queued sfx
+                now = time.time()
+                if now >= blink_state["next"]:
+                    self.body.blink()
+                    blink_state["next"] = now + _random.uniform(3.5, 8)
+                if self.talk_trigger.is_set():
+                    return
+                yield f
+
+        # NOTE: queued sfx from sensor threads flush inside tap_frames() loop
+        return listen_for_wake(tap_frames(), recognizer, self.cfg, wake_words,
+                               tap_check=idle_check or (lambda: self.talk_trigger.is_set()))
+
+    
 
     # ------------------------------------------------------------ exchanges
     def _llm_reply(self, user_text, extra_context=None):
@@ -136,7 +337,11 @@ class Spark:
         """
         self.body.eyes("thinking")
         self.memory.add("user", user_text)
-        messages = self.memory.messages(self.cfg["prompt"])
+        system = self.cfg["prompt"]
+        if self.cfg.get("moods", True):
+            mood_note = "(Current mood: " + self.body.mood + " — let it color your tone.)"
+            system = system + chr(10) + chr(10) + mood_note
+        messages = self.memory.messages(system)
         if extra_context:
             # Template-safe injection: strict chat templates (qwen etc.) break on
             # interleaved system/user roles mid-conversation, so tool data rides
@@ -152,12 +357,17 @@ class Spark:
         reply_parts = []
         try:
             first = True
-            for sentence in iter_sentences(self.brain.chat_stream(messages)):
-                if first:
-                    self.body.eyes("speaking")
-                    first = False
-                reply_parts.append(sentence)
-                self.body.speak(sentence)  # phase 1: sentence-by-sentence
+
+            def _collect():
+                nonlocal first
+                for sentence in iter_sentences(self.brain.chat_stream(messages)):
+                    if first:
+                        self.body.eyes("speaking")
+                        first = False
+                    reply_parts.append(sentence)
+                    yield sentence
+
+            self.body.speak_stream(_collect())  # pipelined: synth N+1 during N
         except BrainOffline as e:
             log("spark", f"brain went offline: {e}")
             if reply_parts:

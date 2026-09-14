@@ -103,7 +103,13 @@ _STOP_CMD = {"action": "stop", "phrases": ["stop"]}
 
 
 def match_command(text):
-    """Return the best-matching command dict + score, or (None, 0)."""
+    """Match a command via contiguous token windows anywhere in the text.
+
+    Window matching is inherently char-fuzz-proof ("spine" never matches
+    "spin") and survives ASR junk glued around the command
+    ("move forward whoop our" still fires `forward`). Negation anywhere
+    in the sentence still blocks motion commands.
+    """
     text = normalize(text)
     if not text:
         return None, 0.0
@@ -114,28 +120,33 @@ def match_command(text):
         return _STOP_CMD, 0.9
 
     negated = bool(_NEGATION_RE.search(text))
-    # strip politeness tokens for matching (keeps original for logging)
-    match_text = " ".join(t for t in _tokens(text) if t not in _FILLER) or text
     best, best_score = None, 0.0
     for cmd in COMMANDS:
-        threshold = MOTION_THRESHOLD if cmd["action"] in MOTION_ACTIONS else MATCH_THRESHOLD
+        is_motion = cmd["action"] in MOTION_ACTIONS
         for phrase in cmd["phrases"]:
-            # single-word motion phrases demand an exact word match —
-            # character-fuzz would accept 'spine'->spin, 'sleepy'->sleep
-            if len(_tokens(phrase)) == 1 and cmd["action"] in MOTION_ACTIONS:
-                if match_text == phrase or _token_subseq(_tokens(match_text), _tokens(phrase)):
-                    s = 1.0 if match_text == phrase else 0.55 + 0.45 / len(_tokens(match_text))
-                else:
+            pt = _tokens(phrase)
+            n = len(pt)
+            for i in range(len(tokens) - n + 1):
+                if tokens[i:i + n] != pt:
                     continue
-            else:
-                s = _score(match_text, phrase)
-            if negated and cmd["action"] in MOTION_ACTIONS:
-                s = min(s, 0.5)  # negated speech can never trigger motion
-            if s >= threshold and s > best_score:
-                best, best_score = cmd, s
+                s = 1.0
+                if negated and is_motion:
+                    s = 0.5  # negated speech can never trigger motion
+                if s >= (MOTION_THRESHOLD if is_motion else MATCH_THRESHOLD) and s > best_score:
+                    best, best_score = cmd, s
     if best is not None:
         return best, best_score
-    return None, best_score
+
+    # fuzzy fallback (non-motion only): whole-string similarity
+    match_text = " ".join(t for t in tokens if t not in _FILLER) or text
+    for cmd in COMMANDS:
+        if cmd["action"] in MOTION_ACTIONS:
+            continue
+        for phrase in cmd["phrases"]:
+            s = difflib.SequenceMatcher(None, match_text, phrase).ratio()
+            if s >= MATCH_THRESHOLD and s > best_score:
+                best, best_score = cmd, s
+    return best, best_score
 
 
 def extract_color(text):

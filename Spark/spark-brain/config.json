@@ -4,7 +4,7 @@
     "model": "qwen/qwen3.6-35b-a3b",
     "fallback_model": "qwen/qwen3.5-9b",
     "max_tokens": 250,
-    "temperature": 0.7,
+    "temperature": 0.8,
     "reasoning_effort": "none",
     "history_turns": 12,
     "request_timeout_s": 120
@@ -12,14 +12,15 @@
   "audio": {
     "input_device": "plughw:CARD=tlv320aic31xxso,DEV=0",
     "sample_rate": 16000,
-    "silence_ms": 1200,
-    "max_utterance_ms": 12000,
+    "silence_ms": 900,
+    "max_utterance_ms": 5000,
     "start_rms": 900,
     "stop_rms": 500
   },
   "asr": {
     "model_path": "/opt/spark/vosk-model-small-en-us-0.15",
-    "sample_rate": 16000
+    "sample_rate": 16000,
+    "whisper_model": "/opt/spark/whisper.cpp/models/ggml-tiny.en.bin"
   },
   "tts": {
     "voice_model": 1,
@@ -42,5 +43,28 @@
     "lat": null,
     "lon": null
   },
-  "state_dir": "/opt/spark/state"
+  "state_dir": "/opt/spark/state",
+  "edge": {
+    "gap_gpio_state": "High",
+    "gap_lock_s": 3.0,
+    "all_gap_lock_s": 10.0
+  },
+  "wake": {
+    "enabled": true,
+    "words": [
+      "spark",
+      "hey spark"
+    ],
+    "chirp": "/.doly/sounds/wuw/wuw_1.wav",
+    "wait_timeout_s": 6.0
+  },
+  "idle": {
+    "flourish_s": 40,
+    "wander_s": 120
+  },
+  "moods": true,
+  "conversation": {
+    "follow_up_window_s": 8,
+    "follow_ups": 2
+  }
 }

@@ -28,6 +28,8 @@ class Body:
         self._tts_lock = threading.Lock()
         self._cmd_id = 0
         self._muted_sink = None  # text mode prints instead of speaking
+        import collections
+        self._sfx_queue = collections.deque()
         if self.hw:
             self._init_all()
 
@@ -192,12 +194,22 @@ class Body:
             g = str(gesture).split(".")[-1]
             self._sensor_react("imu", g)
 
+        def _on_update(data):
+            try:
+                self._imu_yaw = data.ypr.yaw
+            except Exception:
+                pass
+
         imu.on_gesture(_on_gesture)
+        try:
+            imu.on_update(_on_update)
+        except Exception:
+            pass
         self._imu = imu
 
     _TOF_REACTIONS = {
-        "ObjectComing": ("CAUTIOUS", None, "back"),   # hand close → back away
-        "ObjectGoing": ("HAPPY", None, "forward"),      # hand back → come on
+        "ObjectComing": ("CAUTIOUS", "click", None),   # eyes/sfx only — NEVER auto-drive
+        "ObjectGoing": ("HAPPY", None, None),            # (see table-fall postmortem)
         "Scrubing": ("SPARKLING", "pet", None),
         "ToLeft": ("LOOK_LEFT", None, None),
         "ToRight": ("LOOK_RIGHT", None, None),
@@ -262,15 +274,19 @@ class Body:
             raise RuntimeError(f"edge init rc={rc}")
 
         def _on_gap(direction):
-            # EMERGENCY: kill motion, lock further motion briefly, react
-            self._gap_lock_until = time.time() + 3.0
-            _log(f"GAP DETECTED dir={direction} — motion locked")
+            # EMERGENCY: kill motion, lock further motion, react
+            dir_name = str(direction).split(".")[-1]
+            lock_s = 10.0 if dir_name == "All" else 3.0  # All = airborne/off-edge
+            self._gap_lock_until = max(self._gap_lock_until, time.time() + lock_s)
+            _log(f"GAP DETECTED dir={dir_name} — motion locked {lock_s}s")
             try:
                 self.drive_stop()
             except Exception:
                 pass
-            self.eyes("thinking")  # closest to shocked; SCAN fallback
+            self.eyes("thinking")
             self._led_flash("Red")
+            if dir_name == "All":
+                self.mood_eyes("FRIGHTENED")
 
         edge.on_gap_detect(_on_gap)
         rc = edge.enable_control()
@@ -298,7 +314,10 @@ class Body:
                 self._tts.produce(text)
                 self._snd.play(TTS_WAV, self._next_id())  # (file, block_id)
                 if wait:
-                    time.sleep(self._wav_duration(TTS_WAV) + 0.15)
+                    dur = self._wav_duration(TTS_WAV)
+                    time.sleep(dur + 0.15)
+                    # wake-word echo suppression: don't "hear" ourselves
+                    self._speaking_until = time.time() + dur + 1.0
                 return True
             except Exception as e:
                 _log(f"speak failed: {e}")
@@ -312,6 +331,66 @@ class Body:
         except Exception:
             return 2.0
 
+    def wake_reaction(self):
+        """'Hey Spark' acknowledged: stock wake chirp + WAKE_WORD eyes + cyan.
+
+        defer=False: this runs on the main thread (right after the wake
+        listener returns), so direct playback is GIL-safe — the deferred
+        queue wouldn't flush until next turn and the chirp would be silent.
+        """
+        chirp = self.cfg.get("wake", {}).get("chirp")
+        if chirp:
+            self.play_sfx(chirp, defer=False)
+        self.mood_eyes("WAKE_WORD")
+        self._led_flash("Cyan")
+
+    def speaking_recently(self):
+        """True while our own TTS output might still reach the mic."""
+        return time.time() < getattr(self, "_speaking_until", 0)
+
+    def speak_stream(self, sentences):
+        """Pipelined TTS: synthesize sentence N+1 while sentence N plays.
+
+        First word still waits for the first synth, but multi-sentence
+        replies no longer serialize synth+play per sentence.
+        """
+        sentences = list(sentences)
+        if not sentences:
+            return
+        if not (self.has.get("tts") and self.has.get("sound")):
+            for sent in sentences:
+                self.speak(sent, wait=False)
+            return
+
+        import shutil
+        prev_end = 0.0
+        played = []
+        with self._tts_lock:
+            for i, sent in enumerate(sentences):
+                text = re.sub(r"[*_`#>]+", "", (sent or "").strip())
+                if not text:
+                    continue
+                tmp = f"/tmp/spark_tts_{i}.wav"
+                self._tts.produce(text)          # writes TTS_WAV (blocking)
+                shutil.copyfile(TTS_WAV, tmp)
+                # wait for the previous sentence to finish playing
+                now = time.time()
+                if prev_end > now:
+                    time.sleep(prev_end - now)
+                self._snd.play(tmp, self._next_id())
+                prev_end = time.time() + self._wav_duration(tmp) + 0.05
+                played.append(tmp)
+            # let the last sentence finish
+            now = time.time()
+            if prev_end > now:
+                time.sleep(prev_end - now)
+            for tmp in played:
+                try:
+                    os.remove(tmp)
+                except Exception:
+                    pass
+        self._speaking_until = prev_end + 1.0
+
     def pet_pulse(self):
         """Instant 'I felt that' reaction: sfx chirp + LED flash + happy eyes."""
         sfx = self.cfg.get("sounds", {}).get("pet_sfx")
@@ -320,14 +399,104 @@ class Body:
         self._led_flash("Cyan")
         self.eyes("listening")
 
-    # ------------------------------------------------------------- edge lock
-    def _motion_allowed(self):
-        if not self.has.get("edge"):
-            return True  # no sensors = can't gate (shouldn't happen)
-        if time.time() < getattr(self, "_gap_lock_until", 0):
-            _log("motion blocked: gap lock active")
+    # ---------------------------------------------------------- dock sensing
+    def dock_probe(self):
+        """Truth test: command a small rotate; if the gyro doesn't move,
+        the wheels aren't touching anything (charging dock). Result cached;
+        re-probes are cheap and safe (dock spin is invisible)."""
+        if not (self.has.get("drive") and self.has.get("imu")):
+            self.docked = False
             return False
+        try:
+            yaw_before = getattr(self, "_imu_yaw", None)
+            if yaw_before is None:
+                time.sleep(0.2)
+                yaw_before = getattr(self, "_imu_yaw", 0.0)
+            self._drive.go_rotate(self._next_id(), 12, False, 30, True, True)
+            deadline = time.time() + 3.0
+            while time.time() < deadline:
+                if self._drive.get_state() != self._drive.DriveState.Running:
+                    break
+                time.sleep(0.05)
+            time.sleep(0.3)
+            yaw_after = getattr(self, "_imu_yaw", yaw_before)
+            delta = abs(yaw_after - yaw_before)
+            self.docked = delta < 5.0
+            _log(f"dock_probe: yaw delta {delta:.1f} deg -> docked={self.docked}")
+            return self.docked
+        except Exception as e:
+            _log(f"dock_probe failed: {e}")
+            self.docked = False
+            return False
+
+    def ensure_mobility(self):
+        """True if she can actually drive. Re-probes when docked (she may
+        have been lifted off)."""
+        if not getattr(self, "docked", False):
+            return True
+        return not self.dock_probe()
+
+    # ------------------------------------------------------------- edge lock
+    def _edge_gaps(self):
+        """Which sensors currently see a void (['Front_Left', 'Back_Right', ...])."""
+        if not self.has.get("edge"):
+            return []
+        try:
+            state = getattr(self._edge.GpioState,
+                            self.cfg.get("edge", {}).get("gap_gpio_state", "Low"))
+            return [str(getattr(s, "id", "?")).split(".")[-1]
+                    for s in self._edge.get_sensors(state)]
+        except Exception as e:
+            _log(f"preflight poll failed: {e}")
+            return []  # poll bug must not brick motion — events still guard
+
+    def _edge_gap_now(self):
+        return bool(self._edge_gaps())
+
+    def _motion_allowed(self, direction="forward"):
+        """Direction-aware safety: a cliff BEHIND her must not block forward
+        motion (that bug trapped her on the dock and froze her near desk
+        edges). forward -> only Front gaps block; backward -> only Back gaps;
+        rotate -> Front gaps block (Back-only tolerated; watchdog guards
+        mid-rotation sweeps).
+        """
+        if not self.has.get("edge"):
+            return True
+        if time.time() < getattr(self, "_gap_lock_until", 0):
+            _log(f"motion blocked ({direction}): gap lock active")
+            return False
+        gaps = self._edge_gaps()
+        if not gaps:
+            return True
+        front = any(g.startswith("Front") for g in gaps)
+        back = any(g.startswith("Back") for g in gaps)
+        blocked = (front and direction in ("forward", "rotate")) or \
+                  (back and direction == "backward")
+        if blocked:
+            self._gap_lock_until = time.time() + 2.0
+            _log(f"motion blocked ({direction}): gaps={gaps}")
+            return False
+        _log(f"preflight pass ({direction}): tolerating {gaps}")
         return True
+
+    def _watch_motion(self):
+        """While a drive command runs, poll edges and hard-stop on gap."""
+        def _run():
+            try:
+                deadline = time.time() + 15
+                while time.time() < deadline:
+                    if self._drive.get_state() != self._drive.DriveState.Running:
+                        return
+                    if self._edge_gap_now():
+                        self._gap_lock_until = max(self._gap_lock_until, time.time() + 3.0)
+                        self.drive_stop()
+                        _log("watchdog: stopped mid-motion (edge)")
+                        return
+                    time.sleep(0.03)
+            except Exception as e:
+                _log(f"watchdog error: {e}")
+        if self.has.get("edge") and self.has.get("drive"):
+            threading.Thread(target=_run, daemon=True).start()
 
     def _led_flash(self, color_name):
         if not self.has.get("led"):
@@ -341,15 +510,32 @@ class Body:
         except Exception as e:
             _log(f"led_flash failed: {e}")
 
-    def play_sfx(self, path):
+    def play_sfx(self, path, defer=True):
+        """Play a sound effect. Foreign (native callback) threads pass
+        defer=True — the file is queued and flushed by the main loop, so
+        snd.play() never runs concurrently with Vosk decoding (GIL abort)."""
         if not self.has.get("sound"):
             return False
+        if not path:
+            return False
+        if defer:
+            self._sfx_queue.append(path)
+            return True
         try:
             self._snd.play(path, self._next_id())
             return True
         except Exception as e:
             _log(f"play_sfx failed: {e}")
             return False
+
+    def flush_sfx(self):
+        """Main-loop drain: actually play queued sfx (safe GIL context)."""
+        while self._sfx_queue:
+            path = self._sfx_queue.popleft()
+            try:
+                self._snd.play(path, self._next_id())
+            except Exception as e:
+                _log(f"flush_sfx failed: {e}")
     # real doly_eye.expressions members (verified on-robot 2024 image)
     # ------------------------------------------------------------------ eyes
     _EXPR_CANDIDATES = {
@@ -463,11 +649,15 @@ class Body:
     def drive_distance(self, mm, speed=45):
         if not self.has.get("drive"):
             return False
-        if not self._motion_allowed():
+        if not self.ensure_mobility():
+            _log("drive blocked: docked")
+            return False
+        if not self._motion_allowed("forward" if mm >= 0 else "backward"):
             return False
         try:
             # SDK distance is unsigned; direction is the to_forward flag
             self._drive.go_distance(self._next_id(), abs(mm), speed, mm >= 0, True)
+            self._watch_motion()
             return True
         except Exception as e:
             _log(f"drive_distance failed: {e}")
@@ -476,10 +666,18 @@ class Body:
     def drive_rotate(self, degrees, speed=45):
         if not self.has.get("drive"):
             return False
-        if not self._motion_allowed():
+        if getattr(self, "docked", False):
+            # rotation ON the dock is probe-proven safe (she pivots in place);
+            # only linear motion risks rolling off the plate
+            _log("rotate allowed while docked (in-place pivot)")
+        elif not self.ensure_mobility():
+            _log("rotate blocked: docked")
+            return False
+        if not self._motion_allowed("rotate"):
             return False
         try:
             self._drive.go_rotate(self._next_id(), degrees, False, speed, True, True)
+            self._watch_motion()
             return True
         except Exception as e:
             _log(f"drive_rotate failed: {e}")
@@ -498,28 +696,160 @@ class Body:
                 ok = False
         return ok
 
-    def dance(self):
-        """The full show: music, lights, arms, spins. Edge-gated."""
-        if not self._motion_allowed():
-            _log("dance blocked: too close to an edge")
+    _DANCES = {
+        "fiesta": {"music": "/.doly/sounds/music/salsa.wav", "sfx": None,
+                   "colors": ("Magenta", "Cyan", "Yellow", "Green"),
+                   "moves": ("spin_big",)},
+        "groove": {"music": "/.doly/sounds/sfx/drum roll (1).wav", "sfx": None,
+                   "colors": ("Cyan", "Blue", "Purple"),
+                   "moves": ("arms_wave", "wiggle")},
+        "party": {"music": "/.doly/sounds/music/birthday.wav", "sfx": "collect",
+                  "colors": ("Yellow", "Pink", "Orange", "Cyan"),
+                  "moves": ("bounce", "spin_small", "arms_wave")},
+    }
+
+    def dance(self, variant=None):
+        """Themed dance: music, lights, arms, spins. Preflight FIRST."""
+        import random
+        if not self._motion_allowed("rotate"):
+            _log("dance blocked before show: preflight failed")
             return False
-        music = self.cfg.get("sounds", {}).get("dance_music")
-        if music:
-            self.play_sfx(music)
-        # light show: quick color cycle
-        for color in ("Magenta", "Cyan", "Yellow", "Green"):
+        name = variant if variant in self._DANCES else random.choice(list(self._DANCES))
+        d = self._DANCES[name]
+        docked = not self.ensure_mobility()
+        _log(f"dance: {name}{' (dock mode: arms only)' if docked else ''}")
+        if d["music"]:
+            self.play_sfx(d["music"], defer=False)
+        if d["sfx"]:
+            sm = self.cfg.get("sounds", {}).get("sfx_map", {})
+            self.play_sfx(sm.get(d["sfx"], ""), defer=False)
+        for color in d["colors"]:
             self._led_flash(color)
-            time.sleep(0.25)
+            time.sleep(0.2)
         self.eyes("speaking")
-        self.arm_angle(150, speed=60)
         ok = True
-        ok &= self.drive_rotate(120, speed=40)
-        self.arm_angle(20, speed=60)
-        ok &= self.drive_rotate(-240, speed=40)
-        self.arm_angle(150, speed=60)
-        ok &= self.drive_rotate(120, speed=40)
-        self.arm_angle(20, speed=60)
+        if docked:
+            # dock party: everything but wheels
+            for ang in (150, 30, 150, 30, 140, 40):
+                self.arm_angle(ang, speed=75)
+            self.mood_eyes("HEARTS")
+            self._bump_mood(1)
+            return True
+        for move in d["moves"]:
+            if not self._motion_allowed("rotate"):
+                return False
+            if move == "spin_big":
+                ok &= self.drive_rotate(90, speed=40)
+                ok &= self.arm_angle(150, speed=60)
+                ok &= self.drive_rotate(-180, speed=40)
+                ok &= self.arm_angle(20, speed=60)
+                ok &= self.drive_rotate(90, speed=40)
+            elif move == "spin_small":
+                ok &= self.drive_rotate(60, speed=35)
+                ok &= self.drive_rotate(-120, speed=35)
+            elif move == "arms_wave":
+                for ang in (150, 30, 150, 30):
+                    ok &= self.arm_angle(ang, speed=70)
+            elif move == "wiggle":
+                ok &= self.drive_rotate(25, speed=45)
+                ok &= self.drive_rotate(-50, speed=45)
+                ok &= self.drive_rotate(25, speed=45)
+            elif move == "bounce":
+                for _ in range(2):
+                    ok &= self.arm_angle(140, speed=80)
+                    ok &= self.arm_angle(40, speed=80)
+        ok &= self.arm_angle(20, speed=60)
+        self._bump_mood(1)
         return ok
+
+    def arms_party(self):
+        """Always-safe celebration: lights, music-less boogie, arms only."""
+        try:
+            for color in ("Magenta", "Cyan", "Yellow"):
+                self._led_flash(color)
+            self.eyes("speaking")
+            for ang in (150, 30, 150, 30, 140, 40, 150, 30):
+                self.arm_angle(ang, speed=75)
+            self.mood_eyes("HEARTS")
+            self._bump_mood(1)
+            return True
+        except Exception as e:
+            _log(f"arms_party: {e}")
+            return False
+
+    def blink(self):
+        """Quick blink every few seconds = baseline 'alive' signal."""
+        import random
+        try:
+            self.mood_eyes(random.choice(("BLINK", "BLINK", "BLINK_BIG", "BLINK_SLOW")))
+        except Exception:
+            pass
+
+    _CURIOS = ("LOOK_LEFT", "LOOK_RIGHT", "DISCOVER", "LOOK_UP", "SCAN",
+               "SNEEZE", "BLINK_BIG", "SPARKLING")
+
+    def idle_flourish(self):
+        """A little life while waiting: curious glance, sometimes a chirp."""
+        import random
+        try:
+            self.mood_eyes(random.choice(self._CURIOS))
+            if random.random() < 0.35:
+                sfx_map = self.cfg.get("sounds", {}).get("sfx_map", {})
+                pool = [sfx_map.get("pet", ""), sfx_map.get("click", ""),
+                        self.cfg.get("wake", {}).get("chirp", "")]
+                self.play_sfx(random.choice([p for p in pool if p]) or "", defer=False)
+        except Exception as e:
+            _log(f"idle_flourish: {e}")
+
+    def wander_step(self):
+        """Pet-like exploration: ONE safe move + a curious look.
+        Short, preflighted, edge-gated, battery-aware."""
+        import random
+        try:
+            pct = self.battery_pct()
+            if pct is not None and pct < 20:
+                return False
+            if not self._motion_allowed("rotate"):
+                return False
+            if getattr(self, "docked", False):
+                # on the dock: eyes and arms only, never wheels
+                if random.random() < 0.5:
+                    self.idle_flourish()
+                else:
+                    self.arm_angle(120, speed=45)
+                    time.sleep(0.3)
+                    self.arm_angle(20, speed=45)
+                    self.idle_flourish()
+                return True
+            move = random.choice(["look", "turn", "scoot", "turn", "scoot"])
+            if move == "look":
+                self.idle_flourish()
+                return True
+            if move == "turn":
+                self.drive_rotate(random.choice([-90, -60, 60, 90]), speed=35)
+            elif move == "scoot":
+                self.drive_distance(random.choice([60, 90, 120]), speed=35)
+            self.idle_flourish()
+            return True
+        except Exception as e:
+            _log(f"wander_step: {e}")
+            return False
+
+    def _bump_mood(self, delta):
+        score = getattr(self, "_mood_score", 3) + delta
+        self._mood_score = max(0, min(6, score))
+
+    @property
+    def mood(self):
+        score = getattr(self, "_mood_score", 3)
+        if score >= 5:
+            return "ecstatic"
+        if score >= 3:
+            return "playful"
+        if score >= 2:
+            return "content"
+        return "sleepy"
+
 
     # --------------------------------------------------------------- battery
     def battery_pct(self):

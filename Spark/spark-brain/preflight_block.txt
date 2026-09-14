@@ -1,0 +1,42 @@
+    # ------------------------------------------------------------- edge lock
+    def _edge_gaps(self):
+        """Which sensors currently see a void (['Front_Left', 'Back_Right', ...])."""
+        if not self.has.get("edge"):
+            return []
+        try:
+            state = getattr(self._edge.GpioState,
+                            self.cfg.get("edge", {}).get("gap_gpio_state", "Low"))
+            return [str(getattr(s, "id", "?")).split(".")[-1]
+                    for s in self._edge.get_sensors(state)]
+        except Exception as e:
+            _log(f"preflight poll failed: {e}")
+            return []  # poll bug must not brick motion — events still guard
+
+    def _edge_gap_now(self):
+        return bool(self._edge_gaps())
+
+    def _motion_allowed(self, direction="forward"):
+        """Direction-aware safety: a cliff BEHIND her must not block forward
+        motion (that bug trapped her on the dock and froze her near desk
+        edges). forward -> only Front gaps block; backward -> only Back gaps;
+        rotate -> Front gaps block (Back-only tolerated; watchdog guards
+        mid-rotation sweeps).
+        """
+        if not self.has.get("edge"):
+            return True
+        if time.time() < getattr(self, "_gap_lock_until", 0):
+            _log(f"motion blocked ({direction}): gap lock active")
+            return False
+        gaps = self._edge_gaps()
+        if not gaps:
+            return True
+        front = any(g.startswith("Front") for g in gaps)
+        back = any(g.startswith("Back") for g in gaps)
+        blocked = (front and direction in ("forward", "rotate")) or \
+                  (back and direction == "backward")
+        if blocked:
+            self._gap_lock_until = time.time() + 2.0
+            _log(f"motion blocked ({direction}): gaps={gaps}")
+            return False
+        _log(f"preflight pass ({direction}): tolerating {gaps}")
+        return True

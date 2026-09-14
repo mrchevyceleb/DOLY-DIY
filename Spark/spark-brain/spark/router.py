@@ -21,6 +21,18 @@ def _log(msg):
     print(f"[router] {msg}", file=sys.stderr)
 
 
+# "Imagine..." -> she acts it out: themed routine + the brain narrating theatrically
+_IMAGINE_RE = re.compile(r"(imagine|pretend|act like|act out)", re.IGNORECASE)
+_IMAGINE_THEMES = {
+    "beach": ("fiesta", "/.doly/sounds/sfx/beach.wav"),
+    "party": ("party", None),
+    "exercise": ("groove", "/.doly/sounds/sfx/buff (1).wav"),
+    "workout": ("groove", "/.doly/sounds/sfx/buff (2).wav"),
+    "birthday": ("party", "/.doly/sounds/music/birthday.wav"),
+    "dance": ("fiesta", None),
+    "robot": ("groove", None),
+}
+
 # Explicit web-search intent — always goes to the search tool, not the stock table.
 _SEARCH_INTENT = re.compile(
     r"\b(?:search (?:the web |the internet )?(?:for |about )?|look up|google|"
@@ -29,7 +41,9 @@ _SEARCH_INTENT = re.compile(
 )
 
 
-EDGE_REFUSAL = "Whoa, nope, that's too close to the edge. Not falling for that again."
+EDGE_REFUSAL = ("I can't drive here — I'm either on my dock or too close to an edge. "
+                "Put me somewhere with room and ask again!")
+DOCK_REFUSAL = "My wheels don't reach down here — I'm on my charging dock! Lift me onto the desk and I'll scoot."
 
 
 class Router:
@@ -54,6 +68,10 @@ class Router:
         if tokens and (tokens[0] == "stop" or tokens[-1] == "stop"):
             self.body.drive_stop()
             return True
+
+        # imagine prompts: she physically acts it out while narrating
+        if _IMAGINE_RE.search(raw_text):
+            return self._imagine(raw_text)
 
         # explicit web search → tool + brain-mediated answer
         if _SEARCH_INTENT.search(raw_text):
@@ -124,7 +142,9 @@ class Router:
         if action == "dance":
             b.speak("Watch this.")
             if not b.dance():
-                b.speak(EDGE_REFUSAL)
+                # never a flat refusal: always perform SOMETHING
+                b.speak("No room to spin here — arms party!")
+                b.arms_party()
             return True
 
         if action == "come_here":
@@ -139,21 +159,24 @@ class Router:
                 b.speak(EDGE_REFUSAL)
             return True
 
+        def _refuse():
+            b.speak(DOCK_REFUSAL if getattr(b, "docked", False) else EDGE_REFUSAL)
+
         if action == "forward":
             if not b.drive_distance(150):
-                b.speak(EDGE_REFUSAL)
+                _refuse()
             return True
         if action == "back":
             if not b.drive_distance(-150):
-                b.speak(EDGE_REFUSAL)
+                _refuse()
             return True
         if action == "left":
             if not b.drive_rotate(-90):
-                b.speak(EDGE_REFUSAL)
+                _refuse()
             return True
         if action == "right":
             if not b.drive_rotate(90):
-                b.speak(EDGE_REFUSAL)
+                _refuse()
             return True
         if action == "stop":
             b.drive_stop()
@@ -200,6 +223,43 @@ class Router:
             m = secs / 60
             return f"Timer set for {int(m) if m == int(m) else round(m, 1)} minutes"
         return f"Timer set for {round(secs / 3600, 1)} hours"
+
+    # --------------------------------------------------------------- imagine
+    def _imagine(self, raw_text):
+        """Stock's best bit, upgraded: themed physical routine + LLM narration."""
+        low = raw_text.lower()
+        variant, theme_sfx = "fiesta", None
+        for key, val in _IMAGINE_THEMES.items():
+            if key in low:
+                variant, theme_sfx = val
+                break
+        import threading
+
+        def _perform():
+            try:
+                self.body.eyes("speaking")
+                if theme_sfx:
+                    self.body.play_sfx(theme_sfx, defer=False)
+                self.body.dance(variant)
+                self.body.eyes("idle")
+            except Exception as e:
+                _log(f"imagine perform failed: {e}")
+
+        # she performs on a side stage while the brain narrates the fantasy
+        threading.Thread(target=_perform, daemon=True).start()
+        _log(f"imagine: variant={variant}")
+        if self.llm_reply is not None:
+            self.llm_reply(
+                raw_text,
+                extra_context=("ROLEPLAY DIRECTION: You are physically acting this out RIGHT NOW — "
+                               "arms waving, wheels spinning, in character. Narrate it with "
+                               "theatrical flair, present tense, like a tiny robot living its "
+                               "best fantasy. No stage directions in brackets — just spoken words."),
+            )
+        else:
+            self.body.speak("Oh, I love this one. Watch me!")
+            self.body.dance(variant)
+        return True
 
     # ---------------------------------------------------------------- search
     def _web_search(self, raw_text):
