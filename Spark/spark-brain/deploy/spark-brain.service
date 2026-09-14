@@ -1,0 +1,20 @@
+[Unit]
+Description=Spark Brain — Doly companion AI
+After=network-online.target sound.target
+Wants=network-online.target
+
+[Service]
+Type=notify
+NotifyAccess=main
+WorkingDirectory=/opt/spark/app
+ExecStart=/opt/spark/venv/bin/python -m spark
+Restart=always
+RestartSec=5
+# allow generous startup: Vosk model load + mic + hardware init happen before READY=1
+TimeoutStartSec=120
+User=root
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
