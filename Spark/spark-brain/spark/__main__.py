@@ -297,6 +297,21 @@ class Spark:
                         leftover_text = " ".join(leftover)
 
                 if idle_action["act"] == "wander":
+                    # fully charged + docked = hop off and roam the desk like
+                    # a pet. Cooldown so she isn't docking/undocking constantly
+                    pct = self.body.battery_pct()
+                    full = idle_cfg.get("roam_full_pct", 95)
+                    cool = idle_cfg.get("roam_cooldown_s", 1800)
+                    if (idle_cfg.get("roam_enabled", True)
+                            and pct is not None and pct >= full
+                            and time.time() - getattr(self, "_last_auto_roam", 0) > cool
+                            and self.body.is_on_dock()):
+                        self._last_auto_roam = time.time()
+                        log("spark", f"battery {pct}% — fully charged, off to roam")
+                        if self.body._undock():
+                            self.body.speak("All charged up! Let's explore.")
+                        _, next_flourish, next_wander = _reset_idle()
+                        continue
                     log("spark", "idle: exploring")
                     self.body.wander_step()
                     _, next_flourish, next_wander = _reset_idle()

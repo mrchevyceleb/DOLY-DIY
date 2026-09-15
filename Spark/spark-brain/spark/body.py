@@ -1025,13 +1025,23 @@ class Body:
         import random
         try:
             self.mood_eyes(random.choice(self._CURIOS))
-            if random.random() < 0.3:
+            if random.random() < 0.10 and self.anim:
+                self.anim.play("sneeze", blocking=True)  # rare, short, cute
+            elif random.random() < 0.3:
                 ang = random.choice((110, 130, 150))
                 self.arm_angle(ang, speed=25, wait=False)
                 time.sleep(0.4)
                 self.arm_angle(30, speed=25, wait=False)
         except Exception as e:
             _log(f"idle_flourish: {e}")
+
+    def is_on_dock(self):
+        """Reliable dock check: the all-four-void signature. The yaw probe can
+        misread on the grippy charger plate (wheels bite, yaw moves)."""
+        try:
+            return getattr(self, "docked", False) or len(self._edge_gaps()) >= 4
+        except Exception:
+            return getattr(self, "docked", False)
 
     def wander_step(self):
         """Pet-like exploration: ONE safe move + a curious look.
@@ -1043,10 +1053,7 @@ class Body:
                 return False
             if not self._motion_allowed("rotate"):
                 return False
-            # the probe can read "not docked" on the grippy charger plate
-            # (wheels bite, yaw moves) — all-four void is the reliable signal
-            on_dock = getattr(self, "docked", False) or len(self._edge_gaps()) >= 4
-            if on_dock:
+            if self.is_on_dock():
                 # on the dock: eyes and arms only, never wheels
                 if random.random() < 0.5:
                     self.idle_flourish()
@@ -1056,6 +1063,15 @@ class Body:
                     self.arm_angle(20, speed=45)
                     self.idle_flourish()
                 return True
+            # roam radius: dead-reckoning drifts, so straying too far from the
+            # dock means it's time to head home while home is still findable
+            if self._pose is not None:
+                import math
+                radius = self.cfg.get("idle", {}).get("roam_radius_mm", 700)
+                if math.hypot(self._pose[0], self._pose[1]) > radius:
+                    _log("wander: roam radius reached — heading home")
+                    self.go_home()
+                    return True
             move = random.choice(["look", "turn", "scoot", "turn", "scoot"])
             if move == "look":
                 self.idle_flourish()
