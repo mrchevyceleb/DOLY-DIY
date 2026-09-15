@@ -258,6 +258,8 @@ class Body:
             self._react_debounce[key] = now
             table = self._TOF_REACTIONS if family == "tof" else self._IMU_REACTIONS
             expr, sfx, motion = table.get(kind, (None, None, None))
+            if sfx and (getattr(self, "docked", False) or len(self._edge_gaps()) >= 4):
+                sfx = None  # docked = quiet time: eyes react, mouth stays shut
             _log(f"react {key}: expr={expr} sfx={sfx} motion={motion}")
             if sfx:
                 sfx_path = self.cfg.get("sounds", {}).get("sfx_map", {}).get(sfx)
@@ -1023,9 +1025,7 @@ class Body:
         import random
         try:
             self.mood_eyes(random.choice(self._CURIOS))
-            if random.random() < 0.08 and self.anim:
-                self.anim.play("sneeze", blocking=True)  # rare, short, cute
-            elif random.random() < 0.3:
+            if random.random() < 0.3:
                 ang = random.choice((110, 130, 150))
                 self.arm_angle(ang, speed=25, wait=False)
                 time.sleep(0.4)
