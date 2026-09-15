@@ -296,8 +296,36 @@ class Body:
         self._edge = edge
 
     # ------------------------------------------------------------------- TTS
+    def _produce_speech(self, text):
+        """Synthesize text into TTS_WAV. Downloaded Piper voice when
+        tts.piper_model is configured, stock doly_tts otherwise."""
+        model = self.cfg.get("tts", {}).get("piper_model")
+        if model:
+            self._produce_piper(text, model)
+        else:
+            self._tts.produce(text)
+
+    def _produce_piper(self, text, model):
+        """Synthesize via the piper binary (any voice from the piper library)."""
+        import subprocess
+        tts_cfg = self.cfg.get("tts", {})
+        cmd = [tts_cfg.get("piper_bin", "/.doly/libs/piper/lib/piper"),
+               "--model", model,
+               "--espeak_data", tts_cfg.get("piper_espeak_data",
+                                            "/.doly/libs/piper/lib/espeak-ng-data"),
+               "--output_file", TTS_WAV, "-q"]
+        if tts_cfg.get("piper_length_scale"):
+            cmd += ["--length_scale", str(tts_cfg["piper_length_scale"])]
+        env = dict(os.environ)
+        env["LD_LIBRARY_PATH"] = "/.doly/libs/piper/lib:" + env.get("LD_LIBRARY_PATH", "")
+        proc = subprocess.run(cmd, input=text, capture_output=True, text=True,
+                              timeout=30, env=env)
+        if proc.returncode != 0:
+            raise RuntimeError(f"piper rc={proc.returncode}: {proc.stderr[:120]}")
+
     def speak(self, text, wait=True):
-        """Say something with her stock voice. Returns False if muted."""
+        """Say something out loud (piper voice if configured, else stock).
+        Returns False if muted."""
         text = (text or "").strip()
         if not text:
             return True
@@ -311,7 +339,7 @@ class Body:
             try:
                 # strip anything the synth would read literally
                 text = re.sub(r"[*_`#>]+", "", text)
-                self._tts.produce(text)
+                self._produce_speech(text)
                 self._snd.play(TTS_WAV, self._next_id())  # (file, block_id)
                 if wait:
                     dur = self._wav_duration(TTS_WAV)
@@ -371,7 +399,7 @@ class Body:
                 if not text:
                     continue
                 tmp = f"/tmp/spark_tts_{i}.wav"
-                self._tts.produce(text)          # writes TTS_WAV (blocking)
+                self._produce_speech(text)      # writes TTS_WAV (blocking)
                 shutil.copyfile(TTS_WAV, tmp)
                 # wait for the previous sentence to finish playing
                 now = time.time()

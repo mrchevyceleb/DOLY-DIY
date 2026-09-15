@@ -25,7 +25,8 @@
   },
   "tts": {
     "voice_model": 1,
-    "volume": 1
+    "volume": 1,
+    "piper_model": "/.doly/data/piper/glados.onnx"
   },
   "sounds": {
     "volume": 90,
