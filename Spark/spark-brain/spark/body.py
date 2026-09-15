@@ -450,9 +450,6 @@ class Body:
             _log(f"preflight poll failed: {e}")
             return []  # poll bug must not brick motion — events still guard
 
-    def _edge_gap_now(self):
-        return bool(self._edge_gaps())
-
     def _motion_allowed(self, direction="forward"):
         """Direction-aware safety: a cliff BEHIND her must not block forward
         motion (that bug trapped her on the dock and froze her near desk
@@ -468,6 +465,11 @@ class Body:
         gaps = self._edge_gaps()
         if not gaps:
             return True
+        if direction == "rotate" and len(gaps) >= 4:
+            # all-four-void is the dock signature — and the dock probe PROVED
+            # in-place pivoting is safe there. Dance away on the charger.
+            _log(f"dock pivot allowed (gaps={gaps})")
+            return True
         front = any(g.startswith("Front") for g in gaps)
         back = any(g.startswith("Back") for g in gaps)
         blocked = (front and direction in ("forward", "rotate")) or \
@@ -479,19 +481,29 @@ class Body:
         _log(f"preflight pass ({direction}): tolerating {gaps}")
         return True
 
-    def _watch_motion(self):
-        """While a drive command runs, poll edges and hard-stop on gap."""
+    def _watch_motion(self, direction="forward"):
+        """While a drive command runs, poll edges and hard-stop on a gap that
+        matters for THIS direction. Mirrors _motion_allowed — including its
+        dock-pivot rule (all-four void on a rotate is the dock signature:
+        let her spin, killing it here undoes the preflight allowance)."""
         def _run():
             try:
                 deadline = time.time() + 15
                 while time.time() < deadline:
                     if self._drive.get_state() != self._drive.DriveState.Running:
                         return
-                    if self._edge_gap_now():
-                        self._gap_lock_until = max(self._gap_lock_until, time.time() + 3.0)
-                        self.drive_stop()
-                        _log("watchdog: stopped mid-motion (edge)")
-                        return
+                    gaps = self._edge_gaps()
+                    if gaps:
+                        front = any(g.startswith("Front") for g in gaps)
+                        back = any(g.startswith("Back") for g in gaps)
+                        dock_spin = direction == "rotate" and len(gaps) >= 4
+                        danger = (front and direction in ("forward", "rotate")) or \
+                                 (back and direction == "backward")
+                        if danger and not dock_spin:
+                            self._gap_lock_until = max(self._gap_lock_until, time.time() + 3.0)
+                            self.drive_stop()
+                            _log(f"watchdog: stopped mid-motion ({direction}, gaps={gaps})")
+                            return
                     time.sleep(0.03)
             except Exception as e:
                 _log(f"watchdog error: {e}")
@@ -657,7 +669,7 @@ class Body:
         try:
             # SDK distance is unsigned; direction is the to_forward flag
             self._drive.go_distance(self._next_id(), abs(mm), speed, mm >= 0, True)
-            self._watch_motion()
+            self._watch_motion("forward" if mm >= 0 else "backward")
             return True
         except Exception as e:
             _log(f"drive_distance failed: {e}")
@@ -677,7 +689,7 @@ class Body:
             return False
         try:
             self._drive.go_rotate(self._next_id(), degrees, False, speed, True, True)
-            self._watch_motion()
+            self._watch_motion("rotate")
             return True
         except Exception as e:
             _log(f"drive_rotate failed: {e}")
@@ -811,7 +823,10 @@ class Body:
                 return False
             if not self._motion_allowed("rotate"):
                 return False
-            if getattr(self, "docked", False):
+            # the probe can read "not docked" on the grippy charger plate
+            # (wheels bite, yaw moves) — all-four void is the reliable signal
+            on_dock = getattr(self, "docked", False) or len(self._edge_gaps()) >= 4
+            if on_dock:
                 # on the dock: eyes and arms only, never wheels
                 if random.random() < 0.5:
                     self.idle_flourish()
