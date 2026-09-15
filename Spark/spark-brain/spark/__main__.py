@@ -7,6 +7,7 @@ Modes:
 """
 import argparse
 import os
+import re
 import socket
 import subprocess
 import sys
@@ -20,6 +21,29 @@ from .memory import Memory
 from .router import Router
 
 OFFLINE_LINE = "My big brain is offline right now, but I can still take commands."
+
+# --- ASR noise guards -------------------------------------------------------
+# whisper describes non-speech audio parenthetically: '(beep)', '(water
+# splashing)', '[music]'. Those are not user utterances — never converse them.
+_SOUND_EVENT_RE = re.compile(r"^\s*[(\[][^()\[\]\n]*[)\]]\s*\.?\s*$")
+# classic whisper hallucinations on quiet/noisy audio. Only distrust them
+# when the capture itself was weak (a loud, clear "yeah" follow-up is real).
+_ASR_HALLUCINATIONS = {
+    "huh", "huh?", "hmm", "hmm.", "yeah", "yeah.", "okay", "okay.",
+    "thank you", "thank you.", "thanks", "thanks.",
+    "thank you for watching", "thanks for watching",
+    "you", "bye", "bye.", "oh", "oh.", "ah", "ah.", "um", "uh", "...",
+}
+_HALLUCINATION_MIN_PEAK = 2500  # 16-bit amplitude; ambient noise peaks ~1000
+
+
+def _pcm_peak(pcm):
+    """Peak absolute amplitude of 16-bit LE mono PCM (fast, no numpy)."""
+    import array
+    if not pcm:
+        return 0
+    a = array.array("h", pcm[:len(pcm) // 2 * 2])
+    return max(max(a, default=0), -min(a, default=0))
 
 
 def log(tag, msg):
@@ -257,6 +281,7 @@ class Spark:
 
                 if leftover_text:
                     text = leftover_text
+                    pcm = b""
                 else:
                     recognizer.begin()
                     pcm = record_utterance(
@@ -275,6 +300,18 @@ class Spark:
                     else:
                         text = recognizer.finish().strip()
                 self.listening = False
+
+                # noise guards: sound events and weak hallucinations are not
+                # user speech — drop them without counting a "miss"
+                if text and _SOUND_EVENT_RE.match(text):
+                    log("spark", f"ignored sound event: '{text}'")
+                    self.body.eyes("idle")
+                    continue
+                if (text and pcm and text.lower() in _ASR_HALLUCINATIONS
+                        and _pcm_peak(pcm) < _HALLUCINATION_MIN_PEAK):
+                    log("spark", f"ignored weak hallucination: '{text}'")
+                    self.body.eyes("idle")
+                    continue
 
                 if not text:
                     self.body.eyes("idle")
