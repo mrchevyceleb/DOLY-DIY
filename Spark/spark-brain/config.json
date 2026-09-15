@@ -20,7 +20,8 @@
   "asr": {
     "model_path": "/opt/spark/vosk-model-small-en-us-0.15",
     "sample_rate": 16000,
-    "whisper_model": "/opt/spark/whisper.cpp/models/ggml-tiny.en.bin"
+    "whisper_model": "/opt/spark/whisper.cpp/models/ggml-tiny.en.bin",
+    "server_url": "http://192.168.50.204:8399/inference"
   },
   "tts": {
     "voice_model": 1,

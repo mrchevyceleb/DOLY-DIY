@@ -4,6 +4,7 @@ Accumulates finalized segments across mid-utterance pauses so nothing
 the user said is lost (Vosk finalizes on every silence).
 """
 import json
+import time
 import sys
 
 
@@ -54,6 +55,7 @@ class WhisperASR:
 
     def __init__(self, cfg):
         import os
+        self.cfg = cfg
         base = "/opt/spark/whisper.cpp"
         self.bin = os.path.join(base, "build", "bin", "whisper-cli")
         if not os.path.exists(self.bin):
@@ -70,14 +72,11 @@ class WhisperASR:
         """Drop leading/trailing quiet frames — whisper transcribes only
         actual speech, cutting wall-clock time substantially."""
         try:
-            n = len(pcm) // frame_bytes
-            rms = []
-            for i in range(n):
-                seg = pcm[i * frame_bytes:(i + 1) * frame_bytes]
-                acc = sum((seg[j] << 8 | seg[j + 1]) ** 2 if False else 0 for j in range(0, 0))  # placeholder
-                rms.append(0)
-            # cheap rms via struct
             import struct as _st
+            n = len(pcm) // frame_bytes
+            if n == 0:
+                return pcm
+            rms = []
             for i in range(n):
                 seg = pcm[i * frame_bytes:(i + 1) * frame_bytes]
                 samples = _st.unpack("<%dh" % (len(seg) // 2), seg)
@@ -96,13 +95,49 @@ class WhisperASR:
         import os
         return bool(self.model) and os.path.exists(self.bin)
 
-    def transcribe_pcm(self, pcm, sample_rate=16000):
-        """Raw 16-bit mono PCM -> text. Returns '' on failure/empty."""
+    def _transcribe_http(self, pcm, sample_rate=16000):
+        """Moria's whisper server (~0.3s) via curl (bulletproof multipart)."""
         import os
         import subprocess
         import tempfile
         import wave
-        if not self.available or not pcm:
+        fd, path = tempfile.mkstemp(suffix=".wav", dir="/tmp")
+        os.close(fd)
+        try:
+            w = wave.open(path, "wb")
+            w.setnchannels(1); w.setsampwidth(2); w.setframerate(sample_rate)
+            w.writeframes(pcm); w.close()
+            url = self.cfg.get("asr", {}).get("server_url",
+                                             "http://192.168.50.204:8399/inference")
+            out = subprocess.run(
+                ["curl", "-s", "-m", "8", "-X", "POST", url,
+                 "-F", "file=" + chr(64) + path, "-F", "response_format=text"],
+                capture_output=True, text=True, timeout=12)
+            return " ".join(out.stdout.split())
+        finally:
+            try:
+                os.unlink(path)
+            except Exception:
+                pass
+
+    def transcribe_pcm(self, pcm, sample_rate=16000):
+        """Raw 16-bit mono PCM -> text. Moria first, local whisper fallback."""
+        import os
+        import subprocess
+        import tempfile
+        import wave
+        if not pcm:
+            return ""
+        if self.cfg.get("asr", {}).get("server_url"):
+            try:
+                t0 = time.time()
+                text = self._transcribe_http(self._trim_silence(pcm), sample_rate)
+                if text:
+                    print(f"[asr] moria {time.time()-t0:.2f}s: '{text}'", file=sys.stderr, flush=True)
+                    return text
+            except Exception as e:
+                print(f"[asr] moria server failed: {e}", file=sys.stderr, flush=True)
+        if not self.available:
             return ""
         fd, path = tempfile.mkstemp(suffix=".wav", dir="/tmp")
         os.close(fd)
