@@ -125,25 +125,25 @@ class Spark:
                 tstate["down_at"] = now
                 return
             dur = now - tstate["down_at"]
-            sfx_map = self.cfg.get("sounds", {}).get("sfx_map", {})
             if dur >= 2.5:  # long-press mood
                 self.body.mood_eyes("IRRITATED")
                 self.body._bump_mood(-1)
-                self.body.play_sfx(sfx_map.get("debuff", ""), defer=False)
+                self.body.queue_anim("angry1_1")
                 log("spark", "long-press: grumpy")
                 return
-            if dur >= 0.6:  # petting -> happiness escalation
+            if dur >= 0.6:  # petting -> stock petting animations, escalating
                 self.body._bump_mood(1)
                 tstate["pets"] = [t for t in tstate["pets"] if now - t < 30] + [now]
                 n = len(tstate["pets"])
                 if n >= 4:
                     self.body.mood_eyes("HEARTS")
-                    self.body.play_sfx(sfx_map.get("collect", ""), defer=False)
+                    self.body.queue_anim("petting3")
                 elif n >= 2:
                     self.body.mood_eyes("SPARKLING")
-                    self.body.play_sfx(sfx_map.get("pet", ""), defer=False)
+                    self.body.queue_anim("petting2")
                 else:
-                    self.body.pet_pulse()
+                    self.body.mood_eyes("HAPPY")
+                    self.body.queue_anim("petting1")
                 log("spark", f"pet x{n}: happy")
                 return
             # quick tap -> talk
@@ -162,6 +162,34 @@ class Spark:
             self.body.dispose()
         except Exception:
             pass
+
+    def _low_battery_check(self, idle_cfg):
+        """Low battery -> she takes herself home to charge (stock behavior).
+        Only when she knows where home is and isn't already on the dock."""
+        try:
+            pct = self.body.battery_pct()
+            gaps = self.body._edge_gaps()
+            if len(gaps) >= 3:
+                # dock signature: anchor home. 3-void plates exist (flaky
+                # sensor), so allow 3 after two consecutive reads — she sits
+                # on her charger for hours, never at a cliff corner that long
+                self._beacon_streak = getattr(self, "_beacon_streak", 0) + 1
+                if self.body._pose is None and (len(gaps) >= 4 or self._beacon_streak >= 2):
+                    self.body._pose = [0.0, 0.0, 0.0]
+                    log("spark", "home beacon: dock signature — home re-anchored")
+                return  # on the charger
+            self._beacon_streak = 0
+            if pct is None or pct >= idle_cfg.get("low_battery_pct", 15):
+                return
+            log("spark", f"battery {pct}% — heading home to charge")
+            self.body.speak(f"My battery is at {pct} percent. I'm going home to charge.")
+            result = self.body.go_home()
+            if result == "unknown":
+                self.body.speak("I don't remember where home is — please carry me to my dock.")
+            elif result == "lost":
+                self.body.speak("I couldn't find my dock — a little help, please?")
+        except Exception as e:
+            log("spark", f"battery check failed: {e}")
 
     # ---------------------------------------------------------------- voice
     def voice_loop(self):
@@ -192,6 +220,9 @@ class Spark:
         # boot dock probe: she usually wakes up on her charger — know it now
         try:
             self.body.dock_probe()
+            if len(self.body._edge_gaps()) >= 4:
+                self.body._pose = [0.0, 0.0, 0.0]
+                log("spark", "booted on dock — home position known")
         except Exception as e:
             log("spark", f"dock probe at boot failed: {e}")
 
@@ -202,6 +233,7 @@ class Spark:
                 t = time.time()
                 return (t, t + idle_cfg.get("flourish_s", 50), t + idle_cfg.get("wander_s", 240))
             _, next_flourish, next_wander = _reset_idle()
+            next_battery = time.time() + idle_cfg.get("battery_check_s", 240)
             idle_action = {"act": None}
 
             def _idle_or_tap():
@@ -211,6 +243,9 @@ class Spark:
                 now = time.time()
                 if now >= next_wander:
                     idle_action["act"] = "wander"
+                    return True
+                if now >= next_battery:
+                    idle_action["act"] = "battery"
                     return True
                 if now >= next_flourish:
                     idle_action["act"] = "flourish"
@@ -264,6 +299,11 @@ class Spark:
                 if idle_action["act"] == "wander":
                     log("spark", "idle: exploring")
                     self.body.wander_step()
+                    _, next_flourish, next_wander = _reset_idle()
+                    continue
+                if idle_action["act"] == "battery":
+                    next_battery = time.time() + idle_cfg.get("battery_retry_s", 900)
+                    self._low_battery_check(idle_cfg)
                     _, next_flourish, next_wander = _reset_idle()
                     continue
                 if idle_action["act"] == "flourish":
@@ -325,6 +365,7 @@ class Spark:
 
                 log("spark", f"heard: '{text}'")
                 self.converse(text)
+                self.body.drain_anims()  # touch events during the reply
                 _, next_flourish, next_wander = _reset_idle()
                 idle_action["act"] = None
                 # open the follow-up window after every answer
@@ -351,6 +392,7 @@ class Spark:
                 return
             for f in mic.frames():
                 self.body.flush_sfx()  # main-thread playback of queued sfx
+                self.body.drain_anims()  # queued petting/mood animations
                 now = time.time()
                 if now >= blink_state["next"]:
                     self.body.blink()

@@ -23,8 +23,12 @@ COMMANDS = [
                                        "how's the weather", "is it going to rain"]},
     {"action": "photo", "phrases": ["take a photo", "take a picture", "say cheese",
                                      "take my picture"]},
-    {"action": "fist_bump", "phrases": ["fist bump", "give me a fist bump", "bump it",
-                                      "give me a five", "high five", "give me five"]},
+    {"action": "fist_bump", "phrases": ["fist bump", "give me a fist bump", "bump it"]},
+    {"action": "high_five", "phrases": ["high five", "give me a five", "give me five",
+                                        "give me a high five", "gimme five", "up top"]},
+    {"action": "go_home", "phrases": ["go home", "return home", "go back home", "head home",
+                                      "go back to your dock", "go to your dock", "back to your dock",
+                                      "dock yourself", "go charge", "go and charge", "go to bed"]},
     {"action": "dance", "phrases": ["dance", "do a dance", "let's dance", "do a little dance",
                                      "show me your moves"]},
     {"action": "come_here", "phrases": ["come here", "come to me", "come over here",
@@ -49,7 +53,7 @@ MATCH_THRESHOLD = 0.72
 # Motion and other consequential actions need stronger confidence, and
 # never fire from negated or embedded speech ("don't dance", "back to the future").
 MOTION_ACTIONS = {"dance", "come_here", "spin", "forward", "back", "left", "right",
-                  "stop", "fist_bump", "sleep", "photo"}
+                  "stop", "fist_bump", "high_five", "sleep", "photo", "go_home"}
 MOTION_THRESHOLD = 0.82
 
 # politeness/filler tokens stripped before matching ("please dance" -> "dance")

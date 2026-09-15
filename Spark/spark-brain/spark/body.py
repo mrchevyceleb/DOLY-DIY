@@ -10,7 +10,8 @@ import threading
 import time
 import wave
 
-TTS_WAV = "/tmp/spark_tts.wav"
+TTS_WAV = f"/tmp/spark_tts_{os.getuid()}.wav"  # per-UID: service (root) and
+# human test sessions (doly) must not fight over one sticky-bit /tmp file
 
 
 def _log(msg):
@@ -30,6 +31,14 @@ class Body:
         self._muted_sink = None  # text mode prints instead of speaking
         import collections
         self._sfx_queue = collections.deque()
+        self._anim_requests = collections.deque()
+        # homing: software dead-reckoning (doly_drive.get_position is broken
+        # in the pybind layer, so spark tracks its own estimate)
+        self._pose = None          # [x_mm, y_mm, heading_deg] or None = unknown
+        self._homing = False
+        self._leaving_home = False
+        self._home_arrived = False
+        self.anim = None           # AnimPlayer, created in _init_all
         if self.hw:
             self._init_all()
 
@@ -71,6 +80,14 @@ class Body:
         self._try("imu", self._init_imu)
         self.react_enabled = True
         self._react_debounce = {}
+        from .anim import AnimPlayer
+        self.anim = AnimPlayer(self, self.cfg)
+        try:
+            if self.has.get("edge") and len(self._edge_gaps()) >= 4:
+                self._pose = [0.0, 0.0, 0.0]  # booted on the dock: home = origin
+                _log("booted on dock — home position known")
+        except Exception:
+            pass
         _log(f"online subsystems: {[k for k, v in self.has.items() if v]}")
 
     def _try(self, name, fn):
@@ -233,7 +250,10 @@ class Body:
                 return
             now = time.time()
             key = f"{family}:{kind}"
-            if now - self._react_debounce.get(key, 0) < 3.0:
+            # "Move" fires on plate vibration every few seconds — throttle it
+            # hard or she stares LOOK_AHEAD all day instead of idling calmly
+            debounce = 30.0 if kind == "Move" else 3.0
+            if now - self._react_debounce.get(key, 0) < debounce:
                 return
             self._react_debounce[key] = now
             table = self._TOF_REACTIONS if family == "tof" else self._IMU_REACTIONS
@@ -274,11 +294,21 @@ class Body:
             raise RuntimeError(f"edge init rc={rc}")
 
         def _on_gap(direction):
-            # EMERGENCY: kill motion, lock further motion, react
             dir_name = str(direction).split(".")[-1]
+            if self._homing:
+                # homing treats the plate void as the TARGET, not a hazard
+                if dir_name == "All":      # all four void = fully on the plate
+                    self._home_arrived = True
+                    self.drive_stop()
+                return
+            if self._leaving_home:
+                return                     # crossing the plate lip on purpose
+            # EMERGENCY: kill motion, lock further motion, react
             lock_s = 10.0 if dir_name == "All" else 3.0  # All = airborne/off-edge
             self._gap_lock_until = max(self._gap_lock_until, time.time() + lock_s)
             _log(f"GAP DETECTED dir={dir_name} — motion locked {lock_s}s")
+            if dir_name == "All":
+                self._pose = None          # airborne/picked up: position lost
             try:
                 self.drive_stop()
             except Exception:
@@ -306,20 +336,31 @@ class Body:
             self._tts.produce(text)
 
     def _produce_piper(self, text, model):
-        """Synthesize via the piper binary (any voice from the piper library)."""
+        """Synthesize via piper: the stock binary by default, or the modern
+        piper-tts module (tts.piper_module_python) for voices whose phoneme
+        maps need multi-codepoint support (e.g. Wheatley)."""
         import subprocess
         tts_cfg = self.cfg.get("tts", {})
-        cmd = [tts_cfg.get("piper_bin", "/.doly/libs/piper/lib/piper"),
-               "--model", model,
-               "--espeak_data", tts_cfg.get("piper_espeak_data",
-                                            "/.doly/libs/piper/lib/espeak-ng-data"),
-               "--output_file", TTS_WAV, "-q"]
-        if tts_cfg.get("piper_length_scale"):
-            cmd += ["--length_scale", str(tts_cfg["piper_length_scale"])]
-        env = dict(os.environ)
-        env["LD_LIBRARY_PATH"] = "/.doly/libs/piper/lib:" + env.get("LD_LIBRARY_PATH", "")
-        proc = subprocess.run(cmd, input=text, capture_output=True, text=True,
-                              timeout=30, env=env)
+        py = tts_cfg.get("piper_module_python")
+        if py:
+            cmd = [py, "-m", "piper", "--model", model,
+                   "--output-file", TTS_WAV]
+            if tts_cfg.get("piper_length_scale"):
+                cmd += ["--length-scale", str(tts_cfg["piper_length_scale"])]
+            proc = subprocess.run(cmd, input=text, capture_output=True, text=True,
+                                  timeout=30)
+        else:
+            cmd = [tts_cfg.get("piper_bin", "/.doly/libs/piper/lib/piper"),
+                   "--model", model,
+                   "--espeak_data", tts_cfg.get("piper_espeak_data",
+                                                "/.doly/libs/piper/lib/espeak-ng-data"),
+                   "--output_file", TTS_WAV, "-q"]
+            if tts_cfg.get("piper_length_scale"):
+                cmd += ["--length_scale", str(tts_cfg["piper_length_scale"])]
+            env = dict(os.environ)
+            env["LD_LIBRARY_PATH"] = "/.doly/libs/piper/lib:" + env.get("LD_LIBRARY_PATH", "")
+            proc = subprocess.run(cmd, input=text, capture_output=True, text=True,
+                                  timeout=30, env=env)
         if proc.returncode != 0:
             raise RuntimeError(f"piper rc={proc.returncode}: {proc.stderr[:120]}")
 
@@ -398,7 +439,7 @@ class Body:
                 text = re.sub(r"[*_`#>]+", "", (sent or "").strip())
                 if not text:
                     continue
-                tmp = f"/tmp/spark_tts_{i}.wav"
+                tmp = f"/tmp/spark_tts_{os.getuid()}_{i}.wav"
                 self._produce_speech(text)      # writes TTS_WAV (blocking)
                 shutil.copyfile(TTS_WAV, tmp)
                 # wait for the previous sentence to finish playing
@@ -460,6 +501,8 @@ class Body:
     def ensure_mobility(self):
         """True if she can actually drive. Re-probes when docked (she may
         have been lifted off)."""
+        if self._homing or self._leaving_home:
+            return True  # mid-ritual: the ritual itself manages safety
         if not getattr(self, "docked", False):
             return True
         return not self.dock_probe()
@@ -487,6 +530,8 @@ class Body:
         """
         if not self.has.get("edge"):
             return True
+        if (self._homing or self._leaving_home) and direction in ("forward", "rotate"):
+            return True  # the plate lip (front void) is the TARGET right now
         if time.time() < getattr(self, "_gap_lock_until", 0):
             _log(f"motion blocked ({direction}): gap lock active")
             return False
@@ -518,6 +563,9 @@ class Body:
             try:
                 deadline = time.time() + 15
                 while time.time() < deadline:
+                    if self._homing or self._leaving_home:
+                        _log(f"watchdog: idle (homing={self._homing} leaving={self._leaving_home})")
+                        return  # homing rituals manage their own arrival/stops
                     if self._drive.get_state() != self._drive.DriveState.Running:
                         return
                     gaps = self._edge_gaps()
@@ -580,7 +628,7 @@ class Body:
     # ------------------------------------------------------------------ eyes
     _EXPR_CANDIDATES = {
         "listening": ["ATTENTION", "WAKE_WORD", "LOOK_AHEAD"],
-        "thinking": ["THINK", "CONCENTRATE", "SCAN"],
+        "thinking": ["SCAN", "CONCENTRATE", "THINK"],
         "speaking": ["HAPPY", "CHEERFUL", "EXCITED"],
         "idle": ["BLINK", "FINE", "BLINK_ONLY"],
         "sleepy": ["SLEEPY", "SLEEP", "DROWSY"],
@@ -680,24 +728,36 @@ class Body:
         return self.arm_angle(20)
 
     def fist_bump(self):
+        if self.anim and self.anim.play("fist_bump", blocking=True):
+            return True
         self.arms_up()
         time.sleep(0.3)
         self.arm_angle(90)
+        return True
+
+    def high_five(self):
+        if self.anim and self.anim.play("high_five", blocking=True):
+            return True
+        self.arms_up()
         return True
 
     # ----------------------------------------------------------------- drive
     def drive_distance(self, mm, speed=45):
         if not self.has.get("drive"):
             return False
-        if not self.ensure_mobility():
-            _log("drive blocked: docked")
-            return False
-        if not self._motion_allowed("forward" if mm >= 0 else "backward"):
+        mobile = self.ensure_mobility()
+        if not mobile or not self._motion_allowed("forward" if mm >= 0 else "backward"):
+            # 3+ voids is the plate signature (one sensor reads flaky on some
+            # plates, so all-four is too strict): forward command = leave home
+            if mm > 0 and len(self._edge_gaps()) >= 3 and self._undock(then_mm=mm, speed=speed):
+                return True  # the ritual drove her off AND ran the command
+            _log("drive blocked: docked or edge")
             return False
         try:
             # SDK distance is unsigned; direction is the to_forward flag
             self._drive.go_distance(self._next_id(), abs(mm), speed, mm >= 0, True)
             self._watch_motion("forward" if mm >= 0 else "backward")
+            self._pose_update(dist_mm=mm)
             return True
         except Exception as e:
             _log(f"drive_distance failed: {e}")
@@ -718,6 +778,7 @@ class Body:
         try:
             self._drive.go_rotate(self._next_id(), degrees, False, speed, True, True)
             self._watch_motion("rotate")
+            self._pose_update(rot_deg=degrees)
             return True
         except Exception as e:
             _log(f"drive_rotate failed: {e}")
@@ -736,71 +797,198 @@ class Body:
                 ok = False
         return ok
 
-    _DANCES = {
-        "fiesta": {"music": "/.doly/sounds/music/salsa.wav", "sfx": None,
-                   "colors": ("Magenta", "Cyan", "Yellow", "Green"),
-                   "moves": ("spin_big",)},
-        "groove": {"music": "/.doly/sounds/sfx/drum roll (1).wav", "sfx": None,
-                   "colors": ("Cyan", "Blue", "Purple"),
-                   "moves": ("arms_wave", "wiggle")},
-        "party": {"music": "/.doly/sounds/music/birthday.wav", "sfx": "collect",
-                  "colors": ("Yellow", "Pink", "Orange", "Cyan"),
-                  "moves": ("bounce", "spin_small", "arms_wave")},
-    }
+    def stop_everything(self):
+        """Emergency stop for the STOP command: animations, homing, wheels."""
+        self._homing = False
+        self._leaving_home = False
+        if self.anim:
+            self.anim.stop()
+        return self.drive_stop()
+
+    # --------------------------------------------------------------- homing
+    def _pose_update(self, dist_mm=0.0, rot_deg=0.0):
+        if self._pose is None:
+            return
+        import math
+        if dist_mm:
+            rad = math.radians(self._pose[2])
+            self._pose[0] += dist_mm * math.cos(rad)
+            self._pose[1] += dist_mm * math.sin(rad)
+        if rot_deg:
+            self._pose[2] = (self._pose[2] + rot_deg + 180) % 360 - 180
+
+    def _wait_drive_idle(self, timeout=15.0):
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            if self._home_arrived:
+                return
+            try:
+                if self._drive.get_state() != self._drive.DriveState.Running:
+                    return
+            except Exception:
+                return
+            time.sleep(0.05)
+
+    def _undock(self, then_mm=0, speed=45):
+        """Drive off the charging plate: stock leave_home ritual, a clear-the-
+        lip extension if needed, then the caller's original command — ALL
+        inside one leaving-home flag window, so the watchdog never sees the
+        plate void as a cliff mid-ritual."""
+        if self._leaving_home or not self.anim:
+            return False
+        _log("undocking: leave_home ritual")
+        self._leaving_home = True
+        self._pose = [0.0, 0.0, 0.0]  # home = plate; drives below track offset
+        try:
+            if not self.anim.play("leave_home", blocking=True):
+                self._pose = None
+                return False
+            self.docked = False
+            if len(self._edge_gaps()) >= 3:
+                _log("undock: still over the plate — extending 120mm")
+                self._drive.go_distance(self._next_id(), 120, 25, True, True)
+                self._wait_drive_idle(timeout=8)
+                self._pose_update(dist_mm=120)
+            if then_mm:
+                self._drive.go_distance(self._next_id(), abs(then_mm), speed,
+                                        then_mm >= 0, True)
+                self._watch_motion("forward" if then_mm >= 0 else "backward")
+                self._pose_update(dist_mm=then_mm)
+            return True
+        finally:
+            self._leaving_home = False
+            _log(f"undock complete: gaps={self._edge_gaps()}")
+
+    def go_home(self):
+        """Drive back to the charging dock: dead-reckoning for the bearing,
+        the edge sensors' all-four-void as the plate detector (the dock IS a
+        void signature). Bounded approach so a wrong bearing ends in a safe
+        abort, never a fall. Returns 'already'|'arrived'|'lost'|'unknown'."""
+        import math
+        if self._homing:
+            return "busy"
+        try:
+            if len(self._edge_gaps()) >= 4:
+                self._pose = [0.0, 0.0, 0.0]
+                if self.anim:
+                    self.anim.play("at_home", blocking=True)
+                return "already"
+        except Exception:
+            pass
+        if self._pose is None:
+            return "unknown"
+        self._homing = True
+        self._home_arrived = False
+        try:
+            x, y, h = self._pose
+            dist = math.hypot(x, y)
+            _log(f"go_home: pose=({x:.0f},{y:.0f},{h:.0f}) dist={dist:.0f}")
+            if dist > 80:
+                # face home: bearing of the origin relative to current heading
+                target = math.degrees(math.atan2(-y, -x))
+                turn = (target - h + 180) % 360 - 180
+                self.drive_rotate(turn, speed=30)
+                self._wait_drive_idle(timeout=10)
+            # approach in short segments, slow. Front void = maybe the plate;
+            # all-four void = definitely on it. A front void that never
+            # becomes all-four within 120mm = the wrong edge -> abort.
+            budget = dist * 1.5 + 200
+            driven = 0.0
+            creeps = 0
+            while budget > 0 and not self._home_arrived:
+                gaps = self._edge_gaps()
+                front_void = any(g.startswith("Front") for g in gaps)
+                if len(gaps) >= 4 or (front_void and len(gaps) >= 3):
+                    self._home_arrived = True
+                    break
+                if front_void:
+                    # front void BEFORE the dock should be in reach = wrong
+                    # edge. NEVER drive into it — abort immediately.
+                    if driven < dist * 0.6:
+                        _log("go_home: front void before target window — wrong edge, aborting")
+                        break
+                    # in the target window: it MIGHT be the plate lip. Creep
+                    # in tiny steps, stopping the instant the void doesn't
+                    # become the all-four plate signature.
+                    creeps += 1
+                    if creeps > 4:
+                        _log("go_home: void never became the plate — aborting")
+                        break
+                    step = 15
+                else:
+                    creeps = 0
+                    step = min(40, budget)
+                self.drive_distance(step, speed=18)
+                # poll DURING the drive — a blind 100mm segment is how she
+                # falls. 30ms cadence, same as the watchdog.
+                t_end = time.time() + 6
+                while time.time() < t_end:
+                    if self._home_arrived:
+                        break
+                    g2 = self._edge_gaps()
+                    if len(g2) >= 4:
+                        self._home_arrived = True
+                        self.drive_stop()
+                        break
+                    fv = any(g.startswith("Front") for g in g2)
+                    if fv and step > 15:  # big step meeting a void: stop NOW
+                        self.drive_stop()
+                        break
+                    if self._drive.get_state() != self._drive.DriveState.Running:
+                        break
+                    time.sleep(0.03)
+                self.drive_stop()
+                budget -= step
+                driven += step
+            self.drive_stop()
+            if self._home_arrived:
+                self._pose = [0.0, 0.0, 0.0]
+                if len(self._edge_gaps()) >= 4:
+                    self.docked = True  # only the full signature blocks motion
+                _log("go_home: arrived on the plate")
+                if self.anim:
+                    self.anim.play("at_home", blocking=True)
+                return "arrived"
+            self._pose = None  # lost: don't trust odometry anymore
+            self.drive_distance(-150, speed=25)  # back away from the wrong edge
+            return "lost"
+        finally:
+            self._homing = False
+            self._home_arrived = False
+
+    # ----------------------------------------------------------- anim queue
+    def queue_anim(self, name):
+        """Sensor callbacks (foreign threads) request; the main loop plays.
+        Animations may only run on the main thread — their sounds call
+        snd.play directly, which is not GIL-safe alongside Vosk decoding."""
+        self._anim_requests.append(name)
+
+    def drain_anims(self):
+        while self._anim_requests:
+            name = self._anim_requests.popleft()
+            if self.anim:
+                self.anim.play(name, blocking=True)
+
+    # variant name -> stock animation file (the REAL stock choreography)
+    _DANCE_ANIMS = {"fiesta": "salsa", "groove": "workout", "party": "excited"}
 
     def dance(self, variant=None):
-        """Themed dance: music, lights, arms, spins. Preflight FIRST."""
-        import random
+        """Stock dance choreography through the anim engine — music, arms,
+        spins, lights, sunglasses eyes. Plate signature = arms-only party;
+        otherwise preflight before the show."""
+        if len(self._edge_gaps()) >= 3:
+            _log("dance: plate mode (arms only)")
+            return self.arms_party()
         if not self._motion_allowed("rotate"):
             _log("dance blocked before show: preflight failed")
             return False
-        name = variant if variant in self._DANCES else random.choice(list(self._DANCES))
-        d = self._DANCES[name]
-        docked = not self.ensure_mobility()
-        _log(f"dance: {name}{' (dock mode: arms only)' if docked else ''}")
-        if d["music"]:
-            self.play_sfx(d["music"], defer=False)
-        if d["sfx"]:
-            sm = self.cfg.get("sounds", {}).get("sfx_map", {})
-            self.play_sfx(sm.get(d["sfx"], ""), defer=False)
-        for color in d["colors"]:
-            self._led_flash(color)
-            time.sleep(0.2)
-        self.eyes("speaking")
-        ok = True
-        if docked:
-            # dock party: everything but wheels
-            for ang in (150, 30, 150, 30, 140, 40):
-                self.arm_angle(ang, speed=75)
-            self.mood_eyes("HEARTS")
+        name = self._DANCE_ANIMS.get(variant, "salsa")
+        _log(f"dance: {name} (stock animation)")
+        if self.anim and self.anim.play(name, blocking=True):
             self._bump_mood(1)
             return True
-        for move in d["moves"]:
-            if not self._motion_allowed("rotate"):
-                return False
-            if move == "spin_big":
-                ok &= self.drive_rotate(90, speed=40)
-                ok &= self.arm_angle(150, speed=60)
-                ok &= self.drive_rotate(-180, speed=40)
-                ok &= self.arm_angle(20, speed=60)
-                ok &= self.drive_rotate(90, speed=40)
-            elif move == "spin_small":
-                ok &= self.drive_rotate(60, speed=35)
-                ok &= self.drive_rotate(-120, speed=35)
-            elif move == "arms_wave":
-                for ang in (150, 30, 150, 30):
-                    ok &= self.arm_angle(ang, speed=70)
-            elif move == "wiggle":
-                ok &= self.drive_rotate(25, speed=45)
-                ok &= self.drive_rotate(-50, speed=45)
-                ok &= self.drive_rotate(25, speed=45)
-            elif move == "bounce":
-                for _ in range(2):
-                    ok &= self.arm_angle(140, speed=80)
-                    ok &= self.arm_angle(40, speed=80)
-        ok &= self.arm_angle(20, speed=60)
-        self._bump_mood(1)
-        return ok
+        _log("stock animation unavailable — arms party fallback")
+        return self.arms_party()
 
     def arms_party(self):
         """Always-safe celebration: lights, music-less boogie, arms only."""
@@ -829,15 +1017,19 @@ class Body:
                "SNEEZE", "BLINK_BIG", "SPARKLING")
 
     def idle_flourish(self):
-        """A little life while waiting: curious glance, sometimes a chirp."""
+        """A little life while waiting: a curious glance, sometimes a small
+        stretch. NO random loud noises — a cute pet, not an annoying one.
+        Runs on the main thread, so a rare short animation is GIL-safe."""
         import random
         try:
             self.mood_eyes(random.choice(self._CURIOS))
-            if random.random() < 0.35:
-                sfx_map = self.cfg.get("sounds", {}).get("sfx_map", {})
-                pool = [sfx_map.get("pet", ""), sfx_map.get("click", ""),
-                        self.cfg.get("wake", {}).get("chirp", "")]
-                self.play_sfx(random.choice([p for p in pool if p]) or "", defer=False)
+            if random.random() < 0.08 and self.anim:
+                self.anim.play("sneeze", blocking=True)  # rare, short, cute
+            elif random.random() < 0.3:
+                ang = random.choice((110, 130, 150))
+                self.arm_angle(ang, speed=25, wait=False)
+                time.sleep(0.4)
+                self.arm_angle(30, speed=25, wait=False)
         except Exception as e:
             _log(f"idle_flourish: {e}")
 
@@ -933,9 +1125,16 @@ class Body:
 
     # ----------------------------------------------------------------- sleep
     def sleep_pose(self):
+        if self.anim and self.anim.play("sleep", blocking=True):
+            return
         self.eyes("sleepy")
         self.arms_down()
         self.led_color("Black")
+
+    def wake_up(self):
+        if self.anim and self.anim.play("wakeup", blocking=True):
+            return
+        self.eyes("idle")
 
     # --------------------------------------------------------------- cleanup
     def dispose(self):

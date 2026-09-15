@@ -7,6 +7,7 @@ Phase 1 policy:
 """
 import datetime
 import json
+import os
 import re
 import sys
 import threading
@@ -45,6 +46,34 @@ EDGE_REFUSAL = ("I can't drive here — I'm either on my dock or too close to an
                 "Put me somewhere with room and ask again!")
 DOCK_REFUSAL = "My wheels don't reach down here — I'm on my charging dock! Lift me onto the desk and I'll scoot."
 
+# Voice switching by name — aliases include common ASR mishearings
+# ("switch to weekly" really is how "wheatley" comes back from the mic).
+# alias -> (display name, model path|None, needs modern piper module)
+_MODULE_PY = "/opt/piper-ng/bin/python"
+_VOICES = {
+    "wheatley": ("Wheatley", "/.doly/data/piper/wheatley-en.onnx", True),
+    "weekly": ("Wheatley", "/.doly/data/piper/wheatley-en.onnx", True),
+    "glados": ("GLaDOS", "/.doly/data/piper/glados.onnx", False),
+    "gladys": ("GLaDOS", "/.doly/data/piper/glados.onnx", False),
+    "amy": ("Amy", "/.doly/data/piper/en_US-amy-medium.onnx", False),
+    "hfc": ("HFC", "/.doly/data/piper/en_US-hfc_female-medium.onnx", False),
+    "lessac": ("Lessac", "/.doly/data/piper/en_US-lessac-high.onnx", False),
+    "stock": ("stock", None, False),
+    "original": ("stock", None, False),
+}
+_SWITCH_VERB_RE = re.compile(r"\b(switch|change|swap|use|try)\b", re.IGNORECASE)
+_VOICE_LIST_RE = re.compile(r"\b(what|which|list)\b", re.IGNORECASE)
+
+
+def _voice_intent(low):
+    """('display name', model path|None) when the text asks to switch voices."""
+    if not (_SWITCH_VERB_RE.search(low) or "voice" in low):
+        return None
+    for alias, val in _VOICES.items():
+        if re.search(rf"\b{re.escape(alias)}\b", low):
+            return val
+    return None
+
 
 class Router:
     def __init__(self, cfg, body, brain, memory):
@@ -66,7 +95,7 @@ class Router:
         # emergency stop outranks EVERY other route (search, colors, table)
         tokens = text.split()
         if tokens and (tokens[0] == "stop" or tokens[-1] == "stop"):
-            self.body.drive_stop()
+            self.body.stop_everything()
             return True
 
         # imagine prompts: she physically acts it out while narrating
@@ -90,6 +119,19 @@ class Router:
             if color and self.body.led_color(color):
                 self.body.speak(f"LEDs going {color.lower()}.")
                 return True
+
+        # voice management: "switch to wheatley", "what voices do you have"
+        voice = _voice_intent(low)
+        if voice is not None:
+            name, model, needs_module = voice
+            return self._voice_switch(name, model, needs_module)
+        if "voice" in low and _VOICE_LIST_RE.search(low):
+            current = self.cfg.get("tts", {}).get("piper_model")
+            current = os.path.basename(current).split(".")[0] if current else "stock"
+            b_names = ", ".join(sorted({n for n, _, _ in _VOICES.values()}))
+            self.body.speak(f"I'm using the {current} voice. I can also be: {b_names}. "
+                            "Just say switch to, and a name.")
+            return True
 
         cmd, score = cmds.match_command(text)
         if cmd:
@@ -139,6 +181,14 @@ class Router:
             b.fist_bump()
             return True
 
+        if action == "high_five":
+            b.speak("Up top!")
+            b.high_five()
+            return True
+
+        if action == "go_home":
+            return self.go_home_action()
+
         if action == "dance":
             b.speak("Watch this.")
             if not b.dance():
@@ -179,7 +229,7 @@ class Router:
                 _refuse()
             return True
         if action == "stop":
-            b.drive_stop()
+            b.stop_everything()
             return True
 
         if action == "sleep":
@@ -189,7 +239,7 @@ class Router:
 
         if action == "wake":
             b.speak("Morning! Fully charged and ready.")
-            b.eyes("idle")
+            b.wake_up()
             return True
 
         if action == "battery":
@@ -202,6 +252,71 @@ class Router:
 
         _log(f"unhandled action {action}")
         return False
+
+    # ----------------------------------------------------------------- homing
+    def go_home_action(self):
+        b = self.body
+        result = b.go_home()
+        if result == "already":
+            b.speak("I'm already home, all cozy.")
+        elif result == "arrived":
+            b.speak("Home sweet home. Charging up!")
+        elif result == "unknown":
+            b.speak("I don't know where home is right now — put me on my dock once and I'll remember it.")
+        elif result == "busy":
+            b.speak("I'm already heading home!")
+        else:  # lost
+            b.speak("I got confused on the way — I stopped somewhere safe. Can you carry me home?")
+        return True
+
+    # ----------------------------------------------------------------- voice
+    def _voice_switch(self, name, model, needs_module):
+        b = self.body
+        if model and not os.path.exists(model):
+            b.speak(f"I don't have the {name} voice files yet.")
+            return True
+        if needs_module and not os.path.exists(_MODULE_PY):
+            b.speak(f"The {name} voice needs a speech upgrade I haven't got installed.")
+            return True
+        tts_cfg = self.cfg.setdefault("tts", {})
+        if model:
+            tts_cfg["piper_model"] = model
+            if needs_module:
+                tts_cfg["piper_module_python"] = _MODULE_PY
+            else:
+                tts_cfg.pop("piper_module_python", None)
+        else:
+            tts_cfg.pop("piper_model", None)
+            tts_cfg.pop("piper_module_python", None)
+        self._persist_voice(model, needs_module)
+        # the confirmation itself speaks in the newly selected voice
+        b.speak(f"This is my {name} voice now." if model
+                else "Back to my original voice.")
+        return True
+
+    def _persist_voice(self, model, needs_module=False):
+        """Best-effort: write the choice back to config.json so it survives
+        restarts. The live switch already holds either way."""
+        try:
+            path = os.path.join(self.cfg.get("root", "/opt/spark/app"), "config.json")
+            data = {}
+            if os.path.exists(path):
+                with open(path, encoding="utf-8") as f:
+                    data = json.load(f)
+            tts = data.setdefault("tts", {})
+            if model:
+                tts["piper_model"] = model
+                if needs_module:
+                    tts["piper_module_python"] = _MODULE_PY
+                else:
+                    tts.pop("piper_module_python", None)
+            else:
+                tts.pop("piper_model", None)
+                tts.pop("piper_module_python", None)
+            with open(path, "w", encoding="utf-8") as f:
+                json.dump(data, f, indent=2)
+        except Exception as e:
+            _log(f"voice persist failed (live switch still holds): {e}")
 
     # ----------------------------------------------------------------- timer
     def _start_timer(self, secs):
