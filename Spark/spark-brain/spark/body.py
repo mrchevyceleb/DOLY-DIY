@@ -39,6 +39,15 @@ class Body:
         self._homing = False
         self._leaving_home = False
         self._home_arrived = False
+        self._edge_hazard = None   # None | "forward" | "backward" | "all":
+        # latched after a real gap event — no blind drives TOWARD that edge
+        # until she escapes it or it is verifiably gone
+        self._hazard_clear_at = None
+        self._hazard_airborne = False  # an all-void event followed the latch
+        self._escaping = False      # _escape_edge drives bypass the hazard gate
+        self._void4_since = None    # first all-void event of the current sit
+        self._hazard_lock = threading.Lock()
+        self._hazard_gen = 0        # bumped on every latch; clears check it
         self.anim = None           # AnimPlayer, created in _init_all
         if self.hw:
             self._init_all()
@@ -226,21 +235,24 @@ class Body:
         self._imu = imu
 
     _TOF_REACTIONS = {
-        "ObjectComing": ("CAUTIOUS", "click", None),   # eyes/sfx only — NEVER auto-drive
+        "ObjectComing": ("CAUTIOUS", None, None),      # eyes only — walk-by
+        # clicking drove Matt up the wall; NEVER auto-drive either
         "ObjectGoing": ("HAPPY", None, None),            # (see table-fall postmortem)
         "Scrubing": ("SPARKLING", "pet", None),
         "ToLeft": ("LOOK_LEFT", None, None),
         "ToRight": ("LOOK_RIGHT", None, None),
     }
     _IMU_REACTIONS = {
-        "ShockLight": ("BUMP", "click", None),
-        "ShockMedium": ("BUGGED", "damage", None),
+        "ShockLight": ("BUMP", None, None),            # desk bumps: eyes only,
+        "ShockMedium": ("BUGGED", None, None),         # no random clicks/damage
         "ShockHard": ("DAMAGED", "alarm", None),
         "ShockExtreme": ("DESTROYED", "alarm", None),
         "ShortShake": ("DIZZY_L", "debuff", None),
         "LongShake": ("DIZZY_R", "debuff", None),
-        "Vibrate": ("NERVOUS", "click", None),
-        "VibrateExtreme": ("FRIGHTENED", "alarm", None),
+        "Vibrate": ("NERVOUS", None, None),
+        # sustained desk vibration is NOT a crash — the alarm was the
+        # random BEEP-BEEP-BEEO Matt kept hearing. Eyes only.
+        "VibrateExtreme": ("FRIGHTENED", None, None),
         "Move": ("LOOK_AHEAD", None, None),
     }
 
@@ -309,6 +321,28 @@ class Body:
             # EMERGENCY: kill motion, lock further motion, react
             lock_s = 10.0 if dir_name == "All" else 3.0  # All = airborne/off-edge
             self._gap_lock_until = max(self._gap_lock_until, time.time() + lock_s)
+            self._hazard_clear_at = None  # any gap event resets the quiet clock
+            if dir_name == "All" and getattr(self, "_void4_since", None) is None:
+                self._void4_since = time.time()  # plate-sit clock starts here
+            if not getattr(self, "docked", False):
+                # real cliff/airborne event (not plate noise): latch the
+                # hazard's direction so the next blind drive can't re-run
+                # the same edge. "All" off the dock = carried or falling:
+                # block everything, and remember it as pick-up evidence
+                # (a later all-void is what proves a relocation happened).
+                if dir_name == "All":
+                    had_latch = getattr(self, "_edge_hazard", None) is not None
+                    self._latch_hazard("all")
+                    if had_latch:
+                        # an all-void on TOP of an existing latch = picked
+                        # up / relocated (the fast-clear evidence). The
+                        # fall that CREATES the latch is not evidence.
+                        self._hazard_airborne = True
+                elif len(self._edge_gaps()) < 3:
+                    if dir_name.startswith("Front"):
+                        self._latch_hazard("forward")
+                    elif dir_name.startswith("Back"):
+                        self._latch_hazard("backward")
             _log(f"GAP DETECTED dir={dir_name} — motion locked {lock_s}s")
             if dir_name == "All":
                 self._pose = None          # airborne/picked up: position lost
@@ -580,11 +614,16 @@ class Body:
         try:
             state = getattr(self._edge.GpioState,
                             self.cfg.get("edge", {}).get("gap_gpio_state", "Low"))
-            return [str(getattr(s, "id", "?")).split(".")[-1]
+            gaps = [str(getattr(s, "id", "?")).split(".")[-1]
                     for s in self._edge.get_sensors(state)]
         except Exception as e:
             _log(f"preflight poll failed: {e}")
-            return []  # poll bug must not brick motion — events still guard
+            gaps = []  # poll bug must not brick motion — events still guard
+        if len(gaps) < 4:
+            # the all-void sit clock lives and dies by the live sensor
+            # state, not by whoever last remembered to clear it
+            self._void4_since = None
+        return gaps
 
     def _motion_allowed(self, direction="forward"):
         """Direction-aware safety: a cliff BEHIND her must not block forward
@@ -619,6 +658,173 @@ class Body:
         _log(f"preflight pass ({direction}): tolerating {gaps}")
         return True
 
+    def _latch_hazard(self, new):
+        """Merge, never overwrite: a rear cliff must not erase the front
+        one. Any disagreement (or an airborne event) becomes "all" — boxed
+        in, both directions blocked until verifiably clear. Thread-safe:
+        sensor events race command-path clears, so every latch bumps a
+        generation counter that clears must re-verify."""
+        with self._hazard_lock:
+            cur = self._edge_hazard
+            if cur in (None, new):
+                self._edge_hazard = new
+            else:
+                self._edge_hazard = "all"
+            self._hazard_clear_at = None  # fresh evidence restarts the clock
+            self._hazard_gen += 1
+
+    def _hazard_active(self, direction="forward"):
+        """Edge hazard latch: True while motion TOWARD a cliff she already
+        hit is unsafe. The latch is directional — a rear cliff must not
+        block the forward escape route. A verified dock exempts everything
+        (plate voids are not cliffs); lesser gap counts exempt directional
+        latches so the undock path can run, but an "all" latch is NEVER
+        exempted by gap count alone. Clears when the edge is verifiably
+        gone or when _escape_edge completes."""
+        latch = getattr(self, "_edge_hazard", None)
+        if not latch or latch not in ("all", direction):
+            return False
+        if self._on_verified_dock():
+            return False  # verified plate: its voids are not cliffs
+        gaps = self._edge_gaps()
+        if latch != "all" and len(gaps) >= 3:
+            return False
+        if not gaps:
+            # zero gaps alone do not prove she was moved somewhere safe —
+            # she could be parked just short of the same lip. Fast-clear
+            # only with pick-up evidence (an all-void event AFTER the
+            # latch); otherwise hold for a long quiet spell and let a
+            # verified _escape_edge be the normal way out. Arms and clears
+            # are generation-checked so a fresh async latch always wins.
+            hold_s = 5.0 if getattr(self, "_hazard_airborne", False) else 60.0
+            armed = getattr(self, "_hazard_clear_at", None)
+            if armed is None:
+                self._hazard_clear_at = (getattr(self, "_hazard_gen", 0),
+                                         time.time() + hold_s)
+                return True
+            gen_at_arm, deadline = armed
+            if gen_at_arm != getattr(self, "_hazard_gen", 0):
+                self._hazard_clear_at = None  # stale arm from older evidence
+                return True
+            if time.time() >= deadline:
+                with self._hazard_lock:
+                    if self._hazard_gen == gen_at_arm:
+                        self._edge_hazard = None
+                        self._hazard_clear_at = None
+                        self._hazard_airborne = False
+                        _log("edge hazard cleared")
+                        return False
+                return True  # a fresh hazard raced the clear — it wins
+            return True
+        self._hazard_clear_at = None
+        return True
+
+    def drive_guarded(self, mm, speed=25, segment_mm=60):
+        """Segmented drive with INLINE edge polling — the 'come here' fix.
+
+        Blind 250mm drives at speed 45 put her off the desk: the async
+        watchdog saw the gap but momentum won. Now motion is chopped into
+        <=60mm segments at a sane speed, each preflighted, with edge gaps
+        polled every 30ms DURING the segment. First danger sign: hard stop
+        and latch the hazard. Returns 'ok' | 'stopped_edge' | False."""
+        import math
+        try:
+            mm, speed, segment_mm = float(mm), float(speed), float(segment_mm)
+        except (TypeError, ValueError):
+            return False
+        if not all(map(math.isfinite, (mm, speed, segment_mm))) or \
+                mm == 0 or speed <= 0 or segment_mm <= 0:
+            _log(f"guarded drive rejected: bad args mm={mm} speed={speed} seg={segment_mm}")
+            return False
+        if speed > 30.0 or segment_mm > 60.0:
+            # the whole point is short, slow segments — no caller may
+            # recreate the blind 250mm@45 fall drive through this API
+            _log(f"guarded drive: clamping speed={speed} seg={segment_mm}")
+            speed = min(speed, 30.0)
+            segment_mm = min(segment_mm, 60.0)
+        if abs(mm) > 500.0 or speed < 10.0 or segment_mm < 20.0:
+            # operational bounds: huge distances = unbounded blocking loop,
+            # near-zero speed = motor stall, tiny segments = command spam
+            _log(f"guarded drive rejected: out of bounds mm={mm} speed={speed} seg={segment_mm}")
+            return False
+        if not self.has.get("drive"):
+            return False
+        direction = "forward" if mm >= 0 else "backward"
+        if self._hazard_active(direction) and not (self._homing or self._leaving_home or self._escaping):
+            _log(f"guarded drive refused: edge hazard latched ({direction})")
+            return False
+        mobile = self.ensure_mobility()
+        if not mobile or not self._motion_allowed(direction):
+            # the undock ritual drives forward BLIND — it needs verified
+            # dock evidence, not just a gap count (cliff teeter vs plate)
+            if mm > 0 and self._on_verified_dock() and self._undock(then_mm=0, speed=speed):
+                _log("guarded drive: undocked, proceeding")
+            elif not mobile:
+                _log("guarded drive blocked: docked")
+                return False
+        remaining = abs(mm)
+        total = remaining
+        sign = 1 if mm >= 0 else -1
+        while remaining > 0:
+            step = min(segment_mm, remaining)
+            if not self._motion_allowed(direction):
+                return "stopped_edge" if remaining < total else False
+            try:
+                self._drive.go_distance(self._next_id(), step, speed,
+                                        sign > 0, True)
+            except Exception as e:
+                self.drive_stop()  # a half-sent command must not free-run
+                _log(f"guarded drive failed: {e}")
+                return False
+            saw_running = False
+            completed = False
+            start = time.time()
+            time.sleep(0.05)  # let the drive enter Running before polling
+            deadline = start + 8
+            while time.time() < deadline:
+                gaps = self._edge_gaps()
+                if gaps and not self.is_on_dock():
+                    front = any(g.startswith("Front") for g in gaps)
+                    back = any(g.startswith("Back") for g in gaps)
+                    if (front and direction == "forward") or (back and direction == "backward"):
+                        self.drive_stop()
+                        self._latch_hazard(direction)
+                        _log(f"guarded drive: stopped at edge ({direction}, gaps={gaps})")
+                        return "stopped_edge"
+                try:
+                    st = self._drive.get_state()
+                except Exception:
+                    break  # comms error: do NOT credit the segment
+                DS = self._drive.DriveState
+                if st == DS.Running:
+                    saw_running = True
+                elif st == DS.Completed and saw_running:
+                    completed = True  # explicit terminal success
+                    break
+                elif st == DS.Error:
+                    _log("guarded drive: controller reported Error")
+                    break
+                elif not saw_running and time.time() - start > 1.0:
+                    break  # never started: rejected/stale command
+                time.sleep(0.03)
+            self.drive_stop()
+            if not completed:
+                _log("guarded drive: segment incomplete (stall/timeout/comms/rejected) — aborting")
+                return False
+            # a watchdog stop can look exactly like completion — never
+            # credit a segment that ended facing a hazard
+            gaps = self._edge_gaps()
+            if gaps and not self.is_on_dock():
+                front = any(g.startswith("Front") for g in gaps)
+                back = any(g.startswith("Back") for g in gaps)
+                if (front and direction == "forward") or (back and direction == "backward"):
+                    self._latch_hazard(direction)
+                    _log(f"guarded drive: stopped at edge after segment ({direction}, gaps={gaps})")
+                    return "stopped_edge"
+            self._pose_update(dist_mm=sign * step)  # credit only real travel
+            remaining -= step
+        return "ok"
+
     def _watch_motion(self, direction="forward"):
         """While a drive command runs, poll edges and hard-stop on a gap that
         matters for THIS direction. Mirrors _motion_allowed — including its
@@ -642,6 +848,11 @@ class Body:
                                  (back and direction == "backward")
                         if danger and not dock_spin:
                             self._gap_lock_until = max(self._gap_lock_until, time.time() + 3.0)
+                            if not self.is_on_dock():
+                                # a rotate-stop found the cliff with a swept
+                                # wheel: latch forward so _escape_edge keeps
+                                # the backward retreat route open
+                                self._latch_hazard(direction if direction in ("forward", "backward") else "forward")
                             self.drive_stop()
                             _log(f"watchdog: stopped mid-motion ({direction}, gaps={gaps})")
                             return
@@ -810,11 +1021,15 @@ class Body:
     def drive_distance(self, mm, speed=45):
         if not self.has.get("drive"):
             return False
+        direction = "forward" if mm >= 0 else "backward"
+        if self._hazard_active(direction) and not (self._homing or self._leaving_home or self._escaping):
+            _log(f"drive_distance refused: edge hazard latched ({direction})")
+            return False
         mobile = self.ensure_mobility()
-        if not mobile or not self._motion_allowed("forward" if mm >= 0 else "backward"):
-            # 3+ voids is the plate signature (one sensor reads flaky on some
-            # plates, so all-four is too strict): forward command = leave home
-            if mm > 0 and len(self._edge_gaps()) >= 3 and self._undock(then_mm=mm, speed=speed):
+        if not mobile or not self._motion_allowed(direction):
+            # forward command from a VERIFIED dock = leave home (a raw gap
+            # count can't tell the plate from a 3-wheel cliff teeter)
+            if mm > 0 and self._on_verified_dock() and self._undock(then_mm=mm, speed=speed):
                 return True  # the ritual drove her off AND ran the command
             _log("drive blocked: docked or edge")
             return False
@@ -882,17 +1097,35 @@ class Body:
         if rot_deg:
             self._pose[2] = (self._pose[2] + rot_deg + 180) % 360 - 180
 
-    def _wait_drive_idle(self, timeout=15.0):
+    def _wait_drive_idle(self, timeout=15.0, require_running=False):
+        """True when the drive finished. require_running (escape
+        verification): only an observed Running -> Completed counts —
+        comms errors, controller Error, never-started commands and stale
+        home-arrival flags all return False."""
         deadline = time.time() + timeout
+        start = time.time()
+        saw_running = False
+        DS = self._drive.DriveState
         while time.time() < deadline:
-            if self._home_arrived:
-                return
+            if self._homing and self._home_arrived:
+                return True
             try:
-                if self._drive.get_state() != self._drive.DriveState.Running:
-                    return
+                st = self._drive.get_state()
             except Exception:
-                return
+                return not require_running  # comms error is NOT success
+            if not require_running:
+                if st != DS.Running:
+                    return True
+            elif st == DS.Running:
+                saw_running = True
+            elif st == DS.Completed and saw_running:
+                return True
+            elif st == DS.Error:
+                return False
+            elif not saw_running and time.time() - start > 1.0:
+                return False  # never started
             time.sleep(0.05)
+        return False
 
     def _undock(self, then_mm=0, speed=45):
         """Drive off the charging plate: stock leave_home ritual, a clear-the-
@@ -1088,9 +1321,7 @@ class Body:
         import random
         try:
             self.mood_eyes(random.choice(self._CURIOS))
-            if random.random() < 0.10 and self.anim:
-                self.anim.play("sneeze", blocking=True)  # rare, short, cute
-            elif random.random() < 0.3:
+            if random.random() < 0.3:
                 ang = random.choice((110, 130, 150))
                 self.arm_angle(ang, speed=25, wait=False)
                 time.sleep(0.4)
@@ -1105,6 +1336,29 @@ class Body:
             return getattr(self, "docked", False) or len(self._edge_gaps()) >= 4
         except Exception:
             return getattr(self, "docked", False)
+
+    def _on_verified_dock(self):
+        """Positive dock evidence for gating hazards and the undock ritual
+        (leave_home drives forward BLIND). Proofs, cheapest first: the
+        docked flag (boot probe / homing arrival); or a SUSTAINED
+        all-four-void sit CONFIRMED by the gyro dock probe — ten seconds
+        of all-void could be the plate OR being held in the air, and only
+        the probe tells them apart (on the plate the wheels bite and a
+        probe pivot barely turns her; in the air she spins free). A
+        transient all-void never reaches the probe: the sit clock resets
+        the instant fewer than four sensors read void (see _edge_gaps)."""
+        if getattr(self, "docked", False):
+            return True
+        if len(self._edge_gaps()) >= 4:
+            since = getattr(self, "_void4_since", None)
+            if since is not None and time.time() - since > 10.0:
+                try:
+                    return bool(self.dock_probe())
+                except Exception as e:
+                    _log(f"verified-dock probe failed: {e}")
+                    return False
+            return False
+        return False
 
     def wander_step(self):
         """Pet-like exploration: ONE safe move + a curious look.
@@ -1153,7 +1407,7 @@ class Body:
             if move == "turn":
                 self.drive_rotate(random.choice([-90, -60, 60, 90]), speed=35)
             elif move == "scoot":
-                self.drive_distance(random.choice([60, 90, 120]), speed=35)
+                self.drive_guarded(random.choice([60, 90, 120]), speed=25)
             self.idle_flourish()
             return True
         except Exception as e:
@@ -1180,33 +1434,68 @@ class Body:
         if any(g.startswith("Back") for g in gaps):
             _log("escape_edge: boxed in (front AND back gaps) — staying put")
             return False
-        # wait out any active gap lock (3s typical), then back off slowly
+        # The hazard latch stays SET for the whole escape — no window where
+        # a blind forward command could slip in. The escaper's own drives
+        # run under the _escaping exemption (the checks above PROVED
+        # backward is clear). Cleared at the end ONLY if the edge is
+        # verifiably gone; re-latched "forward" on any failure.
         lock_left = getattr(self, "_gap_lock_until", 0) - time.time()
         if lock_left > 0:
             time.sleep(min(lock_left + 0.2, 4.0))
-        if not self.drive_distance(-80, speed=20):
-            _log("escape_edge: backward blocked too — staying put")
+        self._escaping = True
+        try:
+            if not self.drive_distance(-80, speed=20):
+                self._latch_hazard("forward")  # the front cliff is still there
+                _log("escape_edge: backward blocked too — staying put")
+                return False
+            if not self._wait_drive_idle(timeout=8, require_running=True):
+                self.drive_stop()
+                self._latch_hazard("forward")
+                _log("escape_edge: retreat did not finish — staying put")
+                return False
+            self.drive_stop()
+            still = [g for g in self._edge_gaps() if g.startswith("Front")]
+            if still:
+                self._latch_hazard("forward")
+                _log(f"escape_edge: front gap persists after retreat ({still}) — not rotating")
+                return False
+            left = any(g.startswith("Front_Left") or g.endswith("Left") for g in gaps)
+            right = any(g.startswith("Front_Right") or g.endswith("Right") for g in gaps)
+            if left and not right:
+                turn = -100  # gap on the left: swing right
+            elif right and not left:
+                turn = 100
+            else:
+                turn = 130  # full-front or unknown: big turn either way
+            if not self.drive_rotate(turn, speed=25):
+                self._latch_hazard("forward")
+                _log("escape_edge: rotation rejected — escape FAILED, staying put")
+                return False
+            if not self._wait_drive_idle(timeout=10, require_running=True):
+                self.drive_stop()
+                self._latch_hazard("forward")
+                _log("escape_edge: turn did not finish — staying put")
+                return False
+            self.drive_stop()
+        finally:
+            self._escaping = False
+        # clear ONLY if nothing fresh latched during the escape drives:
+        # sensor events race this path, so the generation counter decides
+        gen0 = getattr(self, "_hazard_gen", 0)
+        front_after = [g for g in self._edge_gaps() if g.startswith("Front")]
+        if front_after:
+            self._latch_hazard("forward")
+            _log(f"escape_edge: cliff still ahead after turn {front_after} — hazard kept")
             return False
-        self._wait_drive_idle(timeout=8)
-        self.drive_stop()
-        still = [g for g in self._edge_gaps() if g.startswith("Front")]
-        if still:
-            _log(f"escape_edge: front gap persists after retreat ({still}) — not rotating")
-            return False
-        left = any(g.startswith("Front_Left") or g.endswith("Left") for g in gaps)
-        right = any(g.startswith("Front_Right") or g.endswith("Right") for g in gaps)
-        if left and not right:
-            turn = -100  # gap on the left: swing right
-        elif right and not left:
-            turn = 100
-        else:
-            turn = 130  # full-front or unknown: big turn either way
-        if not self.drive_rotate(turn, speed=25):
-            _log("escape_edge: rotation rejected — escape FAILED, staying put")
-            return False
-        self._wait_drive_idle(timeout=10)
-        self.drive_stop()
-        return True
+        with self._hazard_lock:
+            if self._hazard_gen == gen0:
+                self._edge_hazard = None
+                self._hazard_clear_at = None
+                self._hazard_airborne = False
+                _log("escape_edge: escaped — hazard latch cleared")
+                return True
+        _log("escape_edge: fresh hazard arrived during escape — latch kept")
+        return False
 
     def _bump_mood(self, delta):
         score = getattr(self, "_mood_score", 3) + delta

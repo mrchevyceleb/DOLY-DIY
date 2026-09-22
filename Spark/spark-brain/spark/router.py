@@ -213,8 +213,12 @@ class Router:
 
         if action == "come_here":
             b.speak("On my way.")
-            if not b.drive_distance(250):
-                b.speak(EDGE_REFUSAL)
+            result = b.drive_guarded(250, speed=22)
+            if result == "stopped_edge":
+                b.speak("Whoa, that's the edge — backing up.")
+                b._escape_edge()
+            elif not result:
+                b.speak(DOCK_REFUSAL if getattr(b, "docked", False) else EDGE_REFUSAL)
             return True
 
         if action == "spin":
@@ -226,14 +230,22 @@ class Router:
         def _refuse():
             b.speak(DOCK_REFUSAL if getattr(b, "docked", False) else EDGE_REFUSAL)
 
+        def _guarded(mm, speed):
+            result = b.drive_guarded(mm, speed=speed)
+            if result == "stopped_edge":
+                if mm > 0:
+                    b.speak("Whoa, that's the edge — backing up.")
+                    b._escape_edge()
+                else:
+                    b.speak("There's an edge behind me — not going further.")
+            elif not result:
+                _refuse()
+            return True
+
         if action == "forward":
-            if not b.drive_distance(150):
-                _refuse()
-            return True
+            return _guarded(150, 30)
         if action == "back":
-            if not b.drive_distance(-150):
-                _refuse()
-            return True
+            return _guarded(-150, 30)
         if action == "left":
             if not b.drive_rotate(-90):
                 _refuse()
