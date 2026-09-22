@@ -186,7 +186,7 @@ class Spark:
     # ---------------------------------------------------------------- voice
     def voice_loop(self):
         from .asr import Recognizer
-        from .ear import MicStream, record_utterance, listen_for_wake
+        from .ear import MicStream
 
         recognizer = Recognizer(self.cfg)
         wake_cfg = self.cfg.get("wake", {})
@@ -253,43 +253,26 @@ class Spark:
             _th.Thread(target=_stretch, daemon=True).start()
 
             follow_cfg = self.cfg.get("conversation", {})
-            follow_state = {"until": 0.0, "left": 0}
+            follow_pending = False
 
             while True:
                 self.talk_trigger.clear()
                 idle_action["act"] = None  # stale idle flags must never eat a wake
-                self.body.eyes("idle")
-
-                # follow-up window: right after she answers, keep listening —
-                # no wake word needed for back-and-forth (Alexa follow-up mode)
-                in_followup = (time.time() < follow_state["until"]
-                               and follow_state["left"] > 0)
+                # Playback and its short echo tail finish BEFORE the window
+                # starts. The capture thread drains ALSA throughout the reply.
+                self._wait_for_playback(mic)
+                in_followup = follow_pending
+                follow_pending = False
 
                 triggered_by_wake = None
-                leftover_text = ""
                 if in_followup:
-                    follow_state["left"] -= 1
-                    triggered_by_wake = "(followup)"
-                    # echo guard: her own reply may still be playing when the
-                    # follow-up window opens — drain until she's done, or she
-                    # hears the tail of her own voice and answers herself
-                    frames = mic.frames()
-                    drain_deadline = time.time() + 30.0
-                    while (self.body.speaking_recently()
-                           and time.time() < drain_deadline):
-                        if next(frames, None) is None:
-                            break  # stream exhausted — never spin
+                    log("spark", f"follow-up ready: {follow_cfg.get('follow_up_window_s', 8)}s")
                 elif wake_enabled:
+                    self.body.eyes("idle")
                     triggered_by_wake = self._wait_for_wake(
                         mic, recognizer, wake_words, idle_check=_idle_or_tap)
-                if triggered_by_wake:
-                    # one-breath "spark what time is it": words after the wake
-                    # word ARE the command — skip the second listen entirely
-                    toks = triggered_by_wake.lower().split()
-                    wake_len = 2 if toks[:2] == ["hey", "spark"] else 1
-                    leftover = toks[wake_len:]
-                    if len(leftover) >= 2:
-                        leftover_text = " ".join(leftover)
+
+                mic.learn_noise(False)  # preserve room baseline through speech/TTS
 
                 if idle_action["act"] == "wander":
                     log("spark", "idle: exploring")
@@ -311,30 +294,19 @@ class Spark:
                 self.listening = True
                 self.body.eyes("listening")
                 if triggered_by_wake:
-                    self.body.wake_reaction()
-                log("spark", "listening…" + (" (wake)" if triggered_by_wake else ""))
-
-                if leftover_text:
-                    text = leftover_text
-                    pcm = b""
-                else:
-                    recognizer.begin()
-                    pcm = record_utterance(
-                        mic, self.cfg, on_frame=recognizer.feed,
-                        should_stop=lambda: False,
-                        wait_timeout_s=wake_cfg.get("wait_timeout_s", 6.0),
-                    )
-                    if getattr(self, "whisper", None) and len(pcm) >= 8000:
-                        # whisper.cpp command transcription (vosk stays on wake)
-                        t0 = time.perf_counter()
-                        text = self.whisper.transcribe_pcm(pcm).strip()
-                        if text:
-                            log("spark", f"whisper {time.perf_counter()-t0:.1f}s: '{text}'")
-                        else:
-                            text = recognizer.finish().strip()  # vosk fallback
-                    else:
-                        text = recognizer.finish().strip()
-                self.listening = False
+                    # An early wake can overlap the command: eyes acknowledge
+                    # immediately without putting a chirp over the user's words.
+                    self.body.wake_reaction(audible=not triggered_by_wake.prefix_pcm)
+                log("spark", "listening..." + (" (follow-up)" if in_followup else ""))
+                self.body.react_enabled = False
+                try:
+                    text, pcm = self._listen_command(
+                        mic, recognizer, triggered_by_wake,
+                        timeout_s=(follow_cfg.get("follow_up_window_s", 8) if in_followup
+                                   else wake_cfg.get("wait_timeout_s", 6.0)))
+                finally:
+                    self.listening = False
+                    self.body.react_enabled = True
 
                 # noise guards: sound events and weak hallucinations are not
                 # user speech — drop them without counting a "miss"
@@ -350,6 +322,9 @@ class Spark:
 
                 if not text:
                     self.body.eyes("idle")
+                    if in_followup:
+                        log("spark", "follow-up closed quietly")
+                        continue
                     self._misses = getattr(self, "_misses", 0) + 1
                     log("spark", f"(nothing understood x{self._misses})")
                     if self._misses == 2:
@@ -364,17 +339,66 @@ class Spark:
                 _, next_flourish, next_wander = _reset_idle()
                 idle_action["act"] = None
                 # open the follow-up window after every answer
-                follow_state["until"] = time.time() + follow_cfg.get("follow_up_window_s", 8)
-                follow_state["left"] = follow_cfg.get("follow_ups", 2)
+                follow_pending = (follow_cfg.get("follow_up_window_s", 8) > 0
+                                  and follow_cfg.get("follow_ups", 2) > 0)
+
+    def _listen_command(self, mic, recognizer, wake=None, timeout_s=6.0):
+        from .ear import CommandAudio, record_utterance, strip_wake_prefix
+
+        if wake and not wake.prefix_pcm:
+            leftover = strip_wake_prefix(wake.text, wake.text)
+            if leftover:
+                return leftover, b""
+        deadline = time.monotonic() + timeout_s
+        # Remote timeout plus local fallback can occupy ~42s. Preserve speech
+        # received during that work; this costs under 2 MB at the default rate.
+        mic.retain(timeout_s + 45)
+        audio = CommandAudio(mic, wake.prefix_pcm if wake else b"",
+                             self.cfg["audio"]["sample_rate"])
+        remote_asr = bool(getattr(self, "whisper", None)
+                          and self.cfg.get("asr", {}).get("server_url"))
+        while True:
+            if not remote_asr:
+                recognizer.begin()
+            pcm = record_utterance(audio, self.cfg,
+                                   on_frame=None if remote_asr else recognizer.feed,
+                                   wait_timeout_s=max(0, deadline-time.monotonic()))
+            if not pcm:
+                return "", b""
+            started = time.perf_counter()
+            if getattr(self, "whisper", None) and len(pcm) >= 8000:
+                text = self.whisper.transcribe_pcm(pcm).strip()
+                if not text:
+                    if remote_asr:
+                        recognizer.begin()
+                        recognizer.feed(pcm)
+                    text = recognizer.finish().strip()
+            else:
+                if remote_asr:
+                    recognizer.begin()
+                    recognizer.feed(pcm)
+                text = recognizer.finish().strip()
+            log("spark", f"transcription {time.perf_counter()-started:.2f}s: '{text}'")
+            # The onset window measures listening, not time spent transcribing
+            # a name-only segment. Its queued command still deserves a decode.
+            deadline += time.perf_counter() - started
+            command = strip_wake_prefix(text, wake.text if wake else "")
+            if command or not text or time.monotonic() >= deadline:
+                return command, pcm
+            # Early recognition may endpoint on just "Spark". Keep listening
+            # for the actual command within the original deadline, without a
+            # second chirp or discarding the microphone's queued command audio.
+
+    def _wait_for_playback(self, mic):
+        mic.retain(1.0)
+        while self.body.speaking_recently():
+            next(mic.frames())
+        mic.discard()
+        mic.learn_noise(True)
 
     def _wait_for_wake(self, mic, recognizer, wake_words, idle_check=None):
         """Block until wake word or tap. Always drains audio (keeps stream fresh)."""
-        from .ear import listen_for_wake, _rms
-
-        # echo suppression: wait out our own TTS before listening for wake
-        drain_frames = []
-        while self.body.speaking_recently():
-            drain_frames.append(next(mic.frames(), None))
+        from .ear import listen_for_wake
         if self.talk_trigger.is_set():
             return False
 
@@ -429,6 +453,7 @@ class Spark:
 
 
         reply_parts = []
+        started = time.perf_counter()
         try:
             first = True
 
@@ -436,6 +461,7 @@ class Spark:
                 nonlocal first
                 for sentence in iter_sentences(self.brain.chat_stream(messages)):
                     if first:
+                        log("spark", f"LLM first sentence {time.perf_counter()-started:.2f}s")
                         self.body.eyes("speaking")
                         first = False
                     reply_parts.append(sentence)
@@ -477,6 +503,7 @@ class Spark:
             self._llm_reply(text)
         finally:
             self.body.react_enabled = True
+            log("spark", f"response finished {time.perf_counter()-t0:.2f}s")
 
     # ----------------------------------------------------------------- REPL
     def text_loop(self):

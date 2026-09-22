@@ -131,7 +131,23 @@ class ChargingSafetyTests(unittest.TestCase):
         self.assertFalse(b.drive_distance(60))
         b._drive.go_distance.assert_not_called()
 
+    def test_empty_remote_asr_does_not_launch_local_whisper(self):
+        a = WhisperASR({"asr": {"server_url": "http://test"}})
+        with patch.object(a, "_transcribe_http", return_value=""), \
+                patch("subprocess.run") as run:
+            self.assertEqual(a.transcribe_pcm(b"\\0" * 16000), "")
+            run.assert_not_called()
 
+    def test_http_failures_raise_instead_of_becoming_transcripts(self):
+        a = WhisperASR({"asr": {"server_url": "http://test"}})
+        import subprocess
+        with patch("tempfile.mkstemp", return_value=(123, "/tmp/asr-test.wav")), \
+                patch("os.close"), patch("os.unlink"), patch("wave.open"), \
+                patch("subprocess.run", side_effect=subprocess.CalledProcessError(22, "curl")) as run:
+            with self.assertRaises(subprocess.CalledProcessError):
+                a._transcribe_http(b"\\0" * 16000)
+            self.assertTrue(run.call_args.kwargs["check"])
+            self.assertIn("--fail", run.call_args.args[0])
 
 
 if __name__ == "__main__":

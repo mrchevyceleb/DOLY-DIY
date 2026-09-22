@@ -37,6 +37,10 @@ class Recognizer:
             self._finalized.append(tail)
         return " ".join(self._finalized).strip()
 
+    def partial(self):
+        """Current hypothesis, without waiting for a silence endpoint."""
+        return json.loads(self.rec.PartialResult()).get("partial", "").strip()
+
     @staticmethod
     def _clean(result_json):
         try:
@@ -110,9 +114,9 @@ class WhisperASR:
             url = self.cfg.get("asr", {}).get("server_url",
                                              "http://192.168.50.204:8399/inference")
             out = subprocess.run(
-                ["curl", "-s", "-m", "8", "-X", "POST", url,
+                ["curl", "--fail", "--silent", "--show-error", "--connect-timeout", "1", "-m", "8", "-X", "POST", url,
                  "-F", "file=" + chr(64) + path, "-F", "response_format=text"],
-                capture_output=True, text=True, timeout=12)
+                capture_output=True, text=True, timeout=12, check=True)
             return " ".join(out.stdout.split())
         finally:
             try:
@@ -132,9 +136,12 @@ class WhisperASR:
             try:
                 t0 = time.time()
                 text = self._transcribe_http(self._trim_silence(pcm), sample_rate)
-                if text:
-                    print(f"[asr] moria {time.time()-t0:.2f}s: '{text}'", file=sys.stderr, flush=True)
-                    return text
+                print(f"[asr] moria {time.time()-t0:.2f}s: '{text}'", file=sys.stderr, flush=True)
+                # The server ANSWERED: empty means "no speech", not "try
+                # harder". Falling through to local tiny.en on empty cost
+                # 6.7s and hallucinated '(buzzing)'/'(applause)' over real
+                # speech — the local fallback exists only for server-down.
+                return text
             except Exception as e:
                 print(f"[asr] moria server failed: {e}", file=sys.stderr, flush=True)
         if not self.available:

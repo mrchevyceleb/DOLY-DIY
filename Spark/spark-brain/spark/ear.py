@@ -4,11 +4,15 @@ Pure stdlib (no PortAudio / no build deps). Frames are 20 ms mono 16-bit
 at the configured sample rate — directly feedable to Vosk.
 """
 import math
-import selectors
+import re
+from collections import deque
+from dataclasses import dataclass
+import itertools
 import struct
 import sys
 import subprocess
 import time
+import threading
 
 try:
     import audioop
@@ -17,7 +21,7 @@ except ImportError:  # removed in py3.13+
 
 
 class MicStream:
-    """Context-managed raw capture from ALSA."""
+    """Always drain ALSA; keep a bounded buffer sized for the current activity."""
 
     FRAME_MS = 20
 
@@ -27,6 +31,13 @@ class MicStream:
         self.rate = a["sample_rate"]
         self.bytes_per_frame = int(self.rate * 2 * self.FRAME_MS / 1000)
         self.proc = None
+        self._ready = threading.Condition()
+        self._queue = deque(maxlen=1000 // self.FRAME_MS)
+        self._retention_s = 1.0
+        self._levels = deque(maxlen=250)
+        self._learn_noise = True
+        self._closed = False
+        self._error = None
 
     def __enter__(self):
         self.proc = subprocess.Popen(
@@ -37,44 +48,95 @@ class MicStream:
             stdout=subprocess.PIPE,
             stderr=subprocess.DEVNULL,
         )
+        self._reader = threading.Thread(target=self._capture, daemon=True)
+        self._reader.start()
         return self
 
     def __exit__(self, *exc):
+        with self._ready:
+            self._closed = True
+            self._ready.notify_all()
         if self.proc:
             self.proc.terminate()
             try:
                 self.proc.wait(timeout=2)
             except subprocess.TimeoutExpired:
                 self.proc.kill()
+                self.proc.wait(timeout=2)
+            self._reader.join(timeout=2)
+            self.proc.stdout.close()
         self.proc = None
+
+    def _capture(self):
+        try:
+            while not self._closed:
+                chunk = self.proc.stdout.read(self.bytes_per_frame)
+                if len(chunk) != self.bytes_per_frame:
+                    raise RuntimeError("arecord stopped delivering audio")
+                with self._ready:
+                    self._queue.append((time.monotonic(), chunk))
+                    if self._learn_noise:
+                        self._levels.append(_rms(chunk))
+                    self._ready.notify_all()
+        except Exception as exc:
+            with self._ready:
+                self._error = exc
+                self._ready.notify_all()
+
+    @property
+    def noise_floor(self):
+        with self._ready:
+            levels = sorted(self._levels)
+        # Lower quintile rejects speech peaks. Bound it for speech-only startup.
+        return min(1500, max(260, levels[len(levels)//5])) if levels else 500
+
+    def discard(self):
+        """Drop captured playback/idle audio before opening a new listen."""
+        with self._ready:
+            self._queue.clear()
+
+    def learn_noise(self, enabled):
+        """Keep the ambient baseline while command speech and TTS are active."""
+        with self._ready:
+            self._learn_noise = enabled
+
+    def retain(self, seconds):
+        """Preserve command starts while a name-only segment is transcribed."""
+        with self._ready:
+            self._retention_s = max(1.0, seconds)
+            self._queue = deque(self._queue, maxlen=int(self._retention_s * 1000 / self.FRAME_MS))
+
+    def _next(self, timeout=3.0):
+        with self._ready:
+            if not self._ready.wait_for(
+                    lambda: self._queue or self._closed or self._error, timeout):
+                raise RuntimeError("microphone stalled")
+            if self._error and not self._closed:
+                raise RuntimeError("microphone capture failed") from self._error
+            if self._closed:
+                return None
+            # Even after a consumer stalls, never replay old microphone audio.
+            now = time.monotonic()
+            while len(self._queue) > 1 and now - self._queue[0][0] > self._retention_s:
+                self._queue.popleft()
+            return self._queue.popleft()[1]
 
     def frames(self):
         while True:
-            chunk = self.proc.stdout.read(self.bytes_per_frame)
-            if not chunk or len(chunk) < self.bytes_per_frame:
-                if self.proc.poll() is not None:
-                    raise RuntimeError("arecord died")
-                continue
+            chunk = self._next()
+            if chunk is None:
+                return
             yield chunk
 
     def probe(self, frames=5, timeout=3.0):
         """Verify the mic actually delivers audio (arecord can die at open)."""
-        import selectors
-        sel = selectors.DefaultSelector()
-        sel.register(self.proc.stdout, selectors.EVENT_READ)
-        got = 0
         try:
             for _ in range(frames):
-                if not sel.select(timeout):
+                if self._next(timeout) is None:
                     return False
-                chunk = self.proc.stdout.read(self.bytes_per_frame)
-                if not chunk or len(chunk) < self.bytes_per_frame:
-                    return False
-                got += 1
-        finally:
-            sel.unregister(self.proc.stdout)
-            sel.close()
-        return got == frames
+        except RuntimeError:
+            return False
+        return True
 
 
 def _rms(pcm):
@@ -88,53 +150,67 @@ def _rms(pcm):
     return int(math.sqrt(sum(s * s for s in samples) / n))
 
 
+class CommandAudio:
+    """Retain consumed wake audio, even across a pause after just the name."""
+
+    def __init__(self, mic, prefix_pcm=b"", sample_rate=16000):
+        self.noise_floor = mic.noise_floor
+        frame_bytes = int(sample_rate * 2 * MicStream.FRAME_MS / 1000)
+        self.prefix_frames = len(prefix_pcm) // frame_bytes
+        prefix = (prefix_pcm[i:i+frame_bytes] for i in range(0, len(prefix_pcm), frame_bytes))
+        self._frames = itertools.chain(prefix, mic.frames())
+
+    def frames(self):
+        return self._frames
+
+
 def record_utterance(mic, cfg, on_frame=None, should_stop=None, wait_timeout_s=None):
-    """Capture one utterance. Ends on:
-    - adaptive energy silence (~1.2s below a floor that LEARNS the room —
-      fixed thresholds die to fan/room noise and burn the full cap), or
-    - a Vosk speech endpoint (on_frame returns finalized text) followed by
-      ~0.7s of quiet — natural turn-taking, typically ~1.5s total, or
-    - the safety cap (8s).
+    """Capture speech with onset pre-roll and a room-relative silence endpoint.
+
+    CommandAudio can replay an early wake's audio before the live stream.
     """
     a = cfg["audio"]
     silence_needed = a["silence_ms"] // MicStream.FRAME_MS
     max_frames = min(a["max_utterance_ms"], 8000) // MicStream.FRAME_MS
-    deadline = time.time() + wait_timeout_s if wait_timeout_s else None
+    max_frames += getattr(mic, "prefix_frames", 0)
+    max_frames = min(max_frames, 8000 // MicStream.FRAME_MS)
+    deadline = time.monotonic() + wait_timeout_s if wait_timeout_s is not None else None
+    started = time.monotonic()
 
     frames = []
     spoke = False
     silent_run = 0
     peak_rms = 0
-    floor = 260.0          # learned ambient noise floor (EMA)
-    last_final_at = None
+    floor = float(getattr(mic, "noise_floor", 500))
+    preroll = deque(maxlen=10)  # include the initial consonant before onset
+    end_reason = "source ended"
 
     for frame in mic.frames():
         if should_stop is not None and should_stop():
             return b""
-        if deadline is not None and not spoke and time.time() > deadline:
+        if deadline is not None and not spoke and time.monotonic() >= deadline:
             return b""
         rms = _rms(frame)
         peak_rms = max(peak_rms, rms)
 
         # learn the room: quiet-ish frames pull the floor toward themselves
-        if rms < floor * 2.5:
+        if not spoke and rms < floor * 1.5:
             floor = floor * 0.97 + rms * 0.03
-        eff_stop = max(300, int(floor * 2.2))
+        eff_stop = max(a.get("stop_rms", 500), int(floor * 1.5))
 
         final = None
         if on_frame is not None:
             final = on_frame(frame)   # wrapper returns finalized text, if any
 
         if not spoke:
-            if rms >= max(a["start_rms"], eff_stop * 1.6):
+            preroll.append(frame)
+            if rms >= max(a["start_rms"], eff_stop * 1.3):
                 spoke = True
-                frames.append(frame)
+                frames.extend(preroll)
                 silent_run = 0
             continue
 
         frames.append(frame)
-        if final:
-            last_final_at = time.time()
         quiet = rms < eff_stop
         if quiet:
             silent_run += 1
@@ -142,19 +218,48 @@ def record_utterance(mic, cfg, on_frame=None, should_stop=None, wait_timeout_s=N
             silent_run = 0
         # end conditions
         if silent_run >= silence_needed:
+            end_reason = "silence"
             break
-        if last_final_at is not None and time.time() - last_final_at > 0.7 and quiet:
+        if final and quiet:
+            end_reason = "recognizer endpoint"
             break
         if len(frames) >= max_frames:
+            end_reason = "length cap"
             break
 
     if not spoke:
-        print(f"[ear] no speech (peak={peak_rms} floor={int(floor)} eff_stop={int(floor*2.2)})",
+        print(f"[ear] no speech (peak={peak_rms} floor={int(floor)})",
               file=sys.stderr, flush=True)
     else:
-        print(f"[ear] utterance {len(frames)*20}ms (peak={peak_rms} floor={int(floor)})",
+        print(f"[ear] utterance {len(frames)*20}ms in {time.monotonic()-started:.2f}s "
+              f"({end_reason}, peak={peak_rms} floor={int(floor)})",
               file=sys.stderr, flush=True)
     return b"".join(frames) if spoke else b""
+
+
+@dataclass
+class WakeResult:
+    text: str
+    prefix_pcm: bytes = b""
+
+
+def strip_wake_prefix(text, wake_text=""):
+    """Remove an optional name, including the alias that actually woke us."""
+    words = list(re.finditer(r"[\w']+", text.lower()))
+    heard = wake_text.lower().split()
+    if not words:
+        return ""
+    tokens = [w.group() for w in words]
+    count = 0
+    if tokens[0] == "hey" and len(tokens) > 1 and tokens[1].startswith("spark"):
+        count = 2
+    elif tokens[0].startswith("spark"):
+        count = 1
+    elif heard:
+        count = 2 if heard[0] in {"hey", "the", "a"} and len(heard) > 1 else 1
+        if tokens[:count] != heard[:count]:
+            count = 0
+    return text[words[count-1].end():].lstrip(" ,.!?:;- ") if count else text
 
 
 def listen_for_wake(frames, recognizer, cfg, wake_words, tap_check=None):
@@ -165,9 +270,8 @@ def listen_for_wake(frames, recognizer, cfg, wake_words, tap_check=None):
     generator every time; that bug hung the listener forever). Arms on
     sound onset, feeds Vosk a continuous stream, checks both partials
     and finalized text for the wake word, ends the session on ~1.2s of
-    quiet. Returns True on wake; False if tap_check fires.
+    quiet. Returns WakeResult on wake; False if tap_check fires.
     """
-    import json as _json
     a = cfg["audio"]
     silence_limit = a["silence_ms"] // MicStream.FRAME_MS
     arm_rms = a.get("wake_arm_rms", 400)
@@ -201,42 +305,76 @@ def listen_for_wake(frames, recognizer, cfg, wake_words, tap_check=None):
             return False  # too quiet to be a real wake attempt
         if first in _WEAK and len(tokens) <= 2:
             return True
-        if pair in {("the", "park"), ("a", "spark"), ("hey", "clark"), ("hey", "stark")} and len(tokens) <= 3:
+        if pair in {("the", "park"), ("a", "spark"), ("hey", "clark"),
+                    ("hey", "stark"), ("hey", "spa"), ("hey", "heart"),
+                    ("hey", "hart")} and len(tokens) <= 3:
             return True
         return False
 
 
     recognizer.begin()
+    preroll = deque(maxlen=10)
     while True:
         armed = False
         silence_run = 0
         peak = 0
+        audio = deque(maxlen=200)
+        partial_candidate = None
+        partial_count = 0
+        frame_count = 0
         while True:
-            frame = next(frames)
+            frame = next(frames, None)
+            if frame is None:
+                return False
             if tap_check is not None and tap_check():
                 return False
             rms = _rms(frame)
             if not armed:
+                preroll.append(frame)
                 if rms >= arm_rms:
                     recognizer.begin()  # fresh decode session at onset
-                    final = recognizer.feed(frame)
+                    audio.extend(preroll)
+                    final = None
+                    for lead in preroll:
+                        final = recognizer.feed(lead) or final
+                    preroll.clear()
                     armed = True
                     silence_run = 0
                     peak = rms
                     print(f"[ear] armed (rms={rms})", file=sys.stderr, flush=True)
                     if final and _is_wake(final.lower().split(), peak):
-                        return final
+                        return WakeResult(final)
                 continue
+            audio.append(frame)
             final = recognizer.feed(frame)  # continuous; returns text at endpoints
             peak = max(peak, rms)
             if final:
                 print(f"[ear] final: '{final}'", file=sys.stderr, flush=True)
                 if _is_wake(final.lower().split(), peak):
                     print(f"[ear] WAKE via final: '{final}'", file=sys.stderr, flush=True)
-                    return final
+                    return WakeResult(final)
                 # not a wake: new utterance segment — loudness from the last
                 # one must NOT authorize a later quiet weak-word hallucination
                 peak = 0
+                recognizer.begin()
+                audio.clear()
+                partial_candidate = None
+                partial_count = 0
+            frame_count += 1
+            if not final and frame_count % 5 == 0:
+                partial = recognizer.partial().lower()
+                # Only strong names can wake early. Confusions still need a
+                # completed short utterance and the existing loudness gate.
+                if _is_wake(partial.split(), peak=0):
+                    name = tuple(partial.split()[:2]) if partial.startswith("hey ") else partial.split()[0]
+                    partial_count = partial_count + 1 if name == partial_candidate else 1
+                    partial_candidate = name
+                    if partial_count >= 2:
+                        print(f"[ear] WAKE via partial: '{partial}'", file=sys.stderr, flush=True)
+                        return WakeResult(partial, b"".join(audio))
+                else:
+                    partial_candidate = None
+                    partial_count = 0
             if rms < a["stop_rms"]:
                 silence_run += 1
                 if silence_run >= silence_limit:
@@ -247,7 +385,7 @@ def listen_for_wake(frames, recognizer, cfg, wake_words, tap_check=None):
                         print(f"[ear] session tail: '{tail}'", file=sys.stderr, flush=True)
                         if _is_wake(tail.split(), peak):
                             print(f"[ear] WAKE via tail: '{tail}'", file=sys.stderr, flush=True)
-                            return tail
+                            return WakeResult(tail)
                     break
             else:
                 silence_run = 0

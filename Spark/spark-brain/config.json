@@ -12,7 +12,7 @@
   "audio": {
     "input_device": "plughw:CARD=tlv320aic31xxso,DEV=0",
     "sample_rate": 16000,
-    "silence_ms": 700,
+    "silence_ms": 460,
     "max_utterance_ms": 5000,
     "start_rms": 900,
     "stop_rms": 500,
@@ -60,7 +60,9 @@
     "enabled": true,
     "words": [
       "spark",
-      "hey spark"
+      "hey spark",
+      "sparky",
+      "hey sparky"
     ],
     "chirp": "/.doly/sounds/wuw/wuw_1.wav",
     "wait_timeout_s": 6.0

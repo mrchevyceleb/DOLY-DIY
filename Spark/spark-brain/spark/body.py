@@ -475,15 +475,16 @@ class Body:
             return False
         with self._tts_lock:
             try:
+                started = time.perf_counter()
                 # strip anything the synth would read literally
                 text = re.sub(r"[*_`#>]+", "", text)
                 self._produce_speech(text)
                 self._snd.play(TTS_WAV, self._next_id())  # (file, block_id)
+                dur = self._wav_duration(TTS_WAV)
+                self._speaking_until = time.time() + dur + 0.25
+                _log(f"speech: first audio {time.perf_counter()-started:.2f}s")
                 if wait:
-                    dur = self._wav_duration(TTS_WAV)
                     time.sleep(dur + 0.15)
-                    # wake-word echo suppression: don't "hear" ourselves
-                    self._speaking_until = time.time() + dur + 1.0
                 return True
             except Exception as e:
                 _log(f"speak failed: {e}")
@@ -497,7 +498,7 @@ class Body:
         except Exception:
             return 2.0
 
-    def wake_reaction(self):
+    def wake_reaction(self, audible=True):
         """'Hey Spark' acknowledged: stock wake chirp + WAKE_WORD eyes + cyan.
 
         defer=False: this runs on the main thread (right after the wake
@@ -505,7 +506,7 @@ class Body:
         queue wouldn't flush until next turn and the chirp would be silent.
         """
         chirp = self.cfg.get("wake", {}).get("chirp")
-        if chirp:
+        if chirp and audible:
             self.play_sfx(chirp, defer=False)
         self.mood_eyes("WAKE_WORD")
         self._led_flash("Cyan")
@@ -520,9 +521,6 @@ class Body:
         First word still waits for the first synth, but multi-sentence
         replies no longer serialize synth+play per sentence.
         """
-        sentences = list(sentences)
-        if not sentences:
-            return
         if not (self.has.get("tts") and self.has.get("sound")):
             for sent in sentences:
                 self.speak(sent, wait=False)
@@ -531,31 +529,32 @@ class Body:
         import shutil
         prev_end = 0.0
         played = []
+        started = time.perf_counter()
         with self._tts_lock:
-            for i, sent in enumerate(sentences):
-                text = re.sub(r"[*_`#>]+", "", (sent or "").strip())
-                if not text:
-                    continue
-                tmp = f"/tmp/spark_tts_{os.getuid()}_{i}.wav"
-                self._produce_speech(text)      # writes TTS_WAV (blocking)
-                shutil.copyfile(TTS_WAV, tmp)
-                # wait for the previous sentence to finish playing
-                now = time.time()
-                if prev_end > now:
-                    time.sleep(prev_end - now)
-                self._snd.play(tmp, self._next_id())
-                prev_end = time.time() + self._wav_duration(tmp) + 0.05
-                played.append(tmp)
-            # let the last sentence finish
-            now = time.time()
-            if prev_end > now:
-                time.sleep(prev_end - now)
-            for tmp in played:
-                try:
-                    os.remove(tmp)
-                except Exception:
-                    pass
-        self._speaking_until = prev_end + 1.0
+            try:
+                # Consume lazily: requesting the whole list buffers the LLM.
+                for i, sent in enumerate(sentences):
+                    text = re.sub(r"[*_`#>]+", "", (sent or "").strip())
+                    if not text:
+                        continue
+                    tmp = f"/tmp/spark_tts_{os.getuid()}_{i}.wav"
+                    self._produce_speech(text)
+                    shutil.copyfile(TTS_WAV, tmp)
+                    played.append(tmp)
+                    time.sleep(max(0, prev_end - time.time()))
+                    self._snd.play(tmp, self._next_id())
+                    prev_end = time.time() + self._wav_duration(tmp) + 0.05
+                    self._speaking_until = prev_end + 0.20
+                    if len(played) == 1:
+                        _log(f"stream: first audio {time.perf_counter()-started:.2f}s")
+            finally:
+                # A broken LLM stream must still finish/clean up queued audio.
+                time.sleep(max(0, prev_end - time.time()))
+                for tmp in played:
+                    try:
+                        os.remove(tmp)
+                    except OSError:
+                        pass
 
     def pet_pulse(self):
         """Instant 'I felt that' reaction: sfx chirp + LED flash + happy eyes."""
