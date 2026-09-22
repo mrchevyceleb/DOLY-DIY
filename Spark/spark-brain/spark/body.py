@@ -45,7 +45,16 @@ class Body:
         self._hazard_clear_at = None
         self._hazard_airborne = False  # an all-void event followed the latch
         self._escaping = False      # _escape_edge drives bypass the hazard gate
-        self._void4_since = None    # first all-void event of the current sit
+        self.docked = False
+        self._dock_clear_since = None
+        self._power_stop = threading.Event()
+        self._power_thread = None
+        self._power_fault = False
+        self._power_lock = threading.RLock()
+        self._charging = None
+        if hw:
+            from .charging import ChargingMonitor
+            self._charging = ChargingMonitor()
         self._hazard_lock = threading.Lock()
         self._hazard_gen = 0        # bumped on every latch; clears check it
         self.anim = None           # AnimPlayer, created in _init_all
@@ -92,12 +101,7 @@ class Body:
         self._react_debounce = {}
         from .anim import AnimPlayer
         self.anim = AnimPlayer(self, self.cfg)
-        try:
-            if self.has.get("edge") and len(self._edge_gaps()) >= 4:
-                self._pose = [0.0, 0.0, 0.0]  # booted on the dock: home = origin
-                _log("booted on dock — home position known")
-        except Exception:
-            pass
+        self._start_power_monitor()
         _log(f"online subsystems: {[k for k, v in self.has.items() if v]}")
 
     def _try(self, name, fn):
@@ -308,22 +312,12 @@ class Body:
         if rc < 0:
             raise RuntimeError(f"edge init rc={rc}")
 
-        def _on_gap(direction):
+        def _handle_gap(direction):
             dir_name = str(direction).split(".")[-1]
-            if self._homing:
-                # homing treats the plate void as the TARGET, not a hazard
-                if dir_name == "All":      # all four void = fully on the plate
-                    self._home_arrived = True
-                    self.drive_stop()
-                return
-            if self._leaving_home:
-                return                     # crossing the plate lip on purpose
             # EMERGENCY: kill motion, lock further motion, react
             lock_s = 10.0 if dir_name == "All" else 3.0  # All = airborne/off-edge
             self._gap_lock_until = max(self._gap_lock_until, time.time() + lock_s)
             self._hazard_clear_at = None  # any gap event resets the quiet clock
-            if dir_name == "All" and getattr(self, "_void4_since", None) is None:
-                self._void4_since = time.time()  # plate-sit clock starts here
             if not getattr(self, "docked", False):
                 # real cliff/airborne event (not plate noise): latch the
                 # hazard's direction so the next blind drive can't re-run
@@ -354,6 +348,10 @@ class Body:
             self._led_flash("Red")
             if dir_name == "All":
                 self.mood_eyes("FRIGHTENED")
+
+        def _on_gap(direction):
+            with self._power_lock:
+                _handle_gap(direction)
 
         edge.on_gap_detect(_on_gap)
         rc = edge.enable_control()
@@ -568,43 +566,91 @@ class Body:
         self.eyes("listening")
 
     # ---------------------------------------------------------- dock sensing
+    def _start_power_monitor(self):
+        def watch():
+            while not self._power_stop.is_set():
+                self.refresh_power()
+                self._power_stop.wait(0.25)
+        self._power_thread = threading.Thread(target=watch, daemon=True)
+        self._power_thread.start()
+
+    def refresh_power(self):
+        """Serialize fault state with telemetry, motor checks and dispatch."""
+        with self._power_lock:
+            try:
+                result = self._refresh_power()
+                fault = result is None
+                if fault and not self._power_fault:
+                    self._power_fault = True
+                    self.stop_everything()  # stop arms already in flight too
+                self._power_fault = fault
+                return result
+            except Exception as e:
+                self._power_fault = True
+                _log(f"power monitor failed: {e}; motors held")
+                try:
+                    self.stop_everything()
+                except Exception:
+                    pass
+                return None
+
+    def _refresh_power(self):
+        """Charging latches a motor hold. Lost contact never triggers a nudge.
+        Release only after sustained discharge on fully supported ground."""
+        if self._charging is None:
+            return None
+        with self._power_lock:
+            charging = self._charging.sample()
+            now = time.monotonic()
+            if charging and not self._leaving_home:
+                if not self.docked:
+                    self.docked = True
+                    self._pose = None
+                    self.stop_everything()
+                    _log("charging confirmed: motors parked")
+                self._dock_clear_since = None
+            elif self.docked and not self._leaving_home:
+                clear = (charging is False and self._charging.average is not None
+                         and self._charging.average < -5
+                         and self.has.get("edge") and not self._edge_gaps())
+                if clear:
+                    if self._dock_clear_since is None:
+                        self._dock_clear_since = now
+                    elif now - self._dock_clear_since >= 5:
+                        self.docked = False
+                        self._pose = None
+                        self._dock_clear_since = None
+                        _log("removed from charger: supported ground confirmed")
+                else:
+                    self._dock_clear_since = None
+            if now >= getattr(self, "_next_power_log", 0):
+                self._next_power_log = now + 30
+                _log(f"power: battery={self.battery_pct()}% charging={charging} "
+                     f"parked={self.docked} shunt={self._charging.average} "
+                     f"voltage={self._charging.voltage} error={self._charging.error}")
+            return charging
+
     def dock_probe(self):
-        """Truth test: command a small rotate; if the gyro doesn't move,
-        the wheels aren't touching anything (charging dock). Result cached;
-        re-probes are cheap and safe (dock spin is invisible)."""
-        if not (self.has.get("drive") and self.has.get("imu")):
-            self.docked = False
+        """Read charging telemetry; never move wheels to test the dock."""
+        self.refresh_power()
+        return self.docked
+
+    def actuators_held(self):
+        """Keep arms and wheels still on charge or with uncertain power."""
+        if not self.hw:
             return False
-        try:
-            yaw_before = getattr(self, "_imu_yaw", None)
-            if yaw_before is None:
-                time.sleep(0.2)
-                yaw_before = getattr(self, "_imu_yaw", 0.0)
-            self._drive.go_rotate(self._next_id(), 12, False, 30, True, True)
-            deadline = time.time() + 3.0
-            while time.time() < deadline:
-                if self._drive.get_state() != self._drive.DriveState.Running:
-                    break
-                time.sleep(0.05)
-            time.sleep(0.3)
-            yaw_after = getattr(self, "_imu_yaw", yaw_before)
-            delta = abs(yaw_after - yaw_before)
-            self.docked = delta < 5.0
-            _log(f"dock_probe: yaw delta {delta:.1f} deg -> docked={self.docked}")
-            return self.docked
-        except Exception as e:
-            _log(f"dock_probe failed: {e}")
-            self.docked = False
-            return False
+        charging = self.refresh_power()
+        pct = self.battery_pct()
+        if pct is None or pct <= 2 or charging is None or self._power_fault:
+            return True
+        # A full battery can taper to zero current. Ambiguous support must
+        # also HOLD motion, never serve as permission to cross a plate lip.
+        if not self.has.get("edge") or len(self._edge_gaps()) >= 2:
+            return True
+        return self.docked
 
     def ensure_mobility(self):
-        """True if she can actually drive. Re-probes when docked (she may
-        have been lifted off)."""
-        if self._homing or self._leaving_home:
-            return True  # mid-ritual: the ritual itself manages safety
-        if not getattr(self, "docked", False):
-            return True
-        return not self.dock_probe()
+        return not self.actuators_held()
 
     # ------------------------------------------------------------- edge lock
     def _edge_gaps(self):
@@ -618,11 +664,7 @@ class Body:
                     for s in self._edge.get_sensors(state)]
         except Exception as e:
             _log(f"preflight poll failed: {e}")
-            gaps = []  # poll bug must not brick motion — events still guard
-        if len(gaps) < 4:
-            # the all-void sit clock lives and dies by the live sensor
-            # state, not by whoever last remembered to clear it
-            self._void4_since = None
+            gaps = ["Front_Left", "Front_Right", "Back_Left", "Back_Right"]
         return gaps
 
     def _motion_allowed(self, direction="forward"):
@@ -632,20 +674,15 @@ class Body:
         rotate -> Front gaps block (Back-only tolerated; watchdog guards
         mid-rotation sweeps).
         """
+        if self.actuators_held():
+            return False
         if not self.has.get("edge"):
-            return True
-        if (self._homing or self._leaving_home) and direction in ("forward", "rotate"):
-            return True  # the plate lip (front void) is the TARGET right now
+            return False
         if time.time() < getattr(self, "_gap_lock_until", 0):
             _log(f"motion blocked ({direction}): gap lock active")
             return False
         gaps = self._edge_gaps()
         if not gaps:
-            return True
-        if direction == "rotate" and len(gaps) >= 4:
-            # all-four-void is the dock signature — and the dock probe PROVED
-            # in-place pivoting is safe there. Dance away on the charger.
-            _log(f"dock pivot allowed (gaps={gaps})")
             return True
         front = any(g.startswith("Front") for g in gaps)
         back = any(g.startswith("Back") for g in gaps)
@@ -676,19 +713,13 @@ class Body:
     def _hazard_active(self, direction="forward"):
         """Edge hazard latch: True while motion TOWARD a cliff she already
         hit is unsafe. The latch is directional — a rear cliff must not
-        block the forward escape route. A verified dock exempts everything
-        (plate voids are not cliffs); lesser gap counts exempt directional
-        latches so the undock path can run, but an "all" latch is NEVER
-        exempted by gap count alone. Clears when the edge is verifiably
-        gone or when _escape_edge completes."""
+        block the forward escape route. Charging and gap counts never
+        exempt a latch. Clears when the edge is verifiably gone or when
+        _escape_edge completes."""
         latch = getattr(self, "_edge_hazard", None)
         if not latch or latch not in ("all", direction):
             return False
-        if self._on_verified_dock():
-            return False  # verified plate: its voids are not cliffs
         gaps = self._edge_gaps()
-        if latch != "all" and len(gaps) >= 3:
-            return False
         if not gaps:
             # zero gaps alone do not prove she was moved somewhere safe —
             # she could be parked just short of the same lip. Fast-clear
@@ -750,18 +781,12 @@ class Body:
         if not self.has.get("drive"):
             return False
         direction = "forward" if mm >= 0 else "backward"
-        if self._hazard_active(direction) and not (self._homing or self._leaving_home or self._escaping):
+        if self._hazard_active(direction) and not (self._leaving_home or self._escaping):
             _log(f"guarded drive refused: edge hazard latched ({direction})")
             return False
-        mobile = self.ensure_mobility()
-        if not mobile or not self._motion_allowed(direction):
-            # the undock ritual drives forward BLIND — it needs verified
-            # dock evidence, not just a gap count (cliff teeter vs plate)
-            if mm > 0 and self._on_verified_dock() and self._undock(then_mm=0, speed=speed):
-                _log("guarded drive: undocked, proceeding")
-            elif not mobile:
-                _log("guarded drive blocked: docked")
-                return False
+        if not self.ensure_mobility() or not self._motion_allowed(direction):
+            _log("guarded drive blocked: parked, low power, or edge")
+            return False
         remaining = abs(mm)
         total = remaining
         sign = 1 if mm >= 0 else -1
@@ -770,8 +795,14 @@ class Body:
             if not self._motion_allowed(direction):
                 return "stopped_edge" if remaining < total else False
             try:
-                self._drive.go_distance(self._next_id(), step, speed,
-                                        sign > 0, True)
+                # pybind11 SupportsInt rejects floats — step/speed are
+                # floats after the clamp math above and must be reified
+                with self._power_lock:
+                    if (not self._motion_allowed(direction)
+                            or (self._hazard_active(direction) and not self._escaping)):
+                        return False
+                    self._drive.go_distance(self._next_id(), int(round(step)),
+                                            int(round(speed)), sign > 0, True)
             except Exception as e:
                 self.drive_stop()  # a half-sent command must not free-run
                 _log(f"guarded drive failed: {e}")
@@ -782,6 +813,9 @@ class Body:
             time.sleep(0.05)  # let the drive enter Running before polling
             deadline = start + 8
             while time.time() < deadline:
+                if self.actuators_held():
+                    self.drive_stop()
+                    return False
                 gaps = self._edge_gaps()
                 if gaps and not self.is_on_dock():
                     front = any(g.startswith("Front") for g in gaps)
@@ -826,27 +860,25 @@ class Body:
         return "ok"
 
     def _watch_motion(self, direction="forward"):
-        """While a drive command runs, poll edges and hard-stop on a gap that
-        matters for THIS direction. Mirrors _motion_allowed — including its
-        dock-pivot rule (all-four void on a rotate is the dock signature:
-        let her spin, killing it here undoes the preflight allowance)."""
+        """Stop active drives on loss of power permission or an edge."""
         def _run():
             try:
                 deadline = time.time() + 15
                 while time.time() < deadline:
-                    if self._homing or self._leaving_home:
-                        _log(f"watchdog: idle (homing={self._homing} leaving={self._leaving_home})")
-                        return  # homing rituals manage their own arrival/stops
+                    if self._leaving_home:
+                        return  # bounded undock polls inline
+                    if self.actuators_held():
+                        self.drive_stop()
+                        return
                     if self._drive.get_state() != self._drive.DriveState.Running:
                         return
                     gaps = self._edge_gaps()
                     if gaps:
                         front = any(g.startswith("Front") for g in gaps)
                         back = any(g.startswith("Back") for g in gaps)
-                        dock_spin = direction == "rotate" and len(gaps) >= 4
                         danger = (front and direction in ("forward", "rotate")) or \
                                  (back and direction == "backward")
-                        if danger and not dock_spin:
+                        if danger:
                             self._gap_lock_until = max(self._gap_lock_until, time.time() + 3.0)
                             if not self.is_on_dock():
                                 # a rotate-stop found the cliff with a swept
@@ -979,11 +1011,14 @@ class Body:
 
     # ------------------------------------------------------------------ arms
     def arm_angle(self, angle, speed=40, wait=True):
-        if not self.has.get("arm"):
+        if self.actuators_held() or not self.has.get("arm"):
             return False
         try:
-            rc = self._arm.set_angle(self._next_id(), self._arm.ArmSide.Both,
-                                     speed=speed, angle=angle, with_brake=False)
+            with self._power_lock:
+                if self.actuators_held():
+                    return False
+                rc = self._arm.set_angle(self._next_id(), self._arm.ArmSide.Both,
+                                         speed=speed, angle=angle, with_brake=False)
             if rc < 0:
                 return False
             if wait:
@@ -1022,20 +1057,21 @@ class Body:
         if not self.has.get("drive"):
             return False
         direction = "forward" if mm >= 0 else "backward"
-        if self._hazard_active(direction) and not (self._homing or self._leaving_home or self._escaping):
+        if self._hazard_active(direction) and not (self._leaving_home or self._escaping):
             _log(f"drive_distance refused: edge hazard latched ({direction})")
             return False
         mobile = self.ensure_mobility()
         if not mobile or not self._motion_allowed(direction):
-            # forward command from a VERIFIED dock = leave home (a raw gap
-            # count can't tell the plate from a 3-wheel cliff teeter)
-            if mm > 0 and self._on_verified_dock() and self._undock(then_mm=mm, speed=speed):
-                return True  # the ritual drove her off AND ran the command
             _log("drive blocked: docked or edge")
             return False
         try:
             # SDK distance is unsigned; direction is the to_forward flag
-            self._drive.go_distance(self._next_id(), abs(mm), speed, mm >= 0, True)
+            with self._power_lock:
+                if (not self._motion_allowed(direction)
+                        or (self._hazard_active(direction) and not self._escaping)):
+                    return False
+                self._drive.go_distance(self._next_id(), int(round(abs(mm))),
+                                        int(round(speed)), mm >= 0, True)
             self._watch_motion("forward" if mm >= 0 else "backward")
             self._pose_update(dist_mm=mm)
             return True
@@ -1046,17 +1082,17 @@ class Body:
     def drive_rotate(self, degrees, speed=45):
         if not self.has.get("drive"):
             return False
-        if getattr(self, "docked", False):
-            # rotation ON the dock is probe-proven safe (she pivots in place);
-            # only linear motion risks rolling off the plate
-            _log("rotate allowed while docked (in-place pivot)")
-        elif not self.ensure_mobility():
-            _log("rotate blocked: docked")
+        if self.actuators_held():
             return False
         if not self._motion_allowed("rotate"):
             return False
         try:
-            self._drive.go_rotate(self._next_id(), degrees, False, speed, True, True)
+            with self._power_lock:
+                if (not self._motion_allowed("rotate")
+                        or (self._hazard_active("forward") and not self._escaping)):
+                    return False
+                self._drive.go_rotate(self._next_id(), int(round(degrees)), False,
+                                      int(round(speed)), True, True)
             self._watch_motion("rotate")
             self._pose_update(rot_deg=degrees)
             return True
@@ -1065,17 +1101,19 @@ class Body:
             return False
 
     def drive_stop(self):
-        if not self.has.get("drive"):
-            return False
-        ok = True
-        # attempt each wheel independently — one failure must not skip the other
-        for is_left in (False, True):
-            try:
-                self._drive.free_drive(0, is_left, True)
-            except Exception as e:
-                _log(f"drive_stop({'left' if is_left else 'right'}) failed: {e}")
-                ok = False
-        return ok
+        with self._power_lock:
+            if not self.has.get("drive"):
+                return False
+            ok = True
+            # attempt each wheel independently — one failure must not skip the other
+            for is_left in (False, True):
+                try:
+                    self._drive.free_drive(0, is_left, True)
+                except Exception as e:
+                    _log(f"drive_stop({'left' if is_left else 'right'}) failed: {e}")
+                    ok = False
+            return ok
+
 
     def stop_everything(self):
         """Emergency stop for the STOP command: animations, homing, wheels."""
@@ -1083,6 +1121,11 @@ class Body:
         self._leaving_home = False
         if self.anim:
             self.anim.stop()
+        if self.has.get("arm"):
+            try:
+                self._arm.abort(self._arm.ArmSide.Both)
+            except Exception as e:
+                _log(f"arm stop failed: {e}")
         return self.drive_stop()
 
     # --------------------------------------------------------------- homing
@@ -1127,132 +1170,19 @@ class Body:
             time.sleep(0.05)
         return False
 
-    def _undock(self, then_mm=0, speed=45):
-        """Drive off the charging plate: stock leave_home ritual, a clear-the-
-        lip extension if needed, then the caller's original command — ALL
-        inside one leaving-home flag window, so the watchdog never sees the
-        plate void as a cliff mid-ritual."""
-        if self._leaving_home or not self.anim:
-            return False
-        _log("undocking: leave_home ritual")
-        self._leaving_home = True
-        self._pose = [0.0, 0.0, 0.0]  # home = plate; drives below track offset
-        try:
-            if not self.anim.play("leave_home", blocking=True):
-                self._pose = None
-                return False
-            self.docked = False
-            if len(self._edge_gaps()) >= 3:
-                _log("undock: still over the plate — extending 120mm")
-                self._drive.go_distance(self._next_id(), 120, 25, True, True)
-                self._wait_drive_idle(timeout=8)
-                self._pose_update(dist_mm=120)
-            if then_mm:
-                self._drive.go_distance(self._next_id(), abs(then_mm), speed,
-                                        then_mm >= 0, True)
-                self._watch_motion("forward" if then_mm >= 0 else "backward")
-                self._pose_update(dist_mm=then_mm)
-            return True
-        finally:
-            self._leaving_home = False
-            _log(f"undock complete: gaps={self._edge_gaps()}")
+    def _undock(self, then_mm=0, speed=25):
+        """No autonomous departure until the dock corridor is localized."""
+        _log("undock unavailable: safe dock departure is not calibrated")
+        return False
 
     def go_home(self):
-        """Drive back to the charging dock: dead-reckoning for the bearing,
-        the edge sensors' all-four-void as the plate detector (the dock IS a
-        void signature). Bounded approach so a wrong bearing ends in a safe
-        abort, never a fall. Returns 'already'|'arrived'|'lost'|'unknown'."""
-        import math
-        if self._homing:
-            return "busy"
-        try:
-            if len(self._edge_gaps()) >= 4:
-                self._pose = [0.0, 0.0, 0.0]
-                if self.anim:
-                    self.anim.play("at_home", blocking=True)
-                return "already"
-        except Exception:
-            pass
-        if self._pose is None:
-            return "unknown"
-        self._homing = True
-        self._home_arrived = False
-        try:
-            x, y, h = self._pose
-            dist = math.hypot(x, y)
-            _log(f"go_home: pose=({x:.0f},{y:.0f},{h:.0f}) dist={dist:.0f}")
-            if dist > 80:
-                # face home: bearing of the origin relative to current heading
-                target = math.degrees(math.atan2(-y, -x))
-                turn = (target - h + 180) % 360 - 180
-                self.drive_rotate(turn, speed=30)
-                self._wait_drive_idle(timeout=10)
-            # approach in short segments, slow. Front void = maybe the plate;
-            # all-four void = definitely on it. A front void that never
-            # becomes all-four within 120mm = the wrong edge -> abort.
-            budget = dist * 1.5 + 200
-            driven = 0.0
-            creeps = 0
-            while budget > 0 and not self._home_arrived:
-                gaps = self._edge_gaps()
-                front_void = any(g.startswith("Front") for g in gaps)
-                if len(gaps) >= 4 or (front_void and len(gaps) >= 3):
-                    self._home_arrived = True
-                    break
-                if front_void:
-                    # front void BEFORE the dock should be in reach = wrong
-                    # edge. NEVER drive into it — abort immediately.
-                    if driven < dist * 0.6:
-                        _log("go_home: front void before target window — wrong edge, aborting")
-                        break
-                    # in the target window: it MIGHT be the plate lip. Creep
-                    # in tiny steps, stopping the instant the void doesn't
-                    # become the all-four plate signature.
-                    creeps += 1
-                    if creeps > 4:
-                        _log("go_home: void never became the plate — aborting")
-                        break
-                    step = 15
-                else:
-                    creeps = 0
-                    step = min(40, budget)
-                self.drive_distance(step, speed=18)
-                # poll DURING the drive — a blind 100mm segment is how she
-                # falls. 30ms cadence, same as the watchdog.
-                t_end = time.time() + 6
-                while time.time() < t_end:
-                    if self._home_arrived:
-                        break
-                    g2 = self._edge_gaps()
-                    if len(g2) >= 4:
-                        self._home_arrived = True
-                        self.drive_stop()
-                        break
-                    fv = any(g.startswith("Front") for g in g2)
-                    if fv and step > 15:  # big step meeting a void: stop NOW
-                        self.drive_stop()
-                        break
-                    if self._drive.get_state() != self._drive.DriveState.Running:
-                        break
-                    time.sleep(0.03)
-                self.drive_stop()
-                budget -= step
-                driven += step
-            self.drive_stop()
-            if self._home_arrived:
-                self._pose = [0.0, 0.0, 0.0]
-                if len(self._edge_gaps()) >= 4:
-                    self.docked = True  # only the full signature blocks motion
-                _log("go_home: arrived on the plate")
-                if self.anim:
-                    self.anim.play("at_home", blocking=True)
-                return "arrived"
-            self._pose = None  # lost: don't trust odometry anymore
-            self.drive_distance(-150, speed=25)  # back away from the wrong edge
-            return "lost"
-        finally:
-            self._homing = False
-            self._home_arrived = False
+        """Charge in place or request manual placement.
+        Edge sensors and odometry cannot distinguish the dock lip from a
+        table edge, so neither can authorize a blind docking approach."""
+        if self.is_on_dock():
+            return "already"
+        _log("home unavailable: safe dock approach is not calibrated")
+        return "unknown"
 
     # ----------------------------------------------------------- anim queue
     def queue_anim(self, name):
@@ -1330,49 +1260,24 @@ class Body:
             _log(f"idle_flourish: {e}")
 
     def is_on_dock(self):
-        """Reliable dock check: the all-four-void signature. The yaw probe can
-        misread on the grippy charger plate (wheels bite, yaw moves)."""
-        try:
-            return getattr(self, "docked", False) or len(self._edge_gaps()) >= 4
-        except Exception:
-            return getattr(self, "docked", False)
-
-    def _on_verified_dock(self):
-        """Positive dock evidence for gating hazards and the undock ritual
-        (leave_home drives forward BLIND). Proofs, cheapest first: the
-        docked flag (boot probe / homing arrival); or a SUSTAINED
-        all-four-void sit CONFIRMED by the gyro dock probe — ten seconds
-        of all-void could be the plate OR being held in the air, and only
-        the probe tells them apart (on the plate the wheels bite and a
-        probe pivot barely turns her; in the air she spins free). A
-        transient all-void never reaches the probe: the sit clock resets
-        the instant fewer than four sensors read void (see _edge_gaps)."""
-        if getattr(self, "docked", False):
-            return True
-        if len(self._edge_gaps()) >= 4:
-            since = getattr(self, "_void4_since", None)
-            if since is not None and time.time() - since > 10.0:
-                try:
-                    return bool(self.dock_probe())
-                except Exception as e:
-                    _log(f"verified-dock probe failed: {e}")
-                    return False
-            return False
-        return False
+        self.refresh_power()
+        return self.docked
 
     def wander_step(self):
         """Pet-like exploration: ONE safe move + a curious look.
         Short, preflighted, edge-gated, battery-aware."""
         import random
         try:
+            if self.actuators_held():
+                self.blink()
+                return False
             pct = self.battery_pct()
             low = self.cfg.get("idle", {}).get("low_battery_pct", 10)
             if pct is not None and pct < low and not self.is_on_dock():
-                _log(f"wander: battery {pct}% < {low}% — heading home to charge")
-                self.speak(f"Battery at {pct} percent. Taking myself home to charge.")
+                _log(f"wander: battery {pct}% < {low}% — checking return to charger")
                 result = self.go_home()
                 if result == "unknown":
-                    self.speak("I don't remember where home is — carry me to my dock, please?")
+                    self.speak(f"Battery at {pct} percent. Please carry me to my dock to charge.")
                 elif result == "lost":
                     self.speak("I can't find my dock — a little help, please?")
                 return True
@@ -1565,6 +1470,16 @@ class Body:
 
     # --------------------------------------------------------------- cleanup
     def dispose(self):
+        self._power_stop.set()
+        if self._power_thread:
+            self._power_thread.join(timeout=2)
+        self.stop_everything()
+        if self._charging:
+            try:
+                if not self._charging.close():
+                    _log("power reader still busy; continuing hardware cleanup")
+            except Exception as e:
+                _log(f"power reader cleanup failed: {e}")
         for name, mod in (("tts", "_tts"), ("sound", "_snd"), ("eye", "_eye"),
                           ("touch", "_touch"), ("arm", "_arm"), ("led", "_led"),
                           ("battery", "_battery")):

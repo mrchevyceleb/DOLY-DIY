@@ -288,7 +288,7 @@ class Router:
         elif result == "arrived":
             b.speak("Home sweet home. Charging up!")
         elif result == "unknown":
-            b.speak("I don't know where home is right now — put me on my dock once and I'll remember it.")
+            b.speak("I need help getting onto my charger. Please place me on my dock.")
         elif result == "busy":
             b.speak("I'm already heading home!")
         else:  # lost

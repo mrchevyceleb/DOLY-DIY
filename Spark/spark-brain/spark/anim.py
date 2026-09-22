@@ -229,13 +229,16 @@ class AnimPlayer:
 
     def _arm_to(self, side_xml, angle, speed, wait):
         b = self.body
-        if not b.has.get("arm"):
+        if b.actuators_held() or not b.has.get("arm"):
             return
         side = {0: b._arm.ArmSide.Both, 1: b._arm.ArmSide.Left,
                 2: b._arm.ArmSide.Right}[side_xml]
         try:
-            rc = b._arm.set_angle(b._next_id(), side, speed=speed, angle=angle,
-                                  with_brake=False)
+            with b._power_lock:
+                if b.actuators_held():
+                    return
+                rc = b._arm.set_angle(b._next_id(), side, speed=speed, angle=angle,
+                                      with_brake=False)
             if rc < 0:
                 _log(f"arm rc={rc} (angle {angle}, speed {speed})")
                 return

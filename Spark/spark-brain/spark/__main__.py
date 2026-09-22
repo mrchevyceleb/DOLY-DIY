@@ -170,24 +170,14 @@ class Spark:
         Only when she knows where home is and isn't already on the dock."""
         try:
             pct = self.body.battery_pct()
-            gaps = self.body._edge_gaps()
-            if len(gaps) >= 3:
-                # dock signature: anchor home. 3-void plates exist (flaky
-                # sensor), so allow 3 after two consecutive reads — she sits
-                # on her charger for hours, never at a cliff corner that long
-                self._beacon_streak = getattr(self, "_beacon_streak", 0) + 1
-                if self.body._pose is None and (len(gaps) >= 4 or self._beacon_streak >= 2):
-                    self.body._pose = [0.0, 0.0, 0.0]
-                    log("spark", "home beacon: dock signature — home re-anchored")
-                return  # on the charger
-            self._beacon_streak = 0
+            if self.body.is_on_dock() or self.body.actuators_held():
+                return
             if pct is None or pct >= idle_cfg.get("low_battery_pct", 10):
                 return
-            log("spark", f"battery {pct}% — heading home to charge")
-            self.body.speak(f"My battery is at {pct} percent. I'm going home to charge.")
+            log("spark", f"battery {pct}% — checking return to charger")
             result = self.body.go_home()
             if result == "unknown":
-                self.body.speak("I don't remember where home is — please carry me to my dock.")
+                self.body.speak(f"My battery is at {pct} percent. Please carry me to my dock to charge.")
             elif result == "lost":
                 self.body.speak("I couldn't find my dock — a little help, please?")
         except Exception as e:
@@ -219,14 +209,8 @@ class Spark:
         log("spark", "microphone verified")
         sd_notify("READY=1")
 
-        # boot dock probe: she usually wakes up on her charger — know it now
-        try:
-            self.body.dock_probe()
-            if len(self.body._edge_gaps()) >= 4:
-                self.body._pose = [0.0, 0.0, 0.0]
-                log("spark", "booted on dock — home position known")
-        except Exception as e:
-            log("spark", f"dock probe at boot failed: {e}")
+        # Power telemetry runs continuously; boot must never turn a wheel.
+        self.body.dock_probe()
 
         # ONE persistent mic stream: always drained (no stale buffers)
         with MicStream(self.cfg) as mic:
@@ -308,21 +292,6 @@ class Spark:
                         leftover_text = " ".join(leftover)
 
                 if idle_action["act"] == "wander":
-                    # fully charged + docked = hop off and roam the desk like
-                    # a pet. Cooldown so she isn't docking/undocking constantly
-                    pct = self.body.battery_pct()
-                    full = idle_cfg.get("roam_full_pct", 95)
-                    cool = idle_cfg.get("roam_cooldown_s", 1800)
-                    if (idle_cfg.get("roam_enabled", True)
-                            and pct is not None and pct >= full
-                            and time.time() - getattr(self, "_last_auto_roam", 0) > cool
-                            and self.body.is_on_dock()):
-                        self._last_auto_roam = time.time()
-                        log("spark", f"battery {pct}% — fully charged, off to roam")
-                        if self.body._undock():
-                            self.body.speak("All charged up! Let's explore.")
-                        _, next_flourish, next_wander = _reset_idle()
-                        continue
                     log("spark", "idle: exploring")
                     self.body.wander_step()
                     _, next_flourish, next_wander = _reset_idle()
