@@ -48,25 +48,37 @@ DOCK_REFUSAL = "My wheels don't reach down here — I'm on my charging dock! Lif
 
 # Voice switching by name — aliases include common ASR mishearings
 # ("switch to weekly" really is how "wheatley" comes back from the mic).
-# alias -> (display name, model path|None, needs modern piper module)
+# alias -> (display, server_voice, local model|None, needs modern piper,
+#           pitch semitones, robot mix)
+# server_voice names resolve on Moria's piper server (~0.4s synth); None
+# means the voice only exists locally on the Pi. The three curated picks:
+# Robot = hfc +2st + sheen (Matt's default), hfc = +2st plain,
+# lessac = +2st on the clearest voice in the catalog.
 _MODULE_PY = "/opt/piper-ng/bin/python"
+_PIPER_DIR = "/.doly/data/piper"
 _VOICES = {
-    "wheatley": ("Wheatley", "/.doly/data/piper/wheatley-en.onnx", True),
-    "weekly": ("Wheatley", "/.doly/data/piper/wheatley-en.onnx", True),
-    "glados": ("GLaDOS", "/.doly/data/piper/glados.onnx", False),
-    "gladys": ("GLaDOS", "/.doly/data/piper/glados.onnx", False),
-    "amy": ("Amy", "/.doly/data/piper/en_US-amy-medium.onnx", False),
-    "hfc": ("HFC", "/.doly/data/piper/en_US-hfc_female-medium.onnx", False),
-    "lessac": ("Lessac", "/.doly/data/piper/en_US-lessac-high.onnx", False),
-    "stock": ("stock", None, False),
-    "original": ("stock", None, False),
+    "robot":    ("Robot",    "hfc",      f"{_PIPER_DIR}/en_US-hfc_female-medium.onnx", False, 2, 0.25),
+    "default":  ("Robot",    "hfc",      f"{_PIPER_DIR}/en_US-hfc_female-medium.onnx", False, 2, 0.25),
+    "spark":    ("Robot",    "hfc",      f"{_PIPER_DIR}/en_US-hfc_female-medium.onnx", False, 2, 0.25),
+    "hfc":      ("HFC",      "hfc",      f"{_PIPER_DIR}/en_US-hfc_female-medium.onnx", False, 2, 0.0),
+    "lessac":   ("Lessac",   "lessac",   f"{_PIPER_DIR}/en_US-lessac-high.onnx",       False, 2, 0.0),
+    "kathleen": ("Kathleen", "kathleen", f"{_PIPER_DIR}/en_US-kathleen-low.onnx",      False, 3, 0.0),
+    "cori":     ("Cori",     "cori",     f"{_PIPER_DIR}/en_GB-cori-high.onnx",         False, 2, 0.0),
+    "wheatley": ("Wheatley", None,       f"{_PIPER_DIR}/wheatley-en.onnx",             True,  0, 0.0),
+    "weekly":   ("Wheatley", None,       f"{_PIPER_DIR}/wheatley-en.onnx",             True,  0, 0.0),
+    "glados":   ("GLaDOS",   None,       f"{_PIPER_DIR}/glados.onnx",                  False, 0, 0.0),
+    "gladys":   ("GLaDOS",   None,       f"{_PIPER_DIR}/glados.onnx",                  False, 0, 0.0),
+    "amy":      ("Amy",      None,       f"{_PIPER_DIR}/en_US-amy-medium.onnx",        False, 0, 0.0),
+    "stock":    ("stock",    None,       None,                                         False, 0, 0.0),
+    "original": ("stock",    None,       None,                                         False, 0, 0.0),
 }
+_CURATED = ("Robot", "HFC", "Lessac")
 _SWITCH_VERB_RE = re.compile(r"\b(switch|change|swap|use|try)\b", re.IGNORECASE)
 _VOICE_LIST_RE = re.compile(r"\b(what|which|list)\b", re.IGNORECASE)
 
 
 def _voice_intent(low):
-    """('display name', model path|None) when the text asks to switch voices."""
+    """Voice tuple when the text asks to switch voices, else None."""
     if not (_SWITCH_VERB_RE.search(low) or "voice" in low):
         return None
     for alias, val in _VOICES.items():
@@ -120,16 +132,18 @@ class Router:
                 self.body.speak(f"LEDs going {color.lower()}.")
                 return True
 
-        # voice management: "switch to wheatley", "what voices do you have"
+        # voice management: "switch to robot", "what voices do you have"
         voice = _voice_intent(low)
         if voice is not None:
-            name, model, needs_module = voice
-            return self._voice_switch(name, model, needs_module)
+            name, server_voice, model, needs_module, pitch, robot_mix = voice
+            return self._voice_switch(name, server_voice, model, needs_module, pitch, robot_mix)
         if "voice" in low and _VOICE_LIST_RE.search(low):
-            current = self.cfg.get("tts", {}).get("piper_model")
-            current = os.path.basename(current).split(".")[0] if current else "stock"
-            b_names = ", ".join(sorted({n for n, _, _ in _VOICES.values()}))
-            self.body.speak(f"I'm using the {current} voice. I can also be: {b_names}. "
+            tts_cfg = self.cfg.get("tts", {})
+            current = tts_cfg.get("voice_name") or tts_cfg.get("piper_model")
+            current = os.path.basename(str(current)).split(".")[0] if current else "stock"
+            b_names = ", ".join(sorted({v[0] for v in _VOICES.values() if v[0] != "stock"}))
+            self.body.speak(f"I'm using my {current} voice. The tuned robot picks are "
+                            f"{', '.join(_CURATED)}. I can also be: {b_names}, or stock. "
                             "Just say switch to, and a name.")
             return True
 
@@ -270,9 +284,9 @@ class Router:
         return True
 
     # ----------------------------------------------------------------- voice
-    def _voice_switch(self, name, model, needs_module):
+    def _voice_switch(self, name, server_voice, model, needs_module, pitch, robot_mix):
         b = self.body
-        if model and not os.path.exists(model):
+        if model and not os.path.exists(model) and not server_voice:
             b.speak(f"I don't have the {name} voice files yet.")
             return True
         if needs_module and not os.path.exists(_MODULE_PY):
@@ -281,20 +295,23 @@ class Router:
         tts_cfg = self.cfg.setdefault("tts", {})
         if model:
             tts_cfg["piper_model"] = model
-            if needs_module:
-                tts_cfg["piper_module_python"] = _MODULE_PY
-            else:
-                tts_cfg.pop("piper_module_python", None)
         else:
             tts_cfg.pop("piper_model", None)
+        tts_cfg["voice_name"] = server_voice  # None = this voice is Pi-local only
+        if needs_module:
+            tts_cfg["piper_module_python"] = _MODULE_PY
+        else:
             tts_cfg.pop("piper_module_python", None)
-        self._persist_voice(model, needs_module)
+        tts_cfg["pitch_semitones"] = pitch
+        tts_cfg["robot_mix"] = robot_mix
+        self._persist_voice(model, needs_module, server_voice, pitch, robot_mix)
         # the confirmation itself speaks in the newly selected voice
         b.speak(f"This is my {name} voice now." if model
                 else "Back to my original voice.")
         return True
 
-    def _persist_voice(self, model, needs_module=False):
+    def _persist_voice(self, model, needs_module=False, server_voice=None,
+                       pitch=0, robot_mix=0):
         """Best-effort: write the choice back to config.json so it survives
         restarts. The live switch already holds either way."""
         try:
@@ -306,13 +323,15 @@ class Router:
             tts = data.setdefault("tts", {})
             if model:
                 tts["piper_model"] = model
-                if needs_module:
-                    tts["piper_module_python"] = _MODULE_PY
-                else:
-                    tts.pop("piper_module_python", None)
             else:
                 tts.pop("piper_model", None)
+            tts["voice_name"] = server_voice
+            if needs_module:
+                tts["piper_module_python"] = _MODULE_PY
+            else:
                 tts.pop("piper_module_python", None)
+            tts["pitch_semitones"] = pitch
+            tts["robot_mix"] = robot_mix
             with open(path, "w", encoding="utf-8") as f:
                 json.dump(data, f, indent=2)
         except Exception as e:

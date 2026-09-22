@@ -25,7 +25,9 @@ OFFLINE_LINE = "My big brain is offline right now, but I can still take commands
 # --- ASR noise guards -------------------------------------------------------
 # whisper describes non-speech audio parenthetically: '(beep)', '(water
 # splashing)', '[music]'. Those are not user utterances — never converse them.
-_SOUND_EVENT_RE = re.compile(r"^\s*[(\[][^()\[\]\n]*[)\]]\s*\.?\s*$")
+# Multiple events can arrive in one capture ('(squeaking) (laughing)') — every
+# parenthetical/bracket group must match, or the text leaks to the brain.
+_SOUND_EVENT_RE = re.compile(r"^(?:\s*[(\[][^()\[\]\r\n]*[)\]]\s*\.?)+\s*$")
 # classic whisper hallucinations on quiet/noisy audio. Only distrust them
 # when the capture itself was weak (a loud, clear "yeah" follow-up is real).
 _ASR_HALLUCINATIONS = {
@@ -179,7 +181,7 @@ class Spark:
                     log("spark", "home beacon: dock signature — home re-anchored")
                 return  # on the charger
             self._beacon_streak = 0
-            if pct is None or pct >= idle_cfg.get("low_battery_pct", 15):
+            if pct is None or pct >= idle_cfg.get("low_battery_pct", 10):
                 return
             log("spark", f"battery {pct}% — heading home to charge")
             self.body.speak(f"My battery is at {pct} percent. I'm going home to charge.")
@@ -284,6 +286,15 @@ class Spark:
                 if in_followup:
                     follow_state["left"] -= 1
                     triggered_by_wake = "(followup)"
+                    # echo guard: her own reply may still be playing when the
+                    # follow-up window opens — drain until she's done, or she
+                    # hears the tail of her own voice and answers herself
+                    frames = mic.frames()
+                    drain_deadline = time.time() + 30.0
+                    while (self.body.speaking_recently()
+                           and time.time() < drain_deadline):
+                        if next(frames, None) is None:
+                            break  # stream exhausted — never spin
                 elif wake_enabled:
                     triggered_by_wake = self._wait_for_wake(
                         mic, recognizer, wake_words, idle_check=_idle_or_tap)

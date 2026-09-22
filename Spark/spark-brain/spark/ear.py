@@ -171,6 +171,10 @@ def listen_for_wake(frames, recognizer, cfg, wake_words, tap_check=None):
     a = cfg["audio"]
     silence_limit = a["silence_ms"] // MicStream.FRAME_MS
     arm_rms = a.get("wake_arm_rms", 400)
+    # acoustic-confusion wake words ('clark', 'park', ...) only count when
+    # the utterance was LOUD — real wake attempts are near-field speech;
+    # TV/music/chatter whispering a lookalike word stays below this.
+    weak_min_peak = a.get("wake_weak_rms", 1400)
     # only SINGLE-word entries can wake alone — "hey spark" must arrive whole
     wake_first = {w for w in wake_words if " " not in w}
     wake_pairs = {tuple(w.split()[:2]) for w in wake_words if len(w.split()) >= 2}
@@ -178,20 +182,23 @@ def listen_for_wake(frames, recognizer, cfg, wake_words, tap_check=None):
     # vosk-small's realistic transcription set for the spoken wake word
     _STRONG = {"spark", "sparks", "sparked", "sparkle"}
     _WEAK = {"clark", "clarks", "stark", "starks", "park", "mark",
-             "dark", "dock", "spar", "spork", "shark"}
+             "dark", "dock", "spar", "spork", "shark", "spec", "speck",
+             "spock", "spa", "step", "steps"}
 
-    def _is_wake(tokens):
+    def _is_wake(tokens, peak=0):
         if not tokens:
             return False
         first = tokens[0]
         if first in wake_first or first.startswith("spark") or first in _STRONG:
             return True
         pair = tuple(tokens[:2])
-        if pair in wake_pairs or pair == ("hey", "spark"):
+        if pair in wake_pairs:
             return True
         # acoustic confusions: 'clark'/'stark'/'the park' — accept only on
         # SHORT utterances (a lone word = a wake attempt), so conversation
         # mentioning them mid-sentence doesn't false-wake.
+        if peak < weak_min_peak:
+            return False  # too quiet to be a real wake attempt
         if first in _WEAK and len(tokens) <= 2:
             return True
         if pair in {("the", "park"), ("a", "spark"), ("hey", "clark"), ("hey", "stark")} and len(tokens) <= 3:
@@ -203,6 +210,7 @@ def listen_for_wake(frames, recognizer, cfg, wake_words, tap_check=None):
     while True:
         armed = False
         silence_run = 0
+        peak = 0
         while True:
             frame = next(frames)
             if tap_check is not None and tap_check():
@@ -214,16 +222,21 @@ def listen_for_wake(frames, recognizer, cfg, wake_words, tap_check=None):
                     final = recognizer.feed(frame)
                     armed = True
                     silence_run = 0
+                    peak = rms
                     print(f"[ear] armed (rms={rms})", file=sys.stderr, flush=True)
-                    if final and _is_wake(final.lower().split()):
+                    if final and _is_wake(final.lower().split(), peak):
                         return final
                 continue
             final = recognizer.feed(frame)  # continuous; returns text at endpoints
+            peak = max(peak, rms)
             if final:
                 print(f"[ear] final: '{final}'", file=sys.stderr, flush=True)
-                if _is_wake(final.lower().split()):
+                if _is_wake(final.lower().split(), peak):
                     print(f"[ear] WAKE via final: '{final}'", file=sys.stderr, flush=True)
                     return final
+                # not a wake: new utterance segment — loudness from the last
+                # one must NOT authorize a later quiet weak-word hallucination
+                peak = 0
             if rms < a["stop_rms"]:
                 silence_run += 1
                 if silence_run >= silence_limit:
@@ -232,7 +245,7 @@ def listen_for_wake(frames, recognizer, cfg, wake_words, tap_check=None):
                     tail = recognizer.finish().strip().lower()
                     if tail:
                         print(f"[ear] session tail: '{tail}'", file=sys.stderr, flush=True)
-                        if _is_wake(tail.split()):
+                        if _is_wake(tail.split(), peak):
                             print(f"[ear] WAKE via tail: '{tail}'", file=sys.stderr, flush=True)
                             return tail
                     break

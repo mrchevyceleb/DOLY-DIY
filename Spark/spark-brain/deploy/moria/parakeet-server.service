@@ -1,0 +1,21 @@
+[Unit]
+Description=Parakeet ASR server (Spark's ears)
+After=network.target
+
+[Service]
+Type=simple
+User=sparksvc
+Group=nogroup
+Environment=PARAKEET_PORT=8399
+Environment=PARAKEET_THREADS=16
+# LAN binding only — if Moria's LAN IP changes, update this AND spark's config
+Environment=PARAKEET_BIND=192.168.50.204
+ExecStart=/usr/bin/python3 /opt/whisper-moria/parakeet_server.py
+Restart=on-failure
+RestartSec=2
+NoNewPrivileges=yes
+ProtectSystem=full
+PrivateTmp=yes
+
+[Install]
+WantedBy=multi-user.target

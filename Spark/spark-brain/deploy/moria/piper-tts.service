@@ -1,0 +1,21 @@
+[Unit]
+Description=Piper TTS server (Spark's voice)
+After=network.target
+
+[Service]
+Type=simple
+User=sparksvc
+Group=nogroup
+Environment=PIPER_PORT=8398
+Environment=PIPER_VOICE=hfc
+# LAN binding only — if Moria's LAN IP changes, update this AND spark's config
+Environment=PIPER_BIND=192.168.50.204
+ExecStart=/usr/bin/python3 /opt/piper-moria/tts_server.py
+Restart=on-failure
+RestartSec=2
+NoNewPrivileges=yes
+ProtectSystem=full
+PrivateTmp=yes
+
+[Install]
+WantedBy=multi-user.target

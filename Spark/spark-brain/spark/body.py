@@ -12,6 +12,7 @@ import wave
 
 TTS_WAV = f"/tmp/spark_tts_{os.getuid()}.wav"  # per-UID: service (root) and
 # human test sessions (doly) must not fight over one sticky-bit /tmp file
+TTS_RAW = f"/tmp/spark_tts_raw_{os.getuid()}.wav"  # synth output before FX
 
 
 def _log(msg):
@@ -329,13 +330,75 @@ class Body:
 
     # ------------------------------------------------------------------- TTS
     def _produce_speech(self, text):
-        """Synthesize text into TTS_WAV. Downloaded Piper voice when
-        tts.piper_model is configured, stock doly_tts otherwise."""
-        model = self.cfg.get("tts", {}).get("piper_model")
-        if model:
-            self._produce_piper(text, model)
-        else:
+        """Synthesize text into TTS_WAV.
+
+        Priority: Moria's piper server (tts.server_url — ~0.4s vs 5-15s on
+        the Pi) -> local piper (tts.piper_model) -> stock doly_tts.
+        Voice FX (pitch_semitones / robot_mix) always apply on top, so
+        Spark sounds identical regardless of where the synth ran."""
+        tts_cfg = self.cfg.get("tts", {})
+        produced = False
+        server = tts_cfg.get("server_url")
+        if server and tts_cfg.get("voice_name") is not None:
+            try:
+                self._produce_server(text, server, tts_cfg)
+                produced = True
+            except Exception as e:
+                _log(f"server TTS failed ({e}) — falling back to local synth")
+        if not produced:
+            model = tts_cfg.get("piper_model")
+            try:
+                if model:
+                    self._produce_piper(text, model)
+                    produced = True
+            except Exception as e:
+                _log(f"local piper failed ({e}) — falling back to stock voice")
+        if not produced:
             self._tts.produce(text)
+            return  # stock voice writes TTS_WAV itself; no FX on it
+        try:
+            self._apply_fx()
+        except Exception as e:
+            _log(f"voice FX failed ({e}) — using raw synth")
+            import shutil
+            shutil.copyfile(TTS_RAW, TTS_WAV)
+
+    def _produce_server(self, text, server, tts_cfg):
+        """Moria's piper HTTP server: POST plain text, receive WAV."""
+        import urllib.request
+        import urllib.parse
+        voice = tts_cfg.get("voice_name")
+        url = server.rstrip("/") + "/"
+        if voice:
+            url += "?" + urllib.parse.urlencode({"voice": voice})
+        req = urllib.request.Request(url, data=text.encode("utf-8"))
+        t0 = time.time()
+        with urllib.request.urlopen(req, timeout=6) as resp:
+            if resp.status != 200:
+                raise RuntimeError(f"server rc={resp.status}")
+            data = resp.read(4 * 1024 * 1024 + 1)  # hard cap: sentences, not novels
+        if len(data) < 100 or data[:4] != b"RIFF" or data[8:12] != b"WAVE":
+            raise RuntimeError(f"response is not a WAV ({len(data)} bytes)")
+        import io
+        import wave as _wave
+        with _wave.open(io.BytesIO(data), "rb") as w:  # structural parse, not just magic
+            if w.getnframes() == 0:
+                raise RuntimeError("server returned an empty WAV")
+        with open(TTS_RAW, "wb") as f:
+            f.write(data)
+        _log(f"server TTS {time.time()-t0:.2f}s ({len(data)} bytes)")
+
+    def _apply_fx(self):
+        """Run voicefx over the raw synth when FX are configured."""
+        tts_cfg = self.cfg.get("tts", {})
+        pitch = float(tts_cfg.get("pitch_semitones", 0) or 0)
+        robot = float(tts_cfg.get("robot_mix", 0) or 0)
+        if pitch or robot:
+            from . import voicefx
+            voicefx.apply_fx(TTS_RAW, TTS_WAV, pitch_semitones=pitch, robot_mix=robot)
+        else:
+            import shutil
+            shutil.copyfile(TTS_RAW, TTS_WAV)
 
     def _produce_piper(self, text, model):
         """Synthesize via piper: the stock binary by default, or the modern
@@ -346,7 +409,7 @@ class Body:
         py = tts_cfg.get("piper_module_python")
         if py:
             cmd = [py, "-m", "piper", "--model", model,
-                   "--output-file", TTS_WAV]
+                   "--output-file", TTS_RAW]
             if tts_cfg.get("piper_length_scale"):
                 cmd += ["--length-scale", str(tts_cfg["piper_length_scale"])]
             proc = subprocess.run(cmd, input=text, capture_output=True, text=True,
@@ -356,7 +419,7 @@ class Body:
                    "--model", model,
                    "--espeak_data", tts_cfg.get("piper_espeak_data",
                                                 "/.doly/libs/piper/lib/espeak-ng-data"),
-                   "--output_file", TTS_WAV, "-q"]
+                   "--output_file", TTS_RAW, "-q"]
             if tts_cfg.get("piper_length_scale"):
                 cmd += ["--length_scale", str(tts_cfg["piper_length_scale"])]
             env = dict(os.environ)
@@ -1049,9 +1112,18 @@ class Body:
         import random
         try:
             pct = self.battery_pct()
-            if pct is not None and pct < 20:
-                return False
-            if not self._motion_allowed("rotate"):
+            low = self.cfg.get("idle", {}).get("low_battery_pct", 10)
+            if pct is not None and pct < low and not self.is_on_dock():
+                _log(f"wander: battery {pct}% < {low}% — heading home to charge")
+                self.speak(f"Battery at {pct} percent. Taking myself home to charge.")
+                result = self.go_home()
+                if result == "unknown":
+                    self.speak("I don't remember where home is — carry me to my dock, please?")
+                elif result == "lost":
+                    self.speak("I can't find my dock — a little help, please?")
+                return True
+            if pct is not None and pct < low + 10:
+                # low but not critical: conserve, don't roam further
                 return False
             if self.is_on_dock():
                 # on the dock: eyes and arms only, never wheels
@@ -1063,6 +1135,8 @@ class Body:
                     self.arm_angle(20, speed=45)
                     self.idle_flourish()
                 return True
+            if not self._motion_allowed("rotate"):
+                return self._escape_edge()
             # roam radius: dead-reckoning drifts, so straying too far from the
             # dock means it's time to head home while home is still findable
             if self._pose is not None:
@@ -1085,6 +1159,54 @@ class Body:
         except Exception as e:
             _log(f"wander_step: {e}")
             return False
+
+    def _escape_edge(self):
+        """Stuck facing a REAL cliff: back up slowly (rear preflight +
+        watchdog), then turn away from the gap side. Fires ONLY on a
+        confirmed current front gap — dock sensor noise, gap locks, and
+        unrelated motion interlocks all return False instead of moving."""
+        if self.is_on_dock():
+            _log("escape_edge: docked — plate sensor noise is not a cliff")
+            return False
+        gaps = self._edge_gaps()
+        _log(f"escape_edge: gaps={gaps}")
+        if len(gaps) >= 4:
+            _log("escape_edge: all-four void = airborne — refusing to move")
+            return False
+        front = [g for g in gaps if g.startswith("Front")]
+        if not front:
+            _log("escape_edge: no current front gap — staying put")
+            return False
+        if any(g.startswith("Back") for g in gaps):
+            _log("escape_edge: boxed in (front AND back gaps) — staying put")
+            return False
+        # wait out any active gap lock (3s typical), then back off slowly
+        lock_left = getattr(self, "_gap_lock_until", 0) - time.time()
+        if lock_left > 0:
+            time.sleep(min(lock_left + 0.2, 4.0))
+        if not self.drive_distance(-80, speed=20):
+            _log("escape_edge: backward blocked too — staying put")
+            return False
+        self._wait_drive_idle(timeout=8)
+        self.drive_stop()
+        still = [g for g in self._edge_gaps() if g.startswith("Front")]
+        if still:
+            _log(f"escape_edge: front gap persists after retreat ({still}) — not rotating")
+            return False
+        left = any(g.startswith("Front_Left") or g.endswith("Left") for g in gaps)
+        right = any(g.startswith("Front_Right") or g.endswith("Right") for g in gaps)
+        if left and not right:
+            turn = -100  # gap on the left: swing right
+        elif right and not left:
+            turn = 100
+        else:
+            turn = 130  # full-front or unknown: big turn either way
+        if not self.drive_rotate(turn, speed=25):
+            _log("escape_edge: rotation rejected — escape FAILED, staying put")
+            return False
+        self._wait_drive_idle(timeout=10)
+        self.drive_stop()
+        return True
 
     def _bump_mood(self, delta):
         score = getattr(self, "_mood_score", 3) + delta

@@ -12,10 +12,11 @@
   "audio": {
     "input_device": "plughw:CARD=tlv320aic31xxso,DEV=0",
     "sample_rate": 16000,
-    "silence_ms": 900,
+    "silence_ms": 700,
     "max_utterance_ms": 5000,
     "start_rms": 900,
-    "stop_rms": 500
+    "stop_rms": 500,
+    "wake_weak_rms": 4000
   },
   "asr": {
     "model_path": "/opt/spark/vosk-model-small-en-us-0.15",
@@ -26,7 +27,11 @@
   "tts": {
     "voice_model": 1,
     "volume": 1,
-    "piper_model": "/.doly/data/piper/glados.onnx"
+    "server_url": "http://192.168.50.204:8398",
+    "voice_name": "hfc",
+    "pitch_semitones": 2,
+    "robot_mix": 0.25,
+    "piper_model": "/.doly/data/piper/en_US-hfc_female-medium.onnx"
   },
   "sounds": {
     "volume": 90,
@@ -62,7 +67,14 @@
   },
   "idle": {
     "flourish_s": 40,
-    "wander_s": 120
+    "wander_s": 90,
+    "low_battery_pct": 10,
+    "battery_check_s": 120,
+    "battery_retry_s": 300,
+    "roam_enabled": true,
+    "roam_full_pct": 95,
+    "roam_cooldown_s": 1800,
+    "roam_radius_mm": 700
   },
   "moods": true,
   "conversation": {
