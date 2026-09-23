@@ -1868,6 +1868,15 @@ class Body:
             return "busy"
         if not self.hw or not self.cfg.get("homing", {}).get("enabled", False):
             return "unknown"
+        # Edge-camped when asked to leave: back away from the lip first so
+        # the marker search may rotate. Escape refuses when boxed in; homing
+        # then reports the edge honestly instead of silently wedging.
+        gaps = self._edge_gaps()
+        if (any(g.startswith("Front") for g in gaps)
+                and not any(g.startswith("Back") for g in gaps)
+                and not self.actuators_held()):
+            _log("go_home: edge ahead — retreating before the search")
+            self._escape_edge()
         from .homing import Homing
         self._approach_stop.clear()
         self._approach_sensor_stamps = {}
