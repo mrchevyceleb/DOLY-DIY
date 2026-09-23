@@ -76,7 +76,7 @@
     "battery_check_s": 10,
     "battery_retry_s": 60,
     "roam_enabled": true,
-    "roam_full_pct": 98,
+    "roam_full_pct": 96,
     "roam_cooldown_s": 1800,
     "roam_radius_mm": 3000,
     "roam_reserve_pct_per_m": 2
