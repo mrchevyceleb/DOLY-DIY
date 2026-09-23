@@ -353,6 +353,39 @@ class HomingTests(unittest.TestCase):
             self.assertEqual(b.go_home(), "power")  # dead pack never starts
         self.assertEqual(homing.return_value.run.call_count, 0)  # dead pack never starts
 
+    def test_reseat_probe_seats_when_charge_appears(self):
+        b, _ = self.rig()
+        b.hw = Mock()
+        b.has = {"drive": True, "edge": True}
+        b.docked = False
+        b._edge_gaps = Mock(return_value=["Front_Left", "Front_Right"])
+        b._charging = Mock()
+        b._charging.healthy.return_value = True
+        b.speak = Mock()
+        drive = Mock()
+        drive.DriveState = Mock(Running=1, Completed=2, Error=3)
+        drive.get_state.side_effect = [1, 2]  # Running then Completed
+        drive.go_distance.return_value = 0
+        b._drive = drive
+        # drive preflight sees no contact; the settle window after the move finds charge
+        b.refresh_power = Mock(side_effect=[False, False, False, True, True])
+        self.assertTrue(b.reseat_probe())
+        self.assertEqual(drive.go_distance.call_args.args[3], False)  # reverse
+        b.speak.assert_not_called()
+
+    def test_reseat_probe_ignores_other_gap_profiles(self):
+        b, _ = self.rig()
+        b.hw = Mock()
+        b.has = {"drive": True, "edge": True}
+        b.docked = False
+        b._edge_gaps = Mock(return_value=["Front_Left"])
+        b._drive = Mock()
+        self.assertFalse(b.reseat_probe())
+        b._drive.go_distance.assert_not_called()
+        b._edge_gaps = Mock(return_value=["Front_Left", "Back_Right"])
+        self.assertFalse(b.reseat_probe())
+        b._drive.go_distance.assert_not_called()
+
     def test_roaming_does_not_translate_without_reacquiring_home(self):
         from spark.roaming import Roaming
         b, _ = self.rig()

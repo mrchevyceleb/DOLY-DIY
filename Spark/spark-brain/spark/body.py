@@ -1684,6 +1684,102 @@ class Body:
                                        "forward" if front else "backward")
             _log(f"dock departure: result={result} parked={self.docked}")
 
+    def reseat_probe(self):
+        """Dock profile (front-front gaps) with no electrical contact: one
+        slow guarded reverse to seat the pins.
+
+        The identical sensor state facing a real cliff makes the same
+        reverse a retreat, so the direction is safe under both readings.
+        Rear-edge guards stay armed; charge onset stops the move early.
+        """
+        if (self.sleeping or self._homing or self._roaming or self._leaving_home
+                or self._docking_entry is not None or self._approaching):
+            return False
+        now = time.monotonic()
+        if now < getattr(self, "_next_reseat_probe", 0):
+            return False
+        self._next_reseat_probe = now + 600  # bounded cadence, success or fail
+        if self.docked or self.refresh_power() is True:
+            return True  # already seated
+        gaps = set(self._edge_gaps())
+        if gaps != {"Front_Left", "Front_Right"}:
+            return False  # only the known dock-face profile
+        if (not self.has.get("drive") or not self.has.get("edge")
+                or time.time() < getattr(self, "_gap_lock_until", 0)
+                or self._hazard_active("backward")):
+            return False
+        pct = self.battery_pct()
+        if pct is None or pct <= 2 or not self._charging.healthy():
+            return False  # uncertain power stays held
+        stop = self.motion_stop_factory() if self.motion_stop_factory else (lambda: False)
+        self._approach_stop.clear()
+        deadline = time.monotonic() + 15
+        seated, travelled = False, 0
+
+        def _verify_seat():
+            settle = time.monotonic() + 6
+            while time.monotonic() < settle:
+                if self.refresh_power() is True:
+                    return True
+                time.sleep(.1)
+            return False
+
+        _log("reseat probe: dock profile without contact — seating")
+        try:
+            while travelled < 25 and time.monotonic() < deadline:
+                contact = False
+                with self._power_lock:
+                    self.refresh_power()
+                    if (self._charging.charging is True or stop() or self.sleeping
+                            or self._approach_stop.is_set()
+                            or any(g.startswith("Back") for g in self._edge_gaps())
+                            or self._hazard_active("backward")):
+                        break
+                    step = min(12, 25 - travelled)
+                    rc = self._drive.go_distance(self._next_id(), step, 10, False, True)
+                    if rc is False or (rc is not None and rc < 0):
+                        break
+                end, running, complete = time.monotonic() + 1.5, False, False
+                while time.monotonic() < end:
+                    with self._power_lock:
+                        if self.refresh_power() is True:
+                            contact = True
+                            break
+                        if (stop() or self.sleeping
+                                or any(g.startswith("Back") for g in self._edge_gaps())):
+                            break
+                    state = self._drive.get_state()
+                    if state == self._drive.DriveState.Running:
+                        running = True
+                    elif state == self._drive.DriveState.Completed and running:
+                        complete = True
+                        break
+                    elif state == self._drive.DriveState.Error:
+                        break
+                    time.sleep(.03)
+                self.drive_stop()
+                if contact:
+                    seated = _verify_seat()
+                    break
+                if not complete:
+                    break
+                travelled += step
+                if _verify_seat():
+                    seated = True
+                    break
+        finally:
+            self.drive_stop()
+        if seated:
+            _log("reseat probe: charge confirmed — seated")
+        else:
+            self._pose = None
+            self._roam_distance_bound = None
+            _log("reseat probe: no contact after seating move")
+            if time.time() >= getattr(self, "_next_reseat_speak", 0):
+                self._next_reseat_speak = time.time() + 3600
+                self.speak("I'm sitting on my dock, but I'm not charging. Is my dock plugged in?")
+        return seated
+
     def dock_roam_ready(self):
         """One automatic departure per dock visit after a full minute at 100%."""
         ready = (self.cfg.get("idle", {}).get("roam_enabled", True)

@@ -305,6 +305,7 @@ class Spark:
                     _, next_flourish, next_wander = _reset_idle()
                     continue
                 if idle_action["act"] == "battery":
+                    self.body.reseat_probe()  # dock-face-without-contact self-heal
                     pct = self.body.battery_pct()
                     threshold = idle_cfg.get("low_battery_pct", 10) + self.body._return_margin_pct()
                     low = pct is not None and pct <= threshold
