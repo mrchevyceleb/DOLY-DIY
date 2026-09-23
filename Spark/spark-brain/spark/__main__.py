@@ -507,8 +507,8 @@ class Spark:
         return ("\nLIVE BODY STATE (authoritative over older conversation; null means unknown): "
                 + json.dumps(state)
                 + "\nA previous movement result is not a current camera view. "
-                "Never invent a dock, fall, prank, or sensor reading. For a movement problem, "
-                "give one short factual sentence; do not blame or tease Matt.")
+                "Report body facts only from this state — treat null as unknown. "
+                "For a movement problem, give one short factual sentence, warmly on Matt's side.")
 
     def _llm_reply(self, user_text, extra_context=None):
         """Stream a brain reply for user_text; speak sentence-by-sentence.
