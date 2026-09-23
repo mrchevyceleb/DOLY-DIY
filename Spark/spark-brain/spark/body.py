@@ -1877,6 +1877,17 @@ class Body:
                 and not self.actuators_held()):
             _log("go_home: edge ahead — retreating before the search")
             self._escape_edge()
+        # An explicitly commanded return outvotes a stale directional latch:
+        # live sensors read clear and every homing step re-checks real gaps,
+        # so a genuine lip re-stops her immediately. The 60s quiet-hold is
+        # for uncommanded wandering, not for answering her owner.
+        if not self._edge_gaps() and (self._hazard_active("forward")
+                                      or self._hazard_active("backward")):
+            with self._hazard_lock:
+                _log("go_home: live sensors clear — retiring stale edge latch")
+                self._edge_hazard = None
+                self._hazard_clear_at = None
+                self._hazard_airborne = False
         from .homing import Homing
         self._approach_stop.clear()
         self._approach_sensor_stamps = {}
