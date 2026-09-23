@@ -200,6 +200,39 @@ class VoiceLatencyTests(unittest.TestCase):
         text, _ = spark._listen_command(Mock(), Mock(), WakeResult("spark stop"))
         self.assertEqual(text, "stop")
 
+    def test_loud_vosk_garble_of_the_name_wakes_locally(self):
+        # 'Spark!' spoken clearly but transcribed 'bark' — loud, lone word
+        rec = Mock()
+        rec.feed.return_value = None
+        rec.partial.return_value = ""
+        rec.finish.return_value = "bark"
+        speech, room = pcm(5000), pcm(1000)
+        frames = [room]*5 + [speech]*15 + [room]*40
+        result = listen_for_wake(iter(frames), rec, CFG, ["spark"],
+                                 noise_floor=lambda: 1000)
+        self.assertTrue(result)
+        self.assertEqual(result.text, "bark")
+        # same garble too quiet stays asleep
+        rec2 = Mock()
+        rec2.feed.return_value = None
+        rec2.partial.return_value = ""
+        rec2.finish.return_value = "bark"
+        self.assertFalse(listen_for_wake(iter([room]*5 + [pcm(2000)]*15 + [room]*40),
+                                         rec2, CFG, ["spark"], noise_floor=lambda: 1000))
+
+    def test_loud_parakeet_bart_still_wakes(self):
+        rec = Mock()
+        rec.feed.return_value = None
+        rec.partial.return_value = ""
+        rec.finish.return_value = "barkley hear me"
+        speech, room = pcm(5000), pcm(1000)
+        frames = [room]*5 + [speech]*25 + [room]*40
+        verify = Mock(return_value="Bart, can you hear me?")
+        result = listen_for_wake(iter(frames), rec, CFG, ["spark"],
+                                 noise_floor=lambda: 1000, verify_wake=verify)
+        self.assertTrue(result)
+        self.assertEqual(result.text, verify.return_value)
+
     def test_noisy_room_wake_endpoint_verifies_soundalike_and_keeps_full_command(self):
         rec = Mock()
         rec.feed.return_value = None

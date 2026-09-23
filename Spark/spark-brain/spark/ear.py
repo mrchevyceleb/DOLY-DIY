@@ -331,6 +331,38 @@ def strip_wake_prefix(text, wake_text=""):
     return text[words[count-1].end():].lstrip(" ,.!?:;- ") if count else text
 
 
+def _lev(a, b, cap=3):
+    """Bounded edit distance; returns cap+1 when already too far."""
+    if abs(len(a) - len(b)) > cap:
+        return cap + 1
+    prev = list(range(len(b) + 1))
+    for i, ca in enumerate(a, 1):
+        cur = [i]
+        for j, cb in enumerate(b, 1):
+            cur.append(min(prev[j] + 1, cur[j-1] + 1, prev[j-1] + (ca != cb)))
+        if min(cur) > cap:
+            return cap + 1
+        prev = cur
+    return prev[-1]
+
+
+def _near_wake(token, heads):
+    """Acoustic neighbor of a wake head ('bark'/'bart' for 'spark').
+
+    Vosk-small transcribes the spoken name as 'bar', 'bark', 'barkley',
+    'bart' — the leading s-cluster of 'spark' is what gets swallowed, so
+    compare against the head AND its cluster-dropped form ('park').
+    Common unrelated words ('what', 'right', 'go') stay three or more away.
+    """
+    if len(token) < 3:
+        return False
+    variants = set(heads)
+    for head in heads:
+        if len(head) > 2 and head[0] == "s" and head[1] not in "aeiou":
+            variants.add(head[1:])
+    return min(_lev(token, v) for v in variants) <= 2
+
+
 def has_wake_name(text, wake_words):
     tokens = re.findall(r"[\w']+", text.lower())
     if tokens and tokens[0] in {"okay", "ok"}:
@@ -365,6 +397,9 @@ def listen_for_wake(frames, recognizer, cfg, wake_words, tap_check=None,
     _WEAK = {"clark", "clarks", "stark", "starks", "park", "mark",
              "dark", "dock", "spar", "spork", "shark", "spec", "speck",
              "spock", "spa", "step", "steps"}
+    _HEADS = {"spark", "sparky"} | {
+        name.lower().split()[-1] for name in wake_words
+        if name.strip() and name.lower().split()[-1] not in {"hey"}}
 
     def _is_wake(tokens, peak=0):
         if not tokens:
@@ -378,7 +413,7 @@ def listen_for_wake(frames, recognizer, cfg, wake_words, tap_check=None,
         # mentioning them mid-sentence doesn't false-wake.
         if not allow_weak or peak < weak_min_peak:
             return False  # too quiet to be a real wake attempt
-        if first in _WEAK and len(tokens) <= 2:
+        if (first in _WEAK or _near_wake(first, _HEADS)) and len(tokens) <= 2:
             return True
         if pair in {("the", "park"), ("a", "spark"), ("hey", "clark"),
                     ("hey", "stark"), ("hey", "spa"), ("hey", "heart"),
@@ -406,8 +441,18 @@ def listen_for_wake(frames, recognizer, cfg, wake_words, tap_check=None,
             print(f"[ear] wake check {time.monotonic()-check_started:.2f}s: '{text}' -> '{verified}' "
                   f"(peak={peak} floor={floor:.0f} speech={voiced_frames*20}ms)",
                   file=sys.stderr, flush=True)
-            if verified and has_wake_name(verified, wake_words):
-                return WakeResult(verified)
+            if verified:
+                if has_wake_name(verified, wake_words):
+                    return WakeResult(verified)
+                # Parakeet itself garbles a loud name ('Bart, can you hear
+                # me?'); a near-match first word with real speech energy is
+                # still the name — quiet lookalikes keep needing the exact hit.
+                v_tokens = re.findall(r"[\w']+", verified.lower())
+                if v_tokens and v_tokens[0] in {"okay", "ok"}:
+                    v_tokens = v_tokens[1:]
+                if (v_tokens and _near_wake(v_tokens[0], _HEADS)
+                        and peak >= a.get("wake_verify_fuzzy_rms", 4500)):
+                    return WakeResult(verified)
         return None
 
     recognizer.begin()
