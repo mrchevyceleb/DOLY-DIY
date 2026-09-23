@@ -70,7 +70,7 @@ class ChargingSafetyTests(unittest.TestCase):
         b._drive.go_distance.assert_not_called()
         b._drive.go_rotate.assert_not_called()
 
-    def test_lost_contact_keeps_dock_hold_until_pickup_then_supported_discharge(self):
+    def test_lost_contact_keeps_dock_hold_until_supported_discharge(self):
         gaps = ["Back_Left", "Back_Right"]
         b = self.body(pct=50, gaps=gaps)
         b.refresh_power()
@@ -82,18 +82,12 @@ class ChargingSafetyTests(unittest.TestCase):
         gaps.clear()
         with patch("spark.body.time.monotonic", return_value=101):
             b.refresh_power()
-        self.assertTrue(b.docked)
+        self.assertTrue(b.docked)  # one quiet sample alone cannot unlock
         with patch("spark.body.time.monotonic", return_value=107):
             b.refresh_power()
-        self.assertTrue(b.docked)  # sliding onto a flat surface cannot unlock
-        gaps.extend(["Front_Left", "Front_Right", "Back_Left", "Back_Right"])
-        with patch("spark.body.time.monotonic", return_value=108):
-            b.refresh_power()
-        gaps.clear()
-        with patch("spark.body.time.monotonic", return_value=109):
-            b.refresh_power()
-        with patch("spark.body.time.monotonic", return_value=115):
-            b.refresh_power()
+        # Slid off the contacts OR gently picked up onto open ground: the
+        # dock face is gone from under the sensors and discharge is real.
+        # She must KNOW she is off the dock so roaming/homing can act.
         self.assertFalse(b.docked)
         self.assertIsNone(b._pose)
 
