@@ -1518,13 +1518,16 @@ class Body:
                 if stamp <= 0 or now-changed > .3:
                     _log(f"approach sensor stop: stale {side} age={now-changed:.3f}s {details}")
                     return "sensor"
-                # ST DT0020 / UM1983: ECE / max convergence (6/7) report no
-                # target; range overflow (13/15) means beyond range, not a
-                # close obstacle. Underflow (12/14) can mean 0-10mm: stop.
-                # The SDK uses -1 range for these normal open-space results.
-                # Do not confuse them with hardware, ambient-light, or stale
-                # data faults; those still stop motion below.
+                # ST DT0020 / UM1983: ECE / max convergence (6/7), max SNR
+                # (8) and raw alt (9) report no target; range overflow (13/15)
+                # means beyond range, not a close obstacle. Crosstalk/sigma
+                # range-ignore (10/11) WITH a -1 SDK range is a rejected
+                # measurement, not a contact — glossy tables at grazing
+                # angles trip it constantly. A genuinely close object reads
+                # underflow (12/14) or a real distance, which still stop.
                 if error in (6, 7, 13, 15):
+                    continue
+                if error in (8, 9, 10, 11) and distance < 0:
                     continue
                 if error != 0 or distance < 0:
                     _log(f"approach sensor stop: invalid range/status {details}")

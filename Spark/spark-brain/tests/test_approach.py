@@ -131,7 +131,7 @@ class ApproachTests(unittest.TestCase):
                 self.assertIsNone(b.approach_proximity())
             with patch("spark.body.time.monotonic", return_value=200.5):
                 self.assertEqual(b.approach_proximity(), "sensor")
-        for error in (1, 5, 8, 11, 12, 14, 16, 18):
+        for error in (1, 5, 12, 14, 16, 18):
             b._tof.get_sensors_data.return_value = sensors(stamp=127, error=error, distance=-1)
             self.assertEqual(b.approach_proximity(), "sensor")
         b._tof.get_sensors_data.return_value = [sensors(stamp=128, error=6, distance=-1)[0],

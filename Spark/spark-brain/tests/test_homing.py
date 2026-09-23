@@ -256,6 +256,22 @@ class HomingTests(unittest.TestCase):
             self.assertEqual(b.approach_proximity(), "sensor")
         b._tof.get_sensors_data.assert_not_called()
 
+    def test_range_ignore_statuses_with_no_distance_allow_motion(self):
+        b = Body({}, hw=False)
+        b.hw = True
+        b.has["tof"] = True
+        b._tof = Mock()
+        # glossy-table crosstalk/sigma rejects: no distance, not a contact
+        for status in (8, 9, 10, 11):
+            b._tof_snapshot = (100, [(0, -1, status, 1000), (1, -1, status, 1001)])
+            with patch("spark.body.time.monotonic", return_value=100.1):
+                self.assertIsNone(b.approach_proximity())
+        # hardware faults, underflow and a real distance still stop
+        for bad in ((0, -1, 4, 1002), (0, -1, 12, 1003), (0, -1, 14, 1004), (0, 45, 0, 1005)):
+            b._tof_snapshot = (100, [bad, (1, -1, 6, 1001)])
+            with patch("spark.body.time.monotonic", return_value=100.1):
+                self.assertEqual(b.approach_proximity(), "sensor" if bad[2] else "obstacle")
+
     def test_entry_never_waives_leading_gaps_or_early_ramp_gaps(self):
         from spark.dock_entry import DockEntry
         for gap, travelled, expected in (("Front_Left", 0, "edge"),
