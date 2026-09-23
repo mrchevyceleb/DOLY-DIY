@@ -303,8 +303,7 @@ class Body:
 
         def _on_update(data):
             try:
-                self._imu_yaw = data.ypr.yaw
-                self._imu_updated_at = time.monotonic()
+                self._note_yaw(data.ypr.yaw)
             except Exception:
                 pass
 
@@ -314,6 +313,47 @@ class Body:
         except Exception:
             pass
         self._imu = imu
+
+    def _note_yaw(self, yaw):
+        """Track yaw; a hand rotation retires a stale edge-hazard latch.
+
+        The latch records WHICH WAY a cliff was. Turning her by hand (or
+        any large uncommanded rotation) voids that knowledge — holding it
+        strands a repositioned robot. Commanded drives never clear it.
+        """
+        now = time.monotonic()
+        previous = self._imu_yaw
+        self._imu_yaw = yaw
+        self._imu_updated_at = now
+        try:
+            driving = (self._drive is not None
+                       and self._drive.get_state() == self._drive.DriveState.Running)
+        except Exception:
+            driving = False
+        if (driving or self._homing or self._roaming or self._leaving_home
+                or self._escaping or self._approaching
+                or self._docking_entry is not None):
+            self._hand_turn = 0.0
+            return
+        delta = abs((yaw - (previous if previous is not None else yaw) + 180) % 360 - 180)
+        if delta > 45:
+            return  # sample glitch
+        if delta >= 1.0:
+            if now - getattr(self, "_hand_turn_at", 0) <= 1.5:
+                self._hand_turn = getattr(self, "_hand_turn", 0.0) + delta
+            else:
+                self._hand_turn = delta
+            self._hand_turn_at = now
+        elif now - getattr(self, "_hand_turn_at", 0) > 2.0:
+            self._hand_turn = 0.0  # slow drift never accumulates
+        if getattr(self, "_hand_turn", 0.0) >= 25 and self._edge_hazard is not None:
+            with self._hazard_lock:
+                if self._edge_hazard is not None:
+                    _log(f"hand turn: clearing stale {self._edge_hazard} edge hazard")
+                    self._edge_hazard = None
+                    self._hazard_clear_at = None
+                    self._hazard_airborne = False
+            self._hand_turn = 0.0
 
     _TOF_REACTIONS = {
         "ObjectComing": ("CAUTIOUS", None, None),      # eyes only — walk-by
