@@ -257,7 +257,12 @@ class Homing:
         return self.turn_to(start)
 
     def measure_plane(self, camera, observations):
-        """Resolve planar ambiguity with up to two guarded 10-degree views."""
+        """Resolve planar ambiguity with guarded separated views.
+
+        Close range strengthens the marker's two-pose ambiguity; widen the
+        parallax when narrow views disagree, and fall back to plain marker
+        yaw (the final entry gate still demands a fresh visual check).
+        """
         start = self.heading()
         if start is None:
             return "sensor", None
@@ -267,7 +272,7 @@ class Homing:
         views = [(start, angles)]
         _log(f"plane view heading={start:.1f} candidates={angles}")
         sign = -1 if observations[-1].camera_x_mm > 0 else 1
-        for offset in (sign*10, -sign*10):
+        for offset in (sign*10, -sign*10, sign*20, -sign*20):
             result = self.turn_to(start+offset)
             if result != "ok":
                 return result, None
@@ -286,6 +291,14 @@ class Homing:
             if plane is not None:
                 _log(f"measured dock plane heading={plane:.1f}")
                 return "ok", plane
+        # Close-range fallback: the plane never resolved, but a frontal
+        # marker whose own yaw candidates agree is adequate guidance —
+        # entry still refuses anything beyond five degrees off perpendicular.
+        fallback = dock_yaw(observations)
+        if fallback is not None and abs(fallback) <= 10:
+            plane = start + fallback
+            _log(f"plane unresolved; frontal marker yaw fallback={plane:.1f}")
+            return "ok", plane
         return "alignment", None
 
     def approach(self, camera):
