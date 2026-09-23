@@ -498,7 +498,8 @@ class Router:
                     "http://ip-api.com/json/", timeout=4).read())
                 lat, lon = geo["lat"], geo["lon"]
             url = (f"https://api.open-meteo.com/v1/forecast?"
-                   f"latitude={lat}&longitude={lon}&current=temperature_2m,"
+                   f"latitude={lat}&longitude={lon}&temperature_unit=fahrenheit"
+                   f"&wind_speed_unit=mph&current=temperature_2m,"
                    f"apparent_temperature,weather_code,wind_speed_10m")
             data = json.loads(urllib.request.urlopen(url, timeout=5).read())["current"]
             desc = self._wmo(data.get("weather_code"))
