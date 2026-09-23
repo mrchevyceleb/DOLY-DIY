@@ -365,6 +365,8 @@ class Router:
             b.speak("Stopped.")
         elif result == "not_found":
             b.speak("I can't see my dock. Please put it where I can see the marker.")
+        elif result == "edge":
+            b.speak("I'm facing a drop — turn me around and I'll try again.")
         elif result in {"no_contact", "contact", "alignment", "too_close", "posture"}:
             b.speak("I couldn't line up with my charger. Please help me onto the dock.")
         else:  # lost
