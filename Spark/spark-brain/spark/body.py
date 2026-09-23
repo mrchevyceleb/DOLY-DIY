@@ -714,7 +714,11 @@ class Body:
                 self._dock_charge_seen_at = now
             elif charging is False or not self._charging.healthy():
                 self._dock_charge_seen_at = None
-            if self.docked and len(gaps) == 4:
+            if self.docked and (len(gaps) == 4 or not gaps):
+                # Airborne (all voids) OR set down on open ground: the dock
+                # face always shows the front sensor pair, so a latched robot
+                # with NO gaps has been lifted somewhere flat (a gentle pickup
+                # never reads all four voids).
                 self._dock_pickup_at = now
             if charging and not self._leaving_home:
                 if not self.docked:
