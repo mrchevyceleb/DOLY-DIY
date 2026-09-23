@@ -346,14 +346,12 @@ class HomingTests(unittest.TestCase):
         b.hw = Mock()
         b.cfg = {"homing": {"enabled": True, "attempts": 3}}
         with patch("spark.homing.Homing") as homing, patch("time.sleep"):
-            homing.return_value.run.return_value = "cancelled"
-            self.assertEqual(b.go_home(), "cancelled")
-            homing.return_value.run.side_effect = None
-            homing.return_value.run.return_value = "limit"
+            homing.return_value.run.return_value = "sensor"
+            self.assertEqual(b.go_home(), "sensor")
             homing.return_value.run.reset_mock()
             b.battery_pct.return_value = 3
-            self.assertEqual(b.go_home(), "limit")
-        self.assertEqual(homing.return_value.run.call_count, 1)
+            self.assertEqual(b.go_home(), "power")  # dead pack never starts
+        self.assertEqual(homing.return_value.run.call_count, 0)  # dead pack never starts
 
     def test_roaming_does_not_translate_without_reacquiring_home(self):
         from spark.roaming import Roaming

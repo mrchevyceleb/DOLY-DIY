@@ -1719,18 +1719,28 @@ class Body:
         self._homing = True
         try:
             stop = self.motion_stop_factory() if self.motion_stop_factory else None
-            attempts = max(1, min(4, int(self.cfg.get("homing", {}).get("attempts", 3))))
+            try:
+                attempts = int(self.cfg.get("homing", {}).get("attempts", 3))
+            except (TypeError, ValueError):
+                attempts = 3
+            attempts = max(1, min(4, attempts))
+            # A dead or dying pack must not even start the trip home.
+            pct = self.battery_pct()
+            if pct is not None and pct <= 3:
+                return "power"
+            recoverable = {"limit", "lost", "not_found", "alignment",
+                           "too_close", "turn_unverified"}
             final = "sensor"
             for attempt in range(1, attempts + 1):
                 result = Homing(self, stop).run()
                 _log(f"home attempt {attempt}/{attempts} result={result}")
                 final = result
-                if result in ("arrived", "already", "cancelled", "busy", "power"):
+                if result not in recoverable:
                     break
                 if self.is_on_dock():
                     return "arrived"
                 pct = self.battery_pct()
-                if pct is not None and pct <= 3:
+                if pct is None or pct <= 3:  # unknown telemetry fails safe
                     break
                 if attempt < attempts:
                     self.drive_stop()
@@ -1850,9 +1860,12 @@ class Body:
         remaining charge covers the guarded approach + entry retries.
         """
         import math
-        bound = self._roam_distance_bound
-        per_m = self.cfg.get("idle", {}).get("roam_reserve_pct_per_m", 2)
-        if not bound or per_m <= 0:
+        try:
+            bound = float(self._roam_distance_bound or 0)
+            per_m = float(self.cfg.get("idle", {}).get("roam_reserve_pct_per_m", 2))
+        except (TypeError, ValueError):
+            return 0  # invalid config/telemetry degrades to the flat threshold
+        if bound <= 0 or per_m <= 0 or not math.isfinite(bound) or not math.isfinite(per_m):
             return 0
         return min(10, math.ceil(bound / 1000.0) * per_m)
 
