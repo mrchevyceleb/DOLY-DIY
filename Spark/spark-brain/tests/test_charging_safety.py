@@ -16,6 +16,19 @@ from spark.charging import ChargingMonitor
 
 
 class ChargingSafetyTests(unittest.TestCase):
+    def test_gap_poll_uses_stock_low_polarity_and_fails_closed(self):
+        b = Body({"edge": {"gap_gpio_state": "High"}}, hw=False)
+        b.has = {"edge": True}
+        b._edge = Mock()
+        b._edge.GpioState.Low = 0
+        b._edge.get_sensors.return_value = []
+        self.assertEqual(b._edge_gaps(), [])
+        b._edge.get_sensors.assert_called_once_with(0)
+        b._edge.get_sensors.return_value = [Mock(id="SensorId.Front_Left")]
+        self.assertEqual(b._edge_gaps(), ["Front_Left"])
+        b._edge.get_sensors.side_effect = RuntimeError("disconnected")
+        self.assertEqual(len(b._edge_gaps()), 4)
+
     def body(self, charging=True, pct=0, gaps=None):
         b = Body({"state_dir": "/unused", "idle": {}}, hw=False)
         b.hw = True
@@ -57,7 +70,7 @@ class ChargingSafetyTests(unittest.TestCase):
         b._drive.go_distance.assert_not_called()
         b._drive.go_rotate.assert_not_called()
 
-    def test_lost_contact_keeps_dock_hold_until_supported_discharge(self):
+    def test_lost_contact_keeps_dock_hold_until_pickup_then_supported_discharge(self):
         gaps = ["Back_Left", "Back_Right"]
         b = self.body(pct=50, gaps=gaps)
         b.refresh_power()
@@ -72,8 +85,198 @@ class ChargingSafetyTests(unittest.TestCase):
         self.assertTrue(b.docked)
         with patch("spark.body.time.monotonic", return_value=107):
             b.refresh_power()
+        self.assertTrue(b.docked)  # sliding onto a flat surface cannot unlock
+        gaps.extend(["Front_Left", "Front_Right", "Back_Left", "Back_Right"])
+        with patch("spark.body.time.monotonic", return_value=108):
+            b.refresh_power()
+        gaps.clear()
+        with patch("spark.body.time.monotonic", return_value=109):
+            b.refresh_power()
+        with patch("spark.body.time.monotonic", return_value=115):
+            b.refresh_power()
         self.assertFalse(b.docked)
         self.assertIsNone(b._pose)
+
+    def test_dock_monitor_cancels_a_native_operation_that_starts_while_held(self):
+        b = self.body(pct=80)
+        b.refresh_power()
+        b._drive.reset_mock()
+        b._arm.reset_mock()
+        b._drive.get_state.return_value = b._drive.DriveState.Running
+        b._arm.get_state.return_value = b._arm.ArmState.Running
+        b.refresh_power()
+        b._drive.abort.assert_called_once()
+        self.assertEqual([c.args for c in b._drive.free_drive.call_args_list],
+                         [(0, False, True), (0, True, True)])
+        self.assertEqual(b._arm.abort.call_count, 2)
+        b._drive.go_distance.assert_not_called()
+        b._arm.set_angle.assert_not_called()
+
+    def test_native_abort_failure_still_attempts_to_zero_both_wheels(self):
+        b = self.body(pct=80)
+        b._drive.abort.side_effect = RuntimeError("controller unavailable")
+        b._drive.free_drive.side_effect = [False, True]
+        self.assertFalse(b.drive_stop())
+        self.assertEqual(b._drive.free_drive.call_count, 2)
+
+    def test_controlled_departure_requires_clear_ground_and_stationary_discharge(self):
+        for failure in (None, "edge", "power", "stop", "motor_load_only", "stalled"):
+            with self.subTest(failure=failure):
+                gaps = ["Front_Left", "Front_Right"]
+                b = self.body(pct=80, gaps=gaps)
+                b._charging.healthy.return_value = True
+                b._drive.DriveState.Running = "running"
+                b._drive.DriveState.Completed = "completed"
+                b._drive.DriveState.Error = "error"
+                b._drive.get_rpm.return_value = 0.0  # installed SDK returns zero while moving
+                clock = [1000.0]
+                native = {"active": False, "polls": 0, "stopped": None}
+
+                def dispatch(*args):
+                    native.update(active=True, polls=0)
+                    # Ordinary commands cannot borrow the departure permit.
+                    self.assertFalse(b.drive_rotate(30))
+                    self.assertFalse(b.arm_angle(90))
+                    return True
+
+                def state():
+                    if not native["active"]:
+                        return "completed"
+                    native["polls"] += 1
+                    if native["polls"] == 1:
+                        if failure == "edge":
+                            gaps.append("Back_Left")
+                        elif failure == "power":
+                            b._charging.healthy.return_value = False
+                        elif failure == "stop":
+                            b._approach_stop.set()
+                        b._charging.sample.return_value = False
+                        b._charging.charging = False
+                        return "running"
+                    if failure != "stalled":
+                        gaps.clear()
+                    native["active"] = False
+                    native["stopped"] = clock[0]
+                    if failure == "motor_load_only":
+                        b._charging.sample.return_value = True
+                        b._charging.charging = True
+                    return "completed"
+
+                b._drive.go_distance.side_effect = dispatch
+                b._drive.get_state.side_effect = state
+                with patch("spark.body.time.monotonic", side_effect=lambda: clock[0]), \
+                     patch("spark.body.time.sleep", side_effect=lambda s: clock.__setitem__(0, clock[0]+s)):
+                    self.assertEqual(b._undock(), failure is None)
+                self.assertEqual(b.docked, failure is not None)
+                self.assertFalse(b._leaving_home)
+                self.assertIsNone(b._departure)
+                self.assertEqual(b._drive.go_distance.call_count, 5 if failure is None else 1)
+                self.assertEqual(b._drive.go_distance.call_args_list[0].args[1:],
+                                 (20, 25, True, True))  # stock dock exits forward
+                b._drive.go_rotate.assert_not_called()
+                b._arm.set_angle.assert_not_called()
+                if failure is None:
+                    self.assertGreaterEqual(clock[0] - native["stopped"], 1.25)
+                if failure == "stalled":
+                    self.assertEqual(b.last_departure_result, "edge")
+                    self.assertEqual(b._edge_hazard, "forward")
+                    self.assertFalse(b._undock())  # no repeat into the same gap
+                    self.assertEqual(b._drive.go_distance.call_count, 1)
+                b._drive.abort.assert_called()
+
+    def test_full_charge_roaming_is_stable_once_per_visit_and_never_contact_loss(self):
+        b = self.body(pct=100)
+        b.cfg["homing"] = {"enabled": True}
+        with patch("spark.body.time.monotonic", return_value=100):
+            b.refresh_power()
+            self.assertFalse(b.dock_roam_ready())
+        # Fully charged current can taper to zero without a sensor fault.
+        b._charging.sample.return_value = None
+        b._charging.healthy.return_value = True
+        with patch("spark.body.time.monotonic", return_value=130):
+            b.refresh_power()
+            self.assertFalse(b.dock_roam_ready())
+        with patch("spark.body.time.monotonic", return_value=161):
+            b.refresh_power()
+            self.assertTrue(b.dock_roam_ready())
+            b.cfg["homing"]["enabled"] = False
+            self.assertFalse(b.dock_roam_ready())
+            b.cfg["homing"]["enabled"] = True
+            with patch.object(b, "_undock", return_value=False) as undock:
+                b.wander_step()
+                b.wander_step()
+                undock.assert_called_once()
+        b._dock_auto_attempted = False
+        b._charging.sample.return_value = False
+        b.refresh_power()
+        self.assertFalse(b.dock_roam_ready())
+        b._charging.sample.return_value = None
+        b._charging.healthy.return_value = False
+        b.refresh_power()
+        self.assertFalse(b.dock_roam_ready())
+        b._charging.sample.return_value = True
+        b.sleeping = True
+        b.refresh_power()
+        self.assertFalse(b.dock_roam_ready())
+
+    def test_departure_cannot_reuse_a_gap_allowance_after_ground_returns(self):
+        from spark.departure import Departure
+        for forward, trailing in ((True, "Back_Left"), (False, "Front_Left")):
+            gaps = [trailing]
+            b = self.body(pct=80, gaps=gaps)
+            b._leaving_home = True
+            b._charging.healthy.return_value = True
+            d = Departure(b, forward, gaps, lambda: False)
+            self.assertIsNone(d.check())
+            gaps.clear()
+            self.assertIsNone(d.check())
+            gaps.append(trailing)
+            self.assertEqual(d.check(), "edge")
+
+    def test_clearance_can_leave_rear_lip_but_front_and_airborne_events_still_stop(self):
+        from spark.departure import Departure
+        gaps = []
+        b = self.body(pct=80, gaps=gaps)
+        b._leaving_home = True
+        b._charging.healthy.return_value = True
+        d = Departure(b, True, gaps, lambda: False)
+        d.clearing = True
+        gaps.extend(["Back_Left", "Back_Right"])
+        self.assertTrue(d.trailing_gap("Back"))
+        self.assertFalse(d.trailing_gap("All"))
+        gaps.append("Front_Left")
+        self.assertFalse(d.trailing_gap("Back"))
+        self.assertEqual(d.reason, "edge")
+
+    def test_only_affirmative_movement_commands_can_leave_dock(self):
+        from spark.router import Router
+        b = Mock(docked=True, last_departure_result="edge")
+        b.battery_pct.return_value = 80
+        b._undock.return_value = False
+        router = Router({}, b, None, None)
+        router.handle("what is your battery")
+        router.handle("don't move forward")
+        b._undock.assert_not_called()
+        router.handle("move forward")
+        b._undock.assert_called_once()
+        b.drive_guarded.assert_not_called()
+        b._undock.side_effect = lambda: setattr(b, "docked", False) or True
+        router.handle("move forward")
+        b.drive_guarded.assert_called_once_with(150, speed=30)
+
+    def test_front_dock_profile_requires_recent_charging_and_stale_hold_can_clear_at_rest(self):
+        b = self.body(charging=False, pct=80, gaps=["Front_Left", "Front_Right"])
+        b.docked = True
+        b._charging.healthy.return_value = True
+        self.assertFalse(b._undock())
+        b._drive.go_distance.assert_not_called()
+        b._edge_gaps = lambda: []
+        clock = [1000.0]
+        with patch("spark.body.time.monotonic", side_effect=lambda: clock[0]), \
+             patch("spark.body.time.sleep", side_effect=lambda s: clock.__setitem__(0, clock[0]+s)):
+            self.assertTrue(b._undock())
+        self.assertFalse(b.docked)
+        b._drive.go_distance.assert_not_called()
 
     def test_sensor_outage_holds_even_at_high_battery(self):
         b = self.body(charging=None, pct=90, gaps=[])
@@ -95,10 +298,13 @@ class ChargingSafetyTests(unittest.TestCase):
         for now in (10, 10.3, 10.6, 10.9):
             with patch("spark.charging.time.monotonic", return_value=now):
                 self.assertIsNone(m.sample())
+                self.assertFalse(m.healthy())
         with patch("spark.charging.time.monotonic", return_value=11.2):
             self.assertTrue(m.sample())
+            self.assertTrue(m.healthy())
         with patch("spark.charging.time.monotonic", return_value=15):
             self.assertIsNone(m.sample())
+            self.assertFalse(m.healthy())
         m._read.side_effect = OSError("bus disconnected")
         with patch("spark.charging.time.monotonic", return_value=16):
             self.assertIsNone(m.sample())
@@ -131,11 +337,86 @@ class ChargingSafetyTests(unittest.TestCase):
         self.assertFalse(b.drive_distance(60))
         b._drive.go_distance.assert_not_called()
 
+    def test_new_confirmed_dock_clears_placement_hazard_but_failed_exit_stays_latched(self):
+        for prior in ("forward", "all"):
+            b = self.body(pct=80, gaps=["Front_Left", "Front_Right"])
+            b._latch_hazard(prior)  # placement events precede current averaging
+            b.refresh_power()
+            self.assertTrue(b.docked)
+            self.assertIsNone(b._edge_hazard)
+            b._drive.go_distance.assert_not_called()
+            b._latch_hazard("forward")  # a failed probe from the held dock
+            b.refresh_power()
+            self.assertEqual(b._edge_hazard, "forward")
+            self.assertFalse(b._undock())
+            b._drive.go_distance.assert_not_called()
+
+    def test_turn_cannot_sweep_a_rear_wheel_over_an_edge(self):
+        b = self.body(charging=False, pct=80, gaps=["Back_Left"])
+        self.assertFalse(b.drive_rotate(90))
+        b._drive.go_rotate.assert_not_called()
+
+    def test_discharge_while_parked_alerts_once_without_releasing_motors(self):
+        b = self.body(pct=50)
+        b.refresh_power()
+        b._charging.sample.return_value = False
+        b._charging.average = -40
+        with patch("spark.body.time.monotonic", return_value=100):
+            b.refresh_power()
+        self.assertFalse(b.take_charge_notice())
+        with patch("spark.body.time.monotonic", return_value=116):
+            b.refresh_power()
+            self.assertTrue(b.take_charge_notice())
+            b.refresh_power()
+            self.assertFalse(b.take_charge_notice())
+        self.assertTrue(b.docked)
+        self.assertTrue(b.actuators_held())
+        b._drive.go_distance.assert_not_called()
+        b._charging.sample.return_value = True
+        b.refresh_power()
+        self.assertFalse(b._charge_notice_sent)
+
+    def test_sleep_holds_all_actuators_without_a_stock_animation(self):
+        b = self.body(pct=50)
+        b.anim = Mock()
+        b.sleep_pose()
+        self.assertTrue(b.sleeping)
+        self.assertFalse(b.drive_rotate(90))
+        self.assertFalse(b.arm_angle(20))
+        b.anim.play.assert_not_called()
+        b._arm.set_angle.assert_not_called()
+
+    def test_voice_turn_waits_for_completion_and_honors_stop_and_errors(self):
+        for states, stop, expected in ((["running", "completed"], False, "ok"),
+                                       (["error"], False, "error"),
+                                       (["running"], True, "cancelled")):
+            b = Body({}, hw=False)
+            b.has = {"drive": True}
+            b._drive = Mock()
+            b._drive.DriveState.Running = "running"
+            b._drive.DriveState.Completed = "completed"
+            b._drive.DriveState.Error = "error"
+            b._drive.get_state.side_effect = states
+            b.drive_rotate = Mock(return_value=True)
+            b.drive_stop = Mock()
+            b._motion_allowed = Mock(return_value=True)
+            b.motion_stop_factory = lambda: lambda: stop
+            self.assertEqual(b.turn_guarded(360), expected)
+            b.drive_stop.assert_called_once()
+            self.assertFalse(b._turning)
+        b = Body({}, hw=False)
+        b.has = {"drive": True}
+        b._drive = Mock()
+        b._drive.go_rotate.return_value = False
+        b._motion_allowed = Mock(return_value=True)
+        self.assertFalse(b.drive_rotate(90))
+
     def test_empty_remote_asr_does_not_launch_local_whisper(self):
         a = WhisperASR({"asr": {"server_url": "http://test"}})
         with patch.object(a, "_transcribe_http", return_value=""), \
                 patch("subprocess.run") as run:
             self.assertEqual(a.transcribe_pcm(b"\\0" * 16000), "")
+            self.assertEqual(a.last_source, "server")
             run.assert_not_called()
 
     def test_http_failures_raise_instead_of_becoming_transcripts(self):

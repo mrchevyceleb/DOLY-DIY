@@ -166,3 +166,26 @@ def iter_sentences(deltas):
     tail = buf.strip()
     if tail:
         yield tail
+
+
+def spoken_sentences(deltas, detailed=False):
+    """Bound actual playback even if the model ignores the brevity request.
+
+    Close the HTTP stream on reaching the limit so it stops generating too.
+    """
+    max_sentences, remaining = (6, 120) if detailed else (2, 35)
+    try:
+        for index, sentence in enumerate(iter_sentences(deltas)):
+            words = sentence.split()
+            if len(words) > remaining:
+                if index == 0:
+                    yield " ".join(words[:remaining]).rstrip(",;:!?.") + "."
+                break
+            yield sentence
+            remaining -= len(words)
+            if index + 1 >= max_sentences or remaining == 0:
+                break
+    finally:
+        close = getattr(deltas, "close", None)
+        if close:
+            close()

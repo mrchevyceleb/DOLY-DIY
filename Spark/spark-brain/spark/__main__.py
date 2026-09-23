@@ -15,7 +15,7 @@ import threading
 import time
 
 from .body import Body
-from .brain import Brain, BrainOffline, iter_sentences
+from .brain import Brain, BrainOffline, spoken_sentences
 from .config import load_config
 from .memory import Memory
 from .router import Router
@@ -118,22 +118,30 @@ class Spark:
         - pet (0.6-2.5s): happiness escalation + mood bump
         - long-press (>=2.5s): grumpy mood
         """
-        tstate = {"down_at": 0.0, "pets": []}
+        tstate = {"down": {}, "pets": []}
 
         def _cb(side, state_):
             log("touch", f"side={side} state={state_}")
             now = time.time()
             if "Down" in str(state_):
-                tstate["down_at"] = now
+                tstate["down"][side] = (now, self.body.petting_active())
                 return
-            dur = now - tstate["down_at"]
+            started = tstate["down"].pop(side, None)
+            if started is None:
+                return
+            if self.body.sleeping:
+                self.talk_trigger.set()
+                return
+            dur = now - started[0]
             if dur >= 2.5:  # long-press mood
                 self.body.mood_eyes("IRRITATED")
                 self.body._bump_mood(-1)
                 self.body.queue_anim("angry1_1")
                 log("spark", "long-press: grumpy")
                 return
-            if dur >= 0.6:  # petting -> stock petting animations, escalating
+            if dur >= 0.6 or started[1] or self.body.petting_active():
+                # Once petting has started, short continuing strokes are
+                # affection too; they must not switch to tap-to-talk.
                 self.body._bump_mood(1)
                 tstate["pets"] = [t for t in tstate["pets"] if now - t < 30] + [now]
                 n = len(tstate["pets"])
@@ -170,16 +178,16 @@ class Spark:
         Only when she knows where home is and isn't already on the dock."""
         try:
             pct = self.body.battery_pct()
-            if self.body.is_on_dock() or self.body.actuators_held():
+            if self.body.is_on_dock():
                 return
-            if pct is None or pct >= idle_cfg.get("low_battery_pct", 10):
+            if pct is None or pct > idle_cfg.get("low_battery_pct", 10):
                 return
             log("spark", f"battery {pct}% — checking return to charger")
-            result = self.body.go_home()
+            result = "blocked" if self.body.actuators_held() else self.body.go_home()
             if result == "unknown":
                 self.body.speak(f"My battery is at {pct} percent. Please carry me to my dock to charge.")
-            elif result == "lost":
-                self.body.speak("I couldn't find my dock — a little help, please?")
+            elif result not in ("arrived", "already", "cancelled", "busy"):
+                self.body.speak("I couldn't reach my charging contacts. Please help me onto the dock.")
         except Exception as e:
             log("spark", f"battery check failed: {e}")
 
@@ -214,6 +222,7 @@ class Spark:
 
         # ONE persistent mic stream: always drained (no stale buffers)
         with MicStream(self.cfg) as mic:
+            self.body.motion_stop_factory = lambda: self._motion_stop_listener(mic, recognizer)
             idle_cfg = self.cfg.get("idle", {})
             def _reset_idle():
                 t = time.time()
@@ -226,12 +235,18 @@ class Spark:
                 if self.talk_trigger.is_set():
                     idle_action["act"] = "tap"
                     return True
-                now = time.time()
-                if now >= next_wander:
-                    idle_action["act"] = "wander"
+                if self.body.sleeping:
+                    return False
+                if self.body.take_charge_notice():
+                    idle_action["act"] = "charge_notice"
                     return True
+                now = time.time()
                 if now >= next_battery:
                     idle_action["act"] = "battery"
+                    return True
+                if (now >= next_wander and idle_cfg.get("roam_enabled", True)
+                        and (not self.body.docked or self.body.dock_roam_ready())):
+                    idle_action["act"] = "wander"
                     return True
                 if now >= next_flourish:
                     idle_action["act"] = "flourish"
@@ -243,6 +258,8 @@ class Spark:
             def _stretch():
                 time.sleep(8)
                 try:
+                    if self.body.sleeping or self.body.actuators_held():
+                        return
                     self.body.mood_eyes("LOOK_AHEAD")
                     self.body.arm_angle(130, speed=50)
                     time.sleep(0.4)
@@ -261,18 +278,23 @@ class Spark:
                 # Playback and its short echo tail finish BEFORE the window
                 # starts. The capture thread drains ALSA throughout the reply.
                 self._wait_for_playback(mic)
-                in_followup = follow_pending
+                in_followup = follow_pending and not self.body.sleeping
                 follow_pending = False
 
                 triggered_by_wake = None
                 if in_followup:
                     log("spark", f"follow-up ready: {follow_cfg.get('follow_up_window_s', 8)}s")
-                elif wake_enabled:
-                    self.body.eyes("idle")
+                elif wake_enabled or self.body.sleeping:
+                    if not self.body.sleeping:
+                        self.body.eyes("idle")
                     triggered_by_wake = self._wait_for_wake(
                         mic, recognizer, wake_words, idle_check=_idle_or_tap)
 
                 mic.learn_noise(False)  # preserve room baseline through speech/TTS
+
+                if idle_action["act"] == "charge_notice":
+                    self.body.speak("I'm parked, but I'm not charging. Please reseat me on my powered dock.")
+                    continue
 
                 if idle_action["act"] == "wander":
                     log("spark", "idle: exploring")
@@ -280,9 +302,11 @@ class Spark:
                     _, next_flourish, next_wander = _reset_idle()
                     continue
                 if idle_action["act"] == "battery":
-                    next_battery = time.time() + idle_cfg.get("battery_retry_s", 900)
+                    pct = self.body.battery_pct()
+                    low = pct is not None and pct <= idle_cfg.get("low_battery_pct", 10)
+                    next_battery = time.time() + idle_cfg.get(
+                        "battery_retry_s" if low else "battery_check_s", 60 if low else 10)
                     self._low_battery_check(idle_cfg)
-                    _, next_flourish, next_wander = _reset_idle()
                     continue
                 if idle_action["act"] == "flourish":
                     self.body.idle_flourish()
@@ -291,6 +315,9 @@ class Spark:
                     idle_action["act"] = None
                     continue
 
+                if self.body.sleeping:
+                    self.body.wake_up()
+                    _, next_flourish, next_wander = _reset_idle()
                 self.listening = True
                 self.body.eyes("listening")
                 if triggered_by_wake:
@@ -339,8 +366,27 @@ class Spark:
                 _, next_flourish, next_wander = _reset_idle()
                 idle_action["act"] = None
                 # open the follow-up window after every answer
-                follow_pending = (follow_cfg.get("follow_up_window_s", 8) > 0
+                follow_pending = (not self.body.sleeping
+                                  and follow_cfg.get("follow_up_window_s", 8) > 0
                                   and follow_cfg.get("follow_ups", 2) > 0)
+
+    def _motion_stop_listener(self, mic, recognizer):
+        """Reuse loaded Vosk weights; recognize STOP while approach runs."""
+        import json
+        mic.discard()
+        mic.retain(1)
+        stop_rec = recognizer._kaldi_cls(recognizer.model, self.cfg["audio"]["sample_rate"],
+                                        '["stop", "spark stop", "[unk]"]')
+
+        def check():
+            for frame in mic.drain_pending():
+                result = stop_rec.Result() if stop_rec.AcceptWaveform(frame) else stop_rec.PartialResult()
+                parsed = json.loads(result)
+                if "stop" in (parsed.get("text", "") or parsed.get("partial", "")).split():
+                    log("spark", "voice stop during approach")
+                    return True
+            return False
+        return check
 
     def _listen_command(self, mic, recognizer, wake=None, timeout_s=6.0):
         from .ear import CommandAudio, record_utterance, strip_wake_prefix
@@ -368,7 +414,7 @@ class Spark:
             started = time.perf_counter()
             if getattr(self, "whisper", None) and len(pcm) >= 8000:
                 text = self.whisper.transcribe_pcm(pcm).strip()
-                if not text:
+                if not text and getattr(self.whisper, "last_source", None) != "server":
                     if remote_asr:
                         recognizer.begin()
                         recognizer.feed(pcm)
@@ -398,7 +444,7 @@ class Spark:
 
     def _wait_for_wake(self, mic, recognizer, wake_words, idle_check=None):
         """Block until wake word or tap. Always drains audio (keeps stream fresh)."""
-        from .ear import listen_for_wake
+        from .ear import has_wake_name, listen_for_wake
         if self.talk_trigger.is_set():
             return False
 
@@ -410,10 +456,11 @@ class Spark:
             if self.talk_trigger.is_set():
                 return
             for f in mic.frames():
-                self.body.flush_sfx()  # main-thread playback of queued sfx
-                self.body.drain_anims()  # queued petting/mood animations
+                if not self.body.sleeping:
+                    self.body.flush_sfx()  # main-thread playback of queued sfx
+                    self.body.drain_anims()  # queued petting/mood animations
                 now = time.time()
-                if now >= blink_state["next"]:
+                if not self.body.sleeping and now >= blink_state["next"]:
                     self.body.blink()
                     blink_state["next"] = now + _random.uniform(3.5, 8)
                 if self.talk_trigger.is_set():
@@ -421,12 +468,48 @@ class Spark:
                 yield f
 
         # NOTE: queued sfx from sensor threads flush inside tap_frames() loop
+        def verify_wake(pcm):
+            # Preserve a command spoken during the bounded server check.
+            # Keep the larger buffer after success until _listen_command takes it.
+            mic.retain(3)
+            text = ""
+            try:
+                text = self.whisper.transcribe_wake_pcm(pcm)
+                if has_wake_name(text, wake_words):
+                    return text
+            except Exception as exc:
+                log("spark", f"wake check unavailable: {exc}")
+            mic.retain(1)
+            return text
+
+        verifier = (verify_wake if getattr(self, "whisper", None)
+                    and self.cfg.get("asr", {}).get("server_url") else None)
         return listen_for_wake(tap_frames(), recognizer, self.cfg, wake_words,
-                               tap_check=idle_check or (lambda: self.talk_trigger.is_set()))
+                               tap_check=lambda: self.talk_trigger.is_set(),
+                               idle_check=idle_check,
+                               allow_weak=not self.body.sleeping,
+                               noise_floor=lambda: mic.noise_floor, verify_wake=verifier)
 
     
 
     # ------------------------------------------------------------ exchanges
+    def _body_context(self):
+        """Give chat current observations instead of stale charger stories."""
+        import json
+        charging = self.body.refresh_power()
+        state = {
+            "charging": charging,
+            "dock_motor_hold": bool(self.body.docked),
+            "battery_percent": self.body.battery_pct(),
+            "edge_gaps": self.body._edge_gaps() if self.body.has.get("edge") else None,
+            "last_movement_result": getattr(self.router, "last_motion_result", None),
+        }
+        return ("\nLIVE BODY STATE (authoritative over older conversation; null means unknown): "
+                + json.dumps(state)
+                + "\nA previous movement result is not a current camera view. "
+                "Never invent a dock, fall, prank, or sensor reading. For a movement problem, "
+                "give one short factual sentence; do not blame or tease Matt.")
+
     def _llm_reply(self, user_text, extra_context=None):
         """Stream a brain reply for user_text; speak sentence-by-sentence.
 
@@ -435,9 +518,9 @@ class Spark:
         """
         self.body.eyes("thinking")
         self.memory.add("user", user_text)
-        system = self.cfg["prompt"]
+        system = self.cfg["prompt"] + self._body_context()
         if self.cfg.get("moods", True):
-            mood_note = "(Current mood: " + self.body.mood + " — let it color your tone.)"
+            mood_note = "(Current mood: " + self.body.mood + "; stay kind regardless of mood.)"
             system = system + chr(10) + chr(10) + mood_note
         messages = self.memory.messages(system)
         if extra_context:
@@ -452,6 +535,12 @@ class Spark:
             )
 
 
+        detailed = bool(re.search(r"\b(explain|tell me about|in detail|step by step|"
+                                  r"tell me a story|longer answer)\b", user_text, re.I))
+        messages[-1]["content"] += (
+            "\n\n[Spoken reply: be warm and respectful; no insults, blame, threats, or sarcasm. "
+            + ("Up to six concise sentences." if detailed else "One or two short sentences, at most 35 words.")
+            + " Answer only what was asked. Never claim an action happened unless live state confirms it.]")
         reply_parts = []
         started = time.perf_counter()
         try:
@@ -459,7 +548,7 @@ class Spark:
 
             def _collect():
                 nonlocal first
-                for sentence in iter_sentences(self.brain.chat_stream(messages)):
+                for sentence in spoken_sentences(self.brain.chat_stream(messages), detailed=detailed):
                     if first:
                         log("spark", f"LLM first sentence {time.perf_counter()-started:.2f}s")
                         self.body.eyes("speaking")
@@ -502,7 +591,7 @@ class Spark:
 
             self._llm_reply(text)
         finally:
-            self.body.react_enabled = True
+            self.body.react_enabled = not self.body.sleeping
             log("spark", f"response finished {time.perf_counter()-t0:.2f}s")
 
     # ----------------------------------------------------------------- REPL

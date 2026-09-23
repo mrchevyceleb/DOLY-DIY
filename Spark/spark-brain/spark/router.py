@@ -23,15 +23,12 @@ def _log(msg):
 
 
 # "Imagine..." -> she acts it out: themed routine + the brain narrating theatrically
-_IMAGINE_RE = re.compile(r"(imagine|pretend|act like|act out)", re.IGNORECASE)
+_IMAGINE_RE = re.compile(r"\b(imagine|pretend|act like|act out)\b", re.IGNORECASE)
 _IMAGINE_THEMES = {
-    "beach": ("fiesta", "/.doly/sounds/sfx/beach.wav"),
-    "party": ("party", None),
-    "exercise": ("groove", "/.doly/sounds/sfx/buff (1).wav"),
-    "workout": ("groove", "/.doly/sounds/sfx/buff (2).wav"),
-    "birthday": ("party", "/.doly/sounds/music/birthday.wav"),
-    "dance": ("fiesta", None),
-    "robot": ("groove", None),
+    "beach": "fiesta", "party": "party", "exercise": "workout",
+    "workout": "workout", "birthday": "party", "dance": "fiesta",
+    "robot": "groove", "firefighter": "fireman", "fireman": "fireman",
+    "police": "policeman", "meditat": "meditate", "rock": "rock",
 }
 
 # Explicit web-search intent — always goes to the search tool, not the stock table.
@@ -44,7 +41,7 @@ _SEARCH_INTENT = re.compile(
 
 EDGE_REFUSAL = ("I can't drive here — I'm either on my dock or too close to an edge. "
                 "Put me somewhere with room and ask again!")
-DOCK_REFUSAL = "My wheels don't reach down here — I'm on my charging dock! Lift me onto the desk and I'll scoot."
+DOCK_REFUSAL = "I couldn't leave the charger safely, so I'm staying parked."
 
 # Voice switching by name — aliases include common ASR mishearings
 # ("switch to weekly" really is how "wheatley" comes back from the mic).
@@ -94,6 +91,8 @@ class Router:
         self.brain = brain
         self.memory = memory
         self.llm_reply = None  # set by Spark: streamed brain reply w/ context
+        self.last_motion_result = None
+        self._last_motion_at = 0
         self._timers = []
 
     # ------------------------------------------------------------------ main
@@ -111,7 +110,7 @@ class Router:
             return True
 
         # imagine prompts: she physically acts it out while narrating
-        if _IMAGINE_RE.search(raw_text):
+        if _IMAGINE_RE.search(raw_text) and not cmds._NEGATION_RE.search(text):
             return self._imagine(raw_text)
 
         # explicit web search → tool + brain-mediated answer
@@ -147,16 +146,69 @@ class Router:
                             "Just say switch to, and a name.")
             return True
 
-        cmd, score = cmds.match_command(text)
+        cmd, score = cmds.match_command(raw_text)
         if cmd:
             _log(f"command={cmd['action']} score={score:.2f} text='{text}'")
             return self._execute(cmd["action"], text)
 
+        if self._motion_followup(text):
+            return True
         return False
+
+    def _motion_followup(self, text):
+        """Explain a failed approach from controller state, not chat fiction."""
+        dock_correction = bool(cmds._DOCK_CORRECTION_RE.match(text))
+        recent = (self.last_motion_result is not None
+                  and time.monotonic()-self._last_motion_at < 90)
+        correction = re.search(
+            r"\b(?:i'm|i am) (?:right )?here\b|\bonly (?:one|1) person\b|"
+            r"\b(?:you didn't (?:move|spin)|you did not (?:move|spin)|you're not moving|that didn't work)\b", text)
+        if not dock_correction and not (recent and correction):
+            return False
+        charging = self.body.refresh_power()
+        if self.body.docked:
+            reply = "I'm still parked. My safe departure check hasn't cleared."
+        elif charging is None:
+            reply = "My power reading is uncertain, so I'm staying still."
+        elif dock_correction:
+            reply = "You're right, I'm off the charger. Say come here to try again."
+        else:
+            reason = self.last_motion_result["result"]
+            reply = {
+                "ambiguous": "My camera couldn't pick a target. Say come here to retry.",
+                "lost": "My camera lost the target. Say come here to retry.",
+                "sensor": "My obstacle readings weren't clear, so I stopped.",
+                "not_found": "My camera didn't find you. Say come here to try again.",
+                "edge": "The floor sensors stopped me because they detected a gap.",
+                "stopped_edge": "The floor sensors stopped me because they detected a gap.",
+                "cancelled": "I stopped when the stop control was triggered.",
+                "not_started": "The motors didn't start that turn. I've stopped.",
+                "error": "The motor controller reported an error, so I stopped.",
+                "timeout": "The turn didn't finish in time, so I stopped.",
+                "blocked": "The safety check blocked that movement.",
+                "ok": "The motor controller reported completion, but I can't confirm the result you saw.",
+            }.get(reason, "I'm stopped. Please ask again if you want me to retry.")
+        _log(f"movement follow-up: {self.last_motion_result}")
+        self.body.speak(reply)
+        return True
 
     # -------------------------------------------------------------- executor
     def _execute(self, action, text):
         b = self.body
+
+        # Only a matched, affirmative movement command authorizes departure.
+        # Petting, chatter, battery questions and idle reactions stay parked.
+        moving = (action in {"forward", "back", "left", "right", "spin", "come_here", "dance"}
+                  or action.startswith("dance_"))
+        if moving:
+            b.refresh_power()
+            if b.docked and not b._undock():
+                result = b.last_departure_result
+                self.last_motion_result = {"command": action, "result": result}
+                self._last_motion_at = time.monotonic()
+                b.speak("Stopped." if result == "cancelled" else
+                        "I couldn't leave the charger safely, so I've stopped.")
+                return True
 
         if action == "time":
             now = datetime.datetime.now().strftime("%I:%M")
@@ -191,40 +243,60 @@ class Router:
             return True
 
         if action == "fist_bump":
-            b.speak("Bump!")
-            b.fist_bump()
+            b.speak("Give me a fist bump!")
+            if not b.fist_bump():
+                b.speak("I can’t raise my arms safely here. Put me on a clear surface first.")
             return True
 
         if action == "high_five":
             b.speak("Up top!")
-            b.high_five()
+            if not b.high_five():
+                b.speak("I can’t raise my arms safely here. Put me on a clear surface first.")
             return True
 
         if action == "go_home":
             return self.go_home_action()
 
-        if action == "dance":
+        if action == "dance" or action.startswith("dance_"):
             b.speak("Watch this.")
-            if not b.dance():
-                # never a flat refusal: always perform SOMETHING
-                b.speak("No room to spin here — arms party!")
-                b.arms_party()
+            variant = action[6:] if action.startswith("dance_") else None
+            if not b.dance(variant):
+                b.speak("That routine didn't finish. Let's try again later.")
             return True
 
         if action == "come_here":
-            b.speak("On my way.")
-            result = b.drive_guarded(250, speed=22)
-            if result == "stopped_edge":
-                b.speak("Whoa, that's the edge — backing up.")
-                b._escape_edge()
-            elif not result:
-                b.speak(DOCK_REFUSAL if getattr(b, "docked", False) else EDGE_REFUSAL)
+            # No promise of movement until the camera and guards authorize it.
+            result = b.come_here()
+            self.last_motion_result = {"command": "come_here", "result": result}
+            self._last_motion_at = time.monotonic()
+            replies = {
+                "near": "I'll stop here. Hello!",
+                "limit": "I've stopped here. Call me again if you want me closer.",
+                "docked": DOCK_REFUSAL,
+                "power": "I need to charge before I can come over.",
+                "not_found": "I couldn't see you. Step into view and call me again.",
+                "lost": "I lost sight of you, so I stopped.",
+                "ambiguous": "I couldn't pick a single person to approach.",
+                "obstacle": "Something's in my way. I've stopped.",
+                "sensor": "I can't get a clear reading from my obstacle sensors, so I'm staying here.",
+                "edge": "There's an edge here. I've stopped.",
+                "stopped_edge": "There's an edge here. I've stopped.",
+                "cancelled": "Stopped.",
+                "busy": "I'm already looking for you.",
+                "unavailable": "My camera search isn't available right now.",
+            }
+            b.speak(replies.get(result, "I couldn't move safely, so I've stopped."))
             return True
 
-        if action == "spin":
-            b.speak("Wheee.")
-            if not b.drive_rotate(360):
-                b.speak(EDGE_REFUSAL)
+        if action in ("spin", "left", "right"):
+            result = b.turn_guarded({"spin": 360, "left": -90, "right": 90}[action])
+            self.last_motion_result = {"command": action, "result": result}
+            self._last_motion_at = time.monotonic()
+            if result == "cancelled":
+                b.speak("Stopped.")
+            elif result != "ok":
+                b.speak(DOCK_REFUSAL if b.docked else
+                        "I couldn't finish that turn safely, so I stopped.")
             return True
 
         def _refuse():
@@ -246,34 +318,30 @@ class Router:
             return _guarded(150, 30)
         if action == "back":
             return _guarded(-150, 30)
-        if action == "left":
-            if not b.drive_rotate(-90):
-                _refuse()
-            return True
-        if action == "right":
-            if not b.drive_rotate(90):
-                _refuse()
-            return True
         if action == "stop":
             b.stop_everything()
             return True
 
         if action == "sleep":
-            b.speak("Powering down. Tap me when you need me.")
+            b.speak("Goodnight. Say Spark or tap me to wake me.")
             b.sleep_pose()
             return True
 
         if action == "wake":
-            b.speak("Morning! Fully charged and ready.")
             b.wake_up()
+            b.speak("I'm awake!")
             return True
 
         if action == "battery":
+            charging = b.refresh_power()
             pct = b.battery_pct()
             if pct is None:
                 b.speak("I can't read my battery right now.")
             else:
-                b.speak(f"I'm at {pct} percent.")
+                state = (" I'm charging." if charging is True else
+                         " I'm parked, but not charging. Please reseat me." if b.docked and charging is False else
+                         " My charging reading is uncertain." if charging is None else "")
+                b.speak(f"I'm at about {pct} percent." + state)
             return True
 
         _log(f"unhandled action {action}")
@@ -284,13 +352,21 @@ class Router:
         b = self.body
         result = b.go_home()
         if result == "already":
-            b.speak("I'm already home, all cozy.")
+            charging = b.refresh_power()
+            b.speak("I'm already charging." if charging is True else
+                    "I'm parked, but charging isn't confirmed. Please check my dock contact.")
         elif result == "arrived":
             b.speak("Home sweet home. Charging up!")
         elif result == "unknown":
             b.speak("I need help getting onto my charger. Please place me on my dock.")
         elif result == "busy":
             b.speak("I'm already heading home!")
+        elif result == "cancelled":
+            b.speak("Stopped.")
+        elif result == "not_found":
+            b.speak("I can't see my dock. Please put it where I can see the marker.")
+        elif result in {"no_contact", "contact", "alignment", "too_close", "posture"}:
+            b.speak("I couldn't line up with my charger. Please help me onto the dock.")
         else:  # lost
             b.speak("I got confused on the way — I stopped somewhere safe. Can you carry me home?")
         return True
@@ -372,39 +448,22 @@ class Router:
 
     # --------------------------------------------------------------- imagine
     def _imagine(self, raw_text):
-        """Stock's best bit, upgraded: themed physical routine + LLM narration."""
+        """Narrate first, then perform once on the main SDK/recognition thread."""
         low = raw_text.lower()
-        variant, theme_sfx = "fiesta", None
-        for key, val in _IMAGINE_THEMES.items():
-            if key in low:
-                variant, theme_sfx = val
-                break
-        import threading
-
-        def _perform():
-            try:
-                self.body.eyes("speaking")
-                if theme_sfx:
-                    self.body.play_sfx(theme_sfx, defer=False)
-                self.body.dance(variant)
-                self.body.eyes("idle")
-            except Exception as e:
-                _log(f"imagine perform failed: {e}")
-
-        # she performs on a side stage while the brain narrates the fantasy
-        threading.Thread(target=_perform, daemon=True).start()
-        _log(f"imagine: variant={variant}")
+        variant = next((val for key, val in _IMAGINE_THEMES.items() if key in low), "fiesta")
         if self.llm_reply is not None:
             self.llm_reply(
                 raw_text,
-                extra_context=("ROLEPLAY DIRECTION: You are physically acting this out RIGHT NOW — "
-                               "arms waving, wheels spinning, in character. Narrate it with "
-                               "theatrical flair, present tense, like a tiny robot living its "
-                               "best fantasy. No stage directions in brackets — just spoken words."),
+                extra_context=("ROLEPLAY DIRECTION: Give one playful spoken sentence in character. "
+                               "A robot routine will play AFTER your sentence. Do not claim to "
+                               "navigate to a person or place. Do not include stage directions."),
             )
         else:
-            self.body.speak("Oh, I love this one. Watch me!")
-            self.body.dance(variant)
+            self.body.speak("Let's pretend. Watch this!")
+        _log(f"imagine: variant={variant}")
+        if not self.body.dance(variant):
+            self.body.speak("My routine didn't finish that time.")
+        self.body.eyes("idle")
         return True
 
     # ---------------------------------------------------------------- search

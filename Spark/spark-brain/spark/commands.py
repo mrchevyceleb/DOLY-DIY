@@ -1,4 +1,4 @@
-"""Stock command parity — every stock-style voice command, kept working.
+"""Locally supported stock-style voice commands.
 
 Matching: normalized fuzzy match over phrase lists. Extend `COMMANDS`
 with anything you find in the Doly app (Main page → Interact → Say).
@@ -11,7 +11,7 @@ import time
 COLORS = ["Red", "Green", "Blue", "White", "Yellow", "Orange", "Purple", "Pink",
           "Cyan", "Magenta", "DarkGreen", "LightBlue", "Black"]
 
-WAKE_WORDS = ["hey spark", "spark", "hey doly", "dolly", "doly", "hey dolly"]
+WAKE_WORDS = ["hey spark", "spark", "hey sparky", "sparky", "hey doly", "dolly", "doly", "hey dolly"]
 
 # command -> (phrases, params).  action names map to Body methods / handlers.
 COMMANDS = [
@@ -32,6 +32,12 @@ COMMANDS = [
                                       "go to your charger", "back to your charger", "go charge yourself",
                                       "return to your charger", "charge up", "go plug in", "get home",
                                       "go to the charger", "time to charge", "go recharge"]},
+    {"action": "dance_salsa", "phrases": ["salsa", "fiesta dance"]},
+    {"action": "dance_twist", "phrases": ["do the twist", "twist dance"]},
+    {"action": "dance_rock", "phrases": ["rock dance", "rock and roll", "let's rock"]},
+    {"action": "dance_workout", "phrases": ["work out", "workout", "do exercise", "do some exercise"]},
+    {"action": "dance_party", "phrases": ["party dance", "happy dance", "today is my birthday"]},
+    {"action": "dance_meditate", "phrases": ["meditate", "meditation"]},
     {"action": "dance", "phrases": ["dance", "do a dance", "let's dance", "do a little dance",
                                      "show me your moves"]},
     {"action": "come_here", "phrases": ["come here", "come to me", "come over here",
@@ -42,8 +48,8 @@ COMMANDS = [
     {"action": "back", "phrases": ["go back", "move back", "back up", "drive backward",
                                     "backwards", "backward", "move backward", "move backwards",
                                     "go backwards", "reverse", "back up now"]},
-    {"action": "left", "phrases": ["turn left", "go left"]},
-    {"action": "right", "phrases": ["turn right", "go right"]},
+    {"action": "left", "phrases": ["turn left", "go left", "move left"]},
+    {"action": "right", "phrases": ["turn right", "go right", "move right"]},
     {"action": "stop", "phrases": ["stop", "stop moving", "halt"]},
     {"action": "sleep", "phrases": ["go to sleep", "sleep", "sleep mode", "goodnight",
                                      "good night"]},
@@ -57,13 +63,18 @@ MATCH_THRESHOLD = 0.72
 # never fire from negated or embedded speech ("don't dance", "back to the future").
 MOTION_ACTIONS = {"dance", "come_here", "spin", "forward", "back", "left", "right",
                   "stop", "fist_bump", "high_five", "sleep", "photo", "go_home"}
+MOTION_ACTIONS.update(c["action"] for c in COMMANDS if c["action"].startswith("dance_"))
 MOTION_THRESHOLD = 0.82
 
 # politeness/filler tokens stripped before matching ("please dance" -> "dance")
 _FILLER = {"please", "can", "you", "could", "would", "will", "just", "now",
            "hey", "okay", "ok", "a", "the", "me", "for"}
 
-_NEGATION_RE = re.compile(r"\b(don'?t|dont|do not|never|no|stop (?:talking|asking))\b")
+_NEGATION_RE = re.compile(r"\b(don'?t|dont|didn'?t|didnt|doesn'?t|isn'?t|wasn'?t|"
+                          r"can'?t|won'?t|not|never|no|stop (?:talking|asking))\b")
+_DOCK_CORRECTION_RE = re.compile(
+    r"^(?:no )?you(?:'re| are) not (?:on|at) (?:a |the |your )?"
+    r"(?:charging dock|charger|dock)\b\s*")
 
 _norm_re = re.compile(r"[^a-z0-9' ]+")
 
@@ -72,6 +83,7 @@ def normalize(text):
     text = (text or "").lower().strip()
     text = _norm_re.sub(" ", text)
     text = " ".join(text.split())
+    text = re.sub(r"^(?:okay|ok) (?=(?:spark|sparky|doly|dolly)\b)", "", text)
     changed = True
     while changed:
         changed = False
@@ -110,14 +122,25 @@ _STOP_CMD = {"action": "stop", "phrases": ["stop"]}
 
 
 def match_command(text):
-    """Match a command via contiguous token windows anywhere in the text.
-
-    Window matching is inherently char-fuzz-proof ("spine" never matches
-    "spin") and survives ASR junk glued around the command
-    ("move forward whoop our" still fires `forward`). Negation anywhere
-    in the sentence still blocks motion commands.
-    """
+    """Only imperatives authorize motion; a mention or complaint does not."""
+    # Keep sentence boundaries: a complaint can precede a fresh request.
+    clauses = [c for c in re.split(r"[.!?;]+", text) if c.strip()]
+    if len(clauses) > 1:
+        prohibited = any(re.match(r"^(?:please )?(?:don'?t|do not|never|no)\b",
+                                 _DOCK_CORRECTION_RE.sub("", normalize(c))) for c in clauses)
+        for clause in reversed(clauses):
+            cmd, score = match_command(clause)
+            if cmd:
+                if prohibited and cmd["action"] in MOTION_ACTIONS and cmd["action"] != "stop":
+                    return None, 0.0
+                return cmd, score
+        return None, 0.0
     text = normalize(text)
+    # A correction of the robot's dock claim does not negate the following
+    # imperative: "No, you're not on a charger. Come here." Keep all other
+    # negations, including "...don't come here", intact.
+    text = _DOCK_CORRECTION_RE.sub("", text)
+    text = re.sub(r"^(?:(?:okay|ok|hey|please) )*why don'?t you ", "", text)
     if not text:
         return None, 0.0
     tokens = _tokens(text)
@@ -137,7 +160,13 @@ def match_command(text):
                 if tokens[i:i + n] != pt:
                     continue
                 s = 1.0
-                if negated and is_motion:
+                prefix = " ".join(tokens[:i])
+                request_prefix = re.fullmatch(
+                    r"(?:(?:okay|ok|hey|please|just|now) )*"
+                    r"(?:(?:can|could|would|will) you |i want you to |"
+                    r"i would like you to |let's |lets |give me |show me |do )?"
+                    r"(?:(?:please|just|a|the|another) )*", prefix + " " if prefix else "")
+                if is_motion and (negated or not request_prefix):
                     s = 0.5  # negated speech can never trigger motion
                 if s >= (MOTION_THRESHOLD if is_motion else MATCH_THRESHOLD) and s > best_score:
                     best, best_score = cmd, s

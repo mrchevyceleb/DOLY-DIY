@@ -19,12 +19,14 @@ fi
 
 echo "==> Installing system packages…"
 apt-get update -qq
-apt-get install -y -qq python3-venv python3-dev alsa-utils >/dev/null
+apt-get install -y -qq python3-venv python3-dev g++ alsa-utils >/dev/null
 
 echo "==> Deploying app to ${APP_DIR}…"
 mkdir -p /opt/spark/state /opt/spark/vosk "${APP_DIR}"
 rsync -a --delete spark/ "${APP_DIR}/spark/" 2>/dev/null || { rm -rf "${APP_DIR}/spark"; cp -r spark/ "${APP_DIR}/"; }
-cp -f prompt.md config.json requirements.txt "${APP_DIR}/"
+cp -f prompt.md config.json requirements.txt THIRD_PARTY.md "${APP_DIR}/"
+mkdir -p "${APP_DIR}/licenses"
+cp -f licenses/NanoDet-APACHE-2.0.txt "${APP_DIR}/licenses/"
 
 if [ ! -d "${VENV}" ]; then
   echo "==> Creating venv (system-site-packages so doly_* stays visible)…"
@@ -34,6 +36,8 @@ fi
 echo "==> Installing python deps…"
 "${VENV}/bin/pip" install --quiet --upgrade pip
 "${VENV}/bin/pip" install --quiet -r "${APP_DIR}/requirements.txt"
+"${VENV}/bin/python" deploy/install_vision.py
+"${VENV}/bin/python" deploy/install_tof.py
 
 if [ ! -d "${VOSK_DIR}" ]; then
   echo "==> Downloading Vosk ASR model (~40 MB)…"

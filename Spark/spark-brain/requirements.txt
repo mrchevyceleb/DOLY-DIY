@@ -1,3 +1,4 @@
 vosk==0.3.45
+webrtcvad-wheels==2.0.14
 ddgs>=9.0.0
 smbus2>=0.4.2,<1

@@ -33,11 +33,38 @@ class Body:
         import collections
         self._sfx_queue = collections.deque()
         self._anim_requests = collections.deque()
+        self._anim_queue_lock = threading.Lock()
+        self._pending_pet = None
+        self._interaction = None
+        self._interaction_armed = False
+        self._interaction_contact = threading.Event()
+        self._interaction_stop = threading.Event()
+        self._approach_stop = threading.Event()
+        self._approaching = False
+        self._turning = False
+        self.motion_stop_factory = None
+        self._person_detector = None
+        self._tof_snapshot = None
+        self._tof_poll_stop = threading.Event()
+        self._tof_poll_thread = None
+        self._touch_interrupt = False
+        self._dance_index = 0
         # homing: software dead-reckoning (doly_drive.get_position is broken
         # in the pybind layer, so spark tracks its own estimate)
         self._pose = None          # [x_mm, y_mm, heading_deg] or None = unknown
         self._homing = False
+        self._roaming = False
+        self._roam_distance_bound = None
+        self._imu_yaw = None
+        self._imu_updated_at = 0.0
         self._leaving_home = False
+        self._departure = None
+        self._docking_entry = None
+        self._full_charge_since = None
+        self._dock_auto_attempted = False
+        self._next_auto_departure = 0.0
+        self.last_departure_result = None
+        self._dock_charge_seen_at = None
         self._home_arrived = False
         self._edge_hazard = None   # None | "forward" | "backward" | "all":
         # latched after a real gap event — no blind drives TOWARD that edge
@@ -46,7 +73,24 @@ class Body:
         self._hazard_airborne = False  # an all-void event followed the latch
         self._escaping = False      # _escape_edge drives bypass the hazard gate
         self.docked = False
+        self._dock_hold_path = None
+        if hw and cfg.get("state_dir"):
+            from pathlib import Path
+            self._dock_hold_path = Path(cfg["state_dir"]) / "dock-hold"
+            try:
+                self.docked = self._dock_hold_path.read_text().strip() == "held"
+            except FileNotFoundError:
+                pass
+            except OSError as exc:
+                self.docked = True
+                _log(f"dock hold state unreadable: {exc}; holding motors")
+        self.sleeping = False
+        self._dock_discharge_since = None
+        self._charge_notice_pending = False
+        self._charge_notice_sent = False
         self._dock_clear_since = None
+        self._dock_pickup_at = None
+        self._dock_native_stopped = False
         self._power_stop = threading.Event()
         self._power_thread = None
         self._power_fault = False
@@ -150,6 +194,17 @@ class Body:
             raise RuntimeError(f"touch init rc={rc}")
 
         def _on_touch(side, state):
+            if "Down" in str(state) and (
+                    (self.anim and self.anim.playing() and self.anim.petting is not True)
+                    or self._interaction or self._approaching or self._turning
+                    or self._homing or self._leaving_home or self._roaming):
+                self._touch_interrupt = True
+                self.stop_everything()
+                return
+            if self._touch_interrupt:
+                if "Down" not in str(state):
+                    self._touch_interrupt = False
+                return  # consume release too; don't queue another performance
             if self._touch_cb:
                 try:
                     self._touch_cb(side, state)
@@ -168,7 +223,13 @@ class Body:
 
     def _init_drive(self):
         import doly_drive as drive
-        rc = drive.init()
+        # Drive initializes the shared IMU first. A later imu.init() returns
+        # already-active, so supplying calibration only there leaves zero
+        # offsets in use for both heading and native motor control.
+        rc, gx, gy, gz, ax, ay, az = self._helper.get_imu_offsets()
+        if rc < 0:
+            raise RuntimeError("drive IMU offsets unavailable")
+        rc = drive.init(gx, gy, gz, ax, ay, az)
         if rc != 0:
             raise RuntimeError(f"drive init rc={rc}")
         drive.on_complete(lambda i: None)
@@ -207,9 +268,24 @@ class Body:
                     self._sensor_react("tof", t)
 
         tof.on_proximity_gesture(_on_gesture)
-        if tof.setup_continuous(50, 60) < 0:
+        # Each side can take 50ms. A 50ms pair interval makes the SDK reader
+        # immediately reacquire its mutex and starve getSensorsData. Leave
+        # time between pairs; the cached snapshot still expires after 300ms.
+        if tof.setup_continuous(150, 60) < 0:
             raise RuntimeError("tof setup_continuous failed")
         self._tof = tof
+        import spark_tof_native
+        def poll():
+            while not self._tof_poll_stop.is_set():
+                try:
+                    samples = spark_tof_native.read_sensors()
+                    self._tof_snapshot = (time.monotonic(), samples)
+                except Exception as exc:
+                    self._tof_snapshot = None
+                    _log(f"ToF reader failed: {exc}")
+                self._tof_poll_stop.wait(.03)
+        self._tof_poll_thread = threading.Thread(target=poll, daemon=True)
+        self._tof_poll_thread.start()
 
     def _init_imu(self):
         """Bump / poke / shake / lift awareness (stock physical reactions)."""
@@ -228,6 +304,7 @@ class Body:
         def _on_update(data):
             try:
                 self._imu_yaw = data.ypr.yaw
+                self._imu_updated_at = time.monotonic()
             except Exception:
                 pass
 
@@ -263,6 +340,17 @@ class Body:
     def _sensor_react(self, family, kind):
         """Thread-safe, debounced stock-style reactions. Never raises."""
         try:
+            if self.sleeping:
+                return
+            if self._interaction:
+                if (self._interaction_armed and family == "imu"
+                        and kind in ("ShockLight", "ShockMedium")
+                        and not self.speaking_recently()):
+                    _log(f"{self._interaction}: contact from {kind}")
+                    self._interaction_contact.set()
+                return
+            if self._turning or (self.anim and self.anim.playing()):
+                return  # choreography owns expressive effects; edge/power guards stay live
             if not getattr(self, "react_enabled", True):
                 return
             now = time.time()
@@ -300,10 +388,12 @@ class Body:
         if not self.has.get("eye"):
             return
         try:
-            self._eye.set_animation(
+            rc = self._eye.set_animation(
                 self._next_id(), getattr(self._eye.expressions, expression_name))
+            return rc is None or rc >= 0
         except Exception as e:
             _log(f"mood_eyes failed: {e}")
+            return False
 
     def _init_edge(self):
         """ToF edge sensors — the not-driving-off-tables subsystem."""
@@ -314,6 +404,18 @@ class Body:
 
         def _handle_gap(direction):
             dir_name = str(direction).split(".")[-1]
+            if self._docking_entry is not None and self._docking_entry.trailing_gap(dir_name):
+                return  # final reverse onto known ramp; rear pair still guards travel
+            if self._docking_entry is not None:
+                # A short pulse must still cancel entry after the GPIO clears.
+                self._docking_entry.reason = "edge"
+            if (self._leaving_home and self._departure is not None
+                    and self._departure.trailing_gap(dir_name)):
+                return  # bounded forward clearance, both front sensors supported
+            if self._leaving_home:
+                self._approach_stop.set()  # transient gaps cancel departure too
+            if dir_name == "All" and self.docked:
+                self._dock_pickup_at = time.monotonic()
             # EMERGENCY: kill motion, lock further motion, react
             lock_s = 10.0 if dir_name == "All" else 3.0  # All = airborne/off-edge
             self._gap_lock_until = max(self._gap_lock_until, time.time() + lock_s)
@@ -340,14 +442,16 @@ class Body:
             _log(f"GAP DETECTED dir={dir_name} — motion locked {lock_s}s")
             if dir_name == "All":
                 self._pose = None          # airborne/picked up: position lost
+                self._roam_distance_bound = None
             try:
                 self.drive_stop()
             except Exception:
                 pass
-            self.eyes("thinking")
-            self._led_flash("Red")
-            if dir_name == "All":
-                self.mood_eyes("FRIGHTENED")
+            if not self.sleeping:
+                self.eyes("thinking")
+                self._led_flash("Red")
+                if dir_name == "All":
+                    self.mood_eyes("FRIGHTENED")
 
         def _on_gap(direction):
             with self._power_lock:
@@ -578,9 +682,13 @@ class Body:
         with self._power_lock:
             try:
                 result = self._refresh_power()
-                fault = result is None
+                fault = result is None and not (
+                    self._leaving_home and self._departure is not None
+                    and self._charging.healthy())
                 if fault and not self._power_fault:
                     self._power_fault = True
+                    _log(f"power hold: shunt={self._charging.average} "
+                         f"error={self._charging.error}")
                     self.stop_everything()  # stop arms already in flight too
                 self._power_fault = fault
                 return result
@@ -595,47 +703,148 @@ class Body:
 
     def _refresh_power(self):
         """Charging latches a motor hold. Lost contact never triggers a nudge.
-        Release only after sustained discharge on fully supported ground."""
+        Release after a verified departure or pickup onto supported ground."""
         if self._charging is None:
             return None
         with self._power_lock:
             charging = self._charging.sample()
             now = time.monotonic()
+            gaps = self._edge_gaps()
+            if charging is True:
+                self._dock_charge_seen_at = now
+            elif charging is False or not self._charging.healthy():
+                self._dock_charge_seen_at = None
+            if self.docked and len(gaps) == 4:
+                self._dock_pickup_at = now
             if charging and not self._leaving_home:
                 if not self.docked:
                     self.docked = True
+                    self._dock_auto_attempted = False
+                    # Placing an undocked robot onto the charger can raise
+                    # front/all-gap events before current averaging proves
+                    # contact. A new, electrically confirmed dock placement
+                    # supersedes that old location's hazard. Never do this
+                    # while already held: a failed exit must stay latched.
+                    if not gaps or set(gaps) == {"Front_Left", "Front_Right"}:
+                        with self._hazard_lock:
+                            if self._edge_hazard is not None:
+                                _log(f"new dock placement: clearing prior {self._edge_hazard} hazard")
+                                self._edge_hazard = None
+                                self._hazard_clear_at = None
+                                self._hazard_airborne = False
+                                self._hazard_gen += 1
+                    self._save_dock_hold()
                     self._pose = None
+                    self._roam_distance_bound = None
                     self.stop_everything()
                     _log("charging confirmed: motors parked")
                 self._dock_clear_since = None
+                if self._dock_pickup_at is not None and now - self._dock_pickup_at > 3:
+                    self._dock_pickup_at = None  # reseated on powered dock
             elif self.docked and not self._leaving_home:
                 clear = (charging is False and self._charging.average is not None
                          and self._charging.average < -5
-                         and self.has.get("edge") and not self._edge_gaps())
+                         and self._dock_pickup_at is not None
+                         and self.has.get("edge") and not gaps)
                 if clear:
                     if self._dock_clear_since is None:
                         self._dock_clear_since = now
                     elif now - self._dock_clear_since >= 5:
                         self.docked = False
+                        self._save_dock_hold()
                         self._pose = None
                         self._dock_clear_since = None
-                        _log("removed from charger: supported ground confirmed")
+                        self._dock_pickup_at = None
+                        self._dock_native_stopped = False
+                        _log("removed from charger: pickup and supported ground confirmed")
                 else:
                     self._dock_clear_since = None
+            if self.docked:
+                self._enforce_dock_stop()
+            # A full cell tapers around zero current. Valid mixed readings
+            # can count toward full-charge dwell; faults and established
+            # discharge cannot. This does not relax ordinary motor guards.
+            if (self.docked and charging is not False and self._charging.healthy()
+                    and self.battery_pct() == 100
+                    and not self.sleeping and not self._leaving_home):
+                if self._full_charge_since is None:
+                    self._full_charge_since = now
+            else:
+                self._full_charge_since = None
+            # The dock latch is a motor interlock, never proof of charging.
+            if self.docked and charging is False and not self._leaving_home:
+                if self._dock_discharge_since is None:
+                    self._dock_discharge_since = now
+                if now - self._dock_discharge_since >= 15 and not self._charge_notice_sent:
+                    self._charge_notice_pending = True
+                    self._charge_notice_sent = True
+                    _log("charger contact lost: sustained discharge; motors remain parked")
+            elif charging is True or not self.docked:
+                self._dock_discharge_since = None
+                self._charge_notice_pending = self._charge_notice_sent = False
             if now >= getattr(self, "_next_power_log", 0):
                 self._next_power_log = now + 30
                 _log(f"power: battery={self.battery_pct()}% charging={charging} "
                      f"parked={self.docked} shunt={self._charging.average} "
-                     f"voltage={self._charging.voltage} error={self._charging.error}")
+                     f"voltage={self._charging.voltage} error={self._charging.error} "
+                     f"gaps={gaps} clear_since={self._dock_clear_since} "
+                     f"motors={self._motor_status()}")
             return charging
+
+    def _enforce_dock_stop(self):
+        """Check the native controller as well as blocking future requests."""
+        departing = (self._leaving_home and self._departure is not None
+                     and self._departure.check() is None)
+        if self._leaving_home and not departing:
+            self._approach_stop.set()
+            self._leaving_home = False
+            self._dock_native_stopped = False
+        if self.has.get("drive") and not departing:
+            running = self._drive.get_state() == self._drive.DriveState.Running
+            if running or not self._dock_native_stopped:
+                _log(f"dock motor stop: native_running={running}")
+                self._dock_native_stopped = self.drive_stop()
+        if self.has.get("arm"):
+            for side in (self._arm.ArmSide.Left, self._arm.ArmSide.Right):
+                if self._arm.get_state(side) == self._arm.ArmState.Running:
+                    _log(f"dock arm stop: {side}")
+                    self._arm.abort(side)
+
+    def _motor_status(self):
+        try:
+            state = str(self._drive.get_state()) if self.has.get("drive") else "unavailable"
+            rpm = [round(float(self._drive.get_rpm(side)), 2) for side in (True, False)] if self.has.get("drive") else []
+            arms = [str(self._arm.get_state(side)) for side in (self._arm.ArmSide.Left, self._arm.ArmSide.Right)] if self.has.get("arm") else []
+            return {"drive": state, "rpm": rpm, "arms": arms}
+        except Exception as exc:
+            return {"error": str(exc)}
 
     def dock_probe(self):
         """Read charging telemetry; never move wheels to test the dock."""
         self.refresh_power()
         return self.docked
 
+    def _save_dock_hold(self):
+        """A restart must not forget a charger hold during lost contact."""
+        if self._dock_hold_path is not None:
+            try:
+                temporary = self._dock_hold_path.with_suffix(".tmp")
+                temporary.write_text("held" if self.docked else "clear")
+                temporary.replace(self._dock_hold_path)
+            except OSError as exc:
+                _log(f"dock hold persistence failed: {exc}")
+
+    def take_charge_notice(self):
+        """One spoken notice per loss of contact, delivered on the main thread."""
+        with self._power_lock:
+            pending = self._charge_notice_pending
+            self._charge_notice_pending = False
+            return pending
+
     def actuators_held(self):
         """Keep arms and wheels still on charge or with uncertain power."""
+        if self.sleeping or self._docking_entry is not None:
+            return True
         if not self.hw:
             return False
         charging = self.refresh_power()
@@ -657,8 +866,10 @@ class Body:
         if not self.has.get("edge"):
             return []
         try:
-            state = getattr(self._edge.GpioState,
-                            self.cfg.get("edge", {}).get("gap_gpio_state", "Low"))
+            # SDK EdgeControl.h and DetermineGapEvent use LOW for no ground.
+            # This is a hardware contract, not a configurable sensitivity.
+            # Reversing it locks a supported robot and misses real cliffs.
+            state = self._edge.GpioState.Low
             gaps = [str(getattr(s, "id", "?")).split(".")[-1]
                     for s in self._edge.get_sensors(state)]
         except Exception as e:
@@ -670,8 +881,7 @@ class Body:
         """Direction-aware safety: a cliff BEHIND her must not block forward
         motion (that bug trapped her on the dock and froze her near desk
         edges). forward -> only Front gaps block; backward -> only Back gaps;
-        rotate -> Front gaps block (Back-only tolerated; watchdog guards
-        mid-rotation sweeps).
+        rotate -> either end's gaps block the wheel sweep.
         """
         if self.actuators_held():
             return False
@@ -686,7 +896,7 @@ class Body:
         front = any(g.startswith("Front") for g in gaps)
         back = any(g.startswith("Back") for g in gaps)
         blocked = (front and direction in ("forward", "rotate")) or \
-                  (back and direction == "backward")
+                  (back and direction in ("backward", "rotate"))
         if blocked:
             self._gap_lock_until = time.time() + 2.0
             _log(f"motion blocked ({direction}): gaps={gaps}")
@@ -749,7 +959,7 @@ class Body:
         self._hazard_clear_at = None
         return True
 
-    def drive_guarded(self, mm, speed=25, segment_mm=60):
+    def drive_guarded(self, mm, speed=25, segment_mm=60, interlock=None):
         """Segmented drive with INLINE edge polling — the 'come here' fix.
 
         Blind 250mm drives at speed 45 put her off the desk: the async
@@ -790,6 +1000,10 @@ class Body:
         total = remaining
         sign = 1 if mm >= 0 else -1
         while remaining > 0:
+            reason = interlock() if interlock else None
+            if reason:
+                self.drive_stop()
+                return reason
             step = min(segment_mm, remaining)
             if not self._motion_allowed(direction):
                 return "stopped_edge" if remaining < total else False
@@ -797,11 +1011,15 @@ class Body:
                 # pybind11 SupportsInt rejects floats — step/speed are
                 # floats after the clamp math above and must be reified
                 with self._power_lock:
+                    if interlock and self._approach_stop.is_set():
+                        return "cancelled"
                     if (not self._motion_allowed(direction)
                             or (self._hazard_active(direction) and not self._escaping)):
                         return False
                     self._drive.go_distance(self._next_id(), int(round(step)),
                                             int(round(speed)), sign > 0, True)
+                    if self._roam_distance_bound is not None:
+                        self._roam_distance_bound += step  # reserve interrupted travel too
             except Exception as e:
                 self.drive_stop()  # a half-sent command must not free-run
                 _log(f"guarded drive failed: {e}")
@@ -812,6 +1030,10 @@ class Body:
             time.sleep(0.05)  # let the drive enter Running before polling
             deadline = start + 8
             while time.time() < deadline:
+                reason = interlock() if interlock else None
+                if reason:
+                    self.drive_stop()
+                    return reason
                 if self.actuators_held():
                     self.drive_stop()
                     return False
@@ -841,6 +1063,9 @@ class Body:
                     break  # never started: rejected/stale command
                 time.sleep(0.03)
             self.drive_stop()
+            reason = interlock() if interlock else None
+            if reason:
+                return reason
             if not completed:
                 _log("guarded drive: segment incomplete (stall/timeout/comms/rejected) — aborting")
                 return False
@@ -876,14 +1101,15 @@ class Body:
                         front = any(g.startswith("Front") for g in gaps)
                         back = any(g.startswith("Back") for g in gaps)
                         danger = (front and direction in ("forward", "rotate")) or \
-                                 (back and direction == "backward")
+                                 (back and direction in ("backward", "rotate"))
                         if danger:
                             self._gap_lock_until = max(self._gap_lock_until, time.time() + 3.0)
                             if not self.is_on_dock():
                                 # a rotate-stop found the cliff with a swept
                                 # wheel: latch forward so _escape_edge keeps
                                 # the backward retreat route open
-                                self._latch_hazard(direction if direction in ("forward", "backward") else "forward")
+                                self._latch_hazard(direction if direction in ("forward", "backward") else
+                                                   "all" if front and back else "forward" if front else "backward")
                             self.drive_stop()
                             _log(f"watchdog: stopped mid-motion ({direction}, gaps={gaps})")
                             return
@@ -1024,8 +1250,12 @@ class Body:
                 deadline = time.time() + 4
                 while time.time() < deadline:
                     if self._arm.get_state(self._arm.ArmSide.Both) == self._arm.ArmState.Completed:
-                        break
+                        return True
+                    if self._arm.get_state(self._arm.ArmSide.Both) == self._arm.ArmState.Error:
+                        return False
                     time.sleep(0.05)
+                _log("arm movement did not complete within four seconds")
+                return False
             return True
         except Exception as e:
             _log(f"arm_angle failed: {e}")
@@ -1038,21 +1268,49 @@ class Body:
         return self.arm_angle(20)
 
     def fist_bump(self):
-        if self.anim and self.anim.play("fist_bump", blocking=True):
-            return True
-        self.arms_up()
-        time.sleep(0.3)
-        self.arm_angle(90)
-        return True
+        return self._hand_gesture("fist_bump", "fist_ready", 90)
 
     def high_five(self):
-        if self.anim and self.anim.play("high_five", blocking=True):
-            return True
-        self.arms_up()
-        return True
+        return self._hand_gesture("high_five", "high_five_ready", 140)
+
+    def _hand_gesture(self, name, ready, angle):
+        """Wait for a fresh bump after the arm and ready sound have settled."""
+        if self.actuators_held():
+            return False
+        self._interaction_stop.clear()
+        self._interaction_armed = False
+        self._interaction = name
+        try:
+            self.drive_stop()
+            if not self.arm_angle(angle, speed=40):
+                return False
+            if self._interaction_stop.is_set():
+                return False
+            if self.anim and not self.anim.play(ready):
+                return False
+            if self._interaction_stop.wait(0.35):
+                return False
+            self._interaction_contact.clear()
+            self._interaction_armed = True
+            _log(f"{name}: waiting for contact")
+            deadline = time.monotonic() + 5
+            while time.monotonic() < deadline:
+                if self._interaction_stop.is_set() or self.actuators_held():
+                    return False
+                if self._interaction_contact.wait(0.02):
+                    self._interaction_armed = False
+                    return bool(self.anim and self.anim.play(name))
+            _log(f"{name}: no contact; lowering arms")
+            return True  # offered the gesture; no fake contact celebration
+        finally:
+            self._interaction_armed = False
+            self._interaction = None
+            if not self._interaction_stop.is_set():
+                self.arm_angle(20, speed=40)
 
     # ----------------------------------------------------------------- drive
     def drive_distance(self, mm, speed=45):
+        self._roam_distance_bound = None  # ordinary/animation travel needs a new visual anchor
         if not self.has.get("drive"):
             return False
         direction = "forward" if mm >= 0 else "backward"
@@ -1069,8 +1327,11 @@ class Body:
                 if (not self._motion_allowed(direction)
                         or (self._hazard_active(direction) and not self._escaping)):
                     return False
-                self._drive.go_distance(self._next_id(), int(round(abs(mm))),
-                                        int(round(speed)), mm >= 0, True)
+                rc = self._drive.go_distance(self._next_id(), int(round(abs(mm))),
+                                            int(round(speed)), mm >= 0, True)
+                if rc is False or (rc is not None and rc < 0):
+                    _log(f"drive rejected: rc={rc}")
+                    return False
             self._watch_motion("forward" if mm >= 0 else "backward")
             self._pose_update(dist_mm=mm)
             return True
@@ -1078,7 +1339,7 @@ class Body:
             _log(f"drive_distance failed: {e}")
             return False
 
-    def drive_rotate(self, degrees, speed=45):
+    def drive_rotate(self, degrees, speed=45, from_center=False):
         if not self.has.get("drive"):
             return False
         if self.actuators_held():
@@ -1088,10 +1349,19 @@ class Body:
         try:
             with self._power_lock:
                 if (not self._motion_allowed("rotate")
-                        or (self._hazard_active("forward") and not self._escaping)):
+                        or (self._approaching and self._approach_stop.is_set())
+                        or ((self._hazard_active("forward") or self._hazard_active("backward"))
+                            and not self._escaping)):
                     return False
-                self._drive.go_rotate(self._next_id(), int(round(degrees)), False,
-                                      int(round(speed)), True, True)
+                rc = self._drive.go_rotate(self._next_id(), int(round(degrees)), from_center,
+                                          int(round(speed)), True, True)
+                if not from_center:
+                    self._roam_distance_bound = None
+                elif self._roam_distance_bound is not None:
+                    self._roam_distance_bound += 10  # allow for pivot/slip error
+                if rc is False or (rc is not None and rc < 0):
+                    _log(f"rotate rejected: rc={rc}")
+                    return False
             self._watch_motion("rotate")
             self._pose_update(rot_deg=degrees)
             return True
@@ -1104,20 +1374,75 @@ class Body:
             if not self.has.get("drive"):
                 return False
             ok = True
+            # Zeroing PWM alone does not cancel an autonomous target. Abort
+            # the native operation first so it cannot reassert wheel speed.
+            try:
+                self._drive.abort()
+            except Exception as e:
+                _log(f"drive abort failed: {e}")
+                ok = False
             # attempt each wheel independently — one failure must not skip the other
             for is_left in (False, True):
                 try:
-                    self._drive.free_drive(0, is_left, True)
+                    if self._drive.free_drive(0, is_left, True) is False:
+                        _log(f"drive_stop({'left' if is_left else 'right'}) rejected")
+                        ok = False
                 except Exception as e:
                     _log(f"drive_stop({'left' if is_left else 'right'}) failed: {e}")
                     ok = False
             return ok
 
+    def turn_guarded(self, degrees):
+        """Finish or stop a voice turn before opening the next listening window."""
+        if not self.has.get("drive") or self.actuators_held():
+            return "blocked"
+        self._approach_stop.clear()
+        self._turning = True
+        started = time.monotonic()
+        seen_running = False
+        result = "timeout"
+        try:
+            stop = self.motion_stop_factory() if self.motion_stop_factory else lambda: False
+            if not self.drive_rotate(degrees, speed=30, from_center=True):
+                result = "blocked"
+                return "blocked"
+            while time.monotonic() - started < 15:
+                if self._approach_stop.is_set() or stop():
+                    result = "cancelled"
+                    break
+                if self.actuators_held():
+                    result = "power"
+                    break
+                if not self._motion_allowed("rotate"):
+                    result = "edge"
+                    break
+                state = self._drive.get_state()
+                if state == self._drive.DriveState.Running:
+                    seen_running = True
+                elif state == self._drive.DriveState.Error:
+                    result = "error"
+                    break
+                elif state == self._drive.DriveState.Completed and seen_running:
+                    result = "ok"
+                    break
+                elif not seen_running and time.monotonic() - started > 1:
+                    result = "not_started"
+                    break
+                time.sleep(.03)
+            return result
+        finally:
+            self.drive_stop()
+            self._turning = False
+            _log(f"voice turn: {degrees} degrees result={result}")
+
 
     def stop_everything(self):
         """Emergency stop for the STOP command: animations, homing, wheels."""
         self._homing = False
+        self._roaming = False
         self._leaving_home = False
+        self._interaction_stop.set()
+        self._approach_stop.set()
         if self.anim:
             self.anim.stop()
         if self.has.get("arm"):
@@ -1126,6 +1451,114 @@ class Body:
             except Exception as e:
                 _log(f"arm stop failed: {e}")
         return self.drive_stop()
+
+    def rotate_guarded(self, degrees, interlock):
+        """Small center turn, with the approach's stop/proximity checks inline."""
+        reason = interlock()
+        if reason:
+            return reason
+        if not self.drive_rotate(max(-30, min(30, degrees)), speed=20, from_center=True):
+            return "blocked"
+        seen_running = False
+        started = time.monotonic()
+        try:
+            while time.monotonic()-started < 6:
+                reason = interlock()
+                if reason:
+                    return reason
+                state = self._drive.get_state()
+                if state == self._drive.DriveState.Running:
+                    seen_running = True
+                elif state == self._drive.DriveState.Completed and seen_running:
+                    return "ok"
+                elif state == self._drive.DriveState.Error:
+                    return "blocked"
+                elif not seen_running and time.monotonic()-started > 1:
+                    return "blocked"
+                time.sleep(.03)
+            return "blocked"
+        finally:
+            self.drive_stop()
+
+    def approach_proximity(self):
+        """Both short-range sensors must be healthy and the path clear."""
+        if not self.has.get("tof"):
+            return "sensor"
+        try:
+            now = time.monotonic()
+            if self.hw:
+                snapshot = self._tof_snapshot
+                if snapshot is None or now-snapshot[0] > .3:
+                    return "sensor"
+                details = snapshot[1]
+            else:
+                samples = self._tof.get_sensors_data()
+                details = [(str(s.side), int(s.range_mm), int(s.error), int(s.update_ms)) for s in samples]
+            if now >= getattr(self, "_next_approach_sensor_log", 0):
+                _log(f"approach proximity: {details}")
+                self._next_approach_sensor_log = now + 2
+            if len(details) != 2 or len({s[0] for s in details}) != 2:
+                _log(f"approach sensor stop: missing pair {details}")
+                return "sensor"
+            previous = getattr(self, "_approach_sensor_stamps", {})
+            for side, distance, error, stamp in details:
+                last_stamp, changed = previous.get(side, (None, now))
+                if stamp != last_stamp:
+                    changed = now
+                previous[side] = (stamp, changed)
+                if stamp <= 0 or now-changed > .3:
+                    _log(f"approach sensor stop: stale {side} age={now-changed:.3f}s {details}")
+                    return "sensor"
+                # ST DT0020 / UM1983: ECE / max convergence (6/7) report no
+                # target; range overflow (13/15) means beyond range, not a
+                # close obstacle. Underflow (12/14) can mean 0-10mm: stop.
+                # The SDK uses -1 range for these normal open-space results.
+                # Do not confuse them with hardware, ambient-light, or stale
+                # data faults; those still stop motion below.
+                if error in (6, 7, 13, 15):
+                    continue
+                if error != 0 or distance < 0:
+                    _log(f"approach sensor stop: invalid range/status {details}")
+                    return "sensor"
+                if distance <= 120:
+                    return "obstacle"
+            self._approach_sensor_stamps = previous
+            return None
+        except Exception as exc:
+            _log(f"approach proximity failed: {exc}")
+            return "sensor"
+
+    def come_here(self):
+        """Find one visible person and approach in short, guarded steps."""
+        if self._approaching:
+            return "busy"
+        if not self.hw or not self.has.get("drive"):
+            return "unavailable"
+        if self.actuators_held():
+            return "docked" if self.docked else "power"
+        if self.battery_pct() is None or self.battery_pct() <= 10:
+            return "power"
+        from .approach import Approach
+        from .person_vision import PersonCamera, PersonDetector
+        self._approach_stop.clear()
+        self._approach_sensor_stamps = {}
+        self._approaching = True
+        try:
+            self.drive_stop()  # finish any preceding manual turn before looking
+            stop_check = self.motion_stop_factory() if self.motion_stop_factory else None
+            if self._person_detector is None:
+                model = self.cfg.get("approach", {}).get("model_path", "/opt/spark/models/nanodet.onnx")
+                self._person_detector = PersonDetector(model)
+            with PersonCamera(self._person_detector) as camera:
+                result = Approach(self, camera, stop_check).run()
+            _log(f"come here result={result}")
+            return result
+        except Exception as exc:
+            _log(f"come here failed: {exc}")
+            return "unavailable"
+        finally:
+            self.drive_stop()
+            self._approaching = False
 
     # --------------------------------------------------------------- homing
     def _pose_update(self, dist_mm=0.0, rot_deg=0.0):
@@ -1169,53 +1602,181 @@ class Body:
             time.sleep(0.05)
         return False
 
-    def _undock(self, then_mm=0, speed=25):
-        """No autonomous departure until the dock corridor is localized."""
-        _log("undock unavailable: safe dock departure is not calibrated")
-        return False
+    def _undock(self):
+        """Explicit departure; ordinary reactions never call this method.
+
+        The stock front gap profile gets one measured 20mm forward exit
+        only with recent electrical proof of charging. No repeated probes.
+        """
+        from .departure import Departure
+        result = "blocked"
+        with self._power_lock:
+            self.refresh_power()
+            # A rejected/cancelled voice departure must not be retried by
+            # idle roaming moments later. A new command may still retry.
+            self._dock_auto_attempted = True
+            pct = self.battery_pct()
+            if (not self.docked or self.sleeping or self._leaving_home
+                    or not self.has.get("drive") or not self.has.get("edge")
+                    or pct is None or pct <= 2 or not self._charging.healthy()
+                    or time.time() < getattr(self, "_gap_lock_until", 0)):
+                _log(f"dock departure blocked: battery={pct} sleeping={self.sleeping} "
+                     f"parked={self.docked} healthy={self._charging.healthy() if self._charging else False} "
+                     f"gap_lock={max(0, getattr(self, '_gap_lock_until', 0)-time.time()):.2f}s")
+                self.last_departure_result = result
+                return False
+            gaps = self._edge_gaps()
+            front = any(g.startswith("Front") for g in gaps)
+            back = any(g.startswith("Back") for g in gaps)
+            direction = "forward"
+            known = {"Front_Left", "Front_Right", "Back_Left", "Back_Right"}
+            front_probe = (set(gaps) == {"Front_Left", "Front_Right"}
+                           and self._dock_charge_seen_at is not None
+                           and time.monotonic() - self._dock_charge_seen_at <= 5)
+            if (not set(gaps) <= known or (front and back)
+                    or (front and not front_probe)
+                    or self._hazard_active(direction)):
+                _log(f"dock departure blocked: gaps={gaps} front_probe={front_probe} "
+                     f"hazard={self._edge_hazard}")
+                self.last_departure_result = "edge"
+                return False
+            self.stop_everything()
+            self._approach_stop.clear()
+            stop = self.motion_stop_factory() if self.motion_stop_factory else lambda: False
+            departure = Departure(self, True, gaps, stop, front_probe=front_probe)
+            self._departure = departure
+            self._leaving_home = True
+            self._dock_native_stopped = False
+        _log(f"dock departure: direction={direction} initial_gaps={gaps}")
+        try:
+            result = departure.run()
+            with self._power_lock:
+                # Recheck under the same lock used by sensor callbacks and
+                # the power monitor before releasing any ordinary actuator.
+                if (result == "ok" and departure.check() is None
+                        and not self._edge_gaps() and self._charging.charging is False):
+                    self.docked = False
+                    self._save_dock_hold()
+                    self._dock_clear_since = self._dock_pickup_at = None
+                    self._next_auto_departure = time.monotonic() + max(
+                        60, self.cfg.get("idle", {}).get("roam_cooldown_s", 1800))
+                    self._roam_distance_bound = 200  # dock body footprint plus measured exit
+                    return True
+                result = departure.reason or ("unverified" if result == "ok" else result)
+                return False
+        except Exception as exc:
+            result = "error"
+            _log(f"dock departure failed: {exc}")
+            return False
+        finally:
+            with self._power_lock:
+                self.drive_stop()
+                self._leaving_home = False
+                self._departure = None
+                self._dock_native_stopped = False
+                self.last_departure_result = result
+                self.refresh_power()
+                if front_probe and result != "ok" and self._edge_gaps():
+                    gaps = self._edge_gaps()
+                    front = any(g.startswith("Front") for g in gaps)
+                    back = any(g.startswith("Back") for g in gaps)
+                    self._latch_hazard("all" if front and back else
+                                       "forward" if front else "backward")
+            _log(f"dock departure: result={result} parked={self.docked}")
+
+    def dock_roam_ready(self):
+        """One automatic departure per dock visit after a full minute at 100%."""
+        ready = (self.cfg.get("idle", {}).get("roam_enabled", True)
+                and self.cfg.get("homing", {}).get("enabled", False)
+                and self.docked and not self.sleeping and not self._dock_auto_attempted
+                and self._full_charge_since is not None
+                and time.monotonic() - self._full_charge_since >= 60
+                and time.monotonic() >= self._next_auto_departure)
+        if not ready:
+            return False
+        if any(g.startswith("Front") for g in self._edge_gaps()):
+            return (self._dock_charge_seen_at is not None
+                    and time.monotonic() - self._dock_charge_seen_at <= 5)
+        return True
 
     def go_home(self):
-        """Charge in place or request manual placement.
-        Edge sensors and odometry cannot distinguish the dock lip from a
-        table edge, so neither can authorize a blind docking approach."""
+        """Return using the visible dock; only electrical contact is arrival."""
         if self.is_on_dock():
             return "already"
-        _log("home unavailable: safe dock approach is not calibrated")
-        return "unknown"
+        if self._homing:
+            return "busy"
+        if not self.hw or not self.cfg.get("homing", {}).get("enabled", False):
+            return "unknown"
+        from .homing import Homing
+        self._approach_stop.clear()
+        self._approach_sensor_stamps = {}
+        self._homing = True
+        try:
+            stop = self.motion_stop_factory() if self.motion_stop_factory else None
+            result = Homing(self, stop).run()
+            _log(f"home result={result}")
+            return result
+        except InterruptedError:
+            return "cancelled"
+        except Exception as exc:
+            _log(f"home failed: {exc}")
+            return "sensor"
+        finally:
+            self.drive_stop()
+            self._homing = False
 
     # ----------------------------------------------------------- anim queue
     def queue_anim(self, name):
         """Sensor callbacks (foreign threads) request; the main loop plays.
         Animations may only run on the main thread — their sounds call
         snd.play directly, which is not GIL-safe alongside Vosk decoding."""
-        self._anim_requests.append(name)
+        with self._anim_queue_lock:
+            if not self.sleeping:
+                if name in {"petting1", "petting2", "petting3"}:
+                    self._pending_pet = name  # latest level, no long backlog of strokes
+                else:
+                    self._anim_requests.append(name)
+
+    def petting_active(self):
+        return (self._pending_pet is not None or bool(
+            self.anim and self.anim.playing() and self.anim.petting is True))
 
     def drain_anims(self):
-        while self._anim_requests:
-            name = self._anim_requests.popleft()
-            if self.anim:
-                self.anim.play(name, blocking=True)
+        # At most one performance per main-loop pass, so petting cannot
+        # starve wake-word capture indefinitely.
+        with self._anim_queue_lock:
+            if self.sleeping:
+                self._anim_requests.clear()
+                self._pending_pet = None
+                return
+            if self._pending_pet is not None:
+                name, self._pending_pet = self._pending_pet, None
+            elif self._anim_requests:
+                name = self._anim_requests.popleft()
+            else:
+                return
+        if self.anim:
+            self.anim.play(name, blocking=True)
 
     # variant name -> stock animation file (the REAL stock choreography)
-    _DANCE_ANIMS = {"fiesta": "salsa", "groove": "workout", "party": "excited"}
+    _DANCE_ANIMS = {"fiesta": "salsa", "salsa": "salsa", "groove": "workout",
+                    "workout": "workout", "party": "excited_1", "twist": "twist",
+                    "rock": "rock", "meditate": "meditate", "fireman": "fireman",
+                    "policeman": "policeman"}
 
     def dance(self, variant=None):
-        """Stock dance choreography through the anim engine — music, arms,
-        spins, lights, sunglasses eyes. Plate signature = arms-only party;
-        otherwise preflight before the show."""
-        if len(self._edge_gaps()) >= 3:
-            _log("dance: plate mode (arms only)")
-            return self.arms_party()
-        if not self._motion_allowed("rotate"):
-            _log("dance blocked before show: preflight failed")
-            return False
+        """Stock choreography. Each motor command retains its safety gate;
+        docked performances can still use eyes, lights and music."""
+        if variant is None:
+            variants = ("salsa", "twist", "rock", "party")
+            variant = variants[self._dance_index % len(variants)]
+            self._dance_index += 1
         name = self._DANCE_ANIMS.get(variant, "salsa")
         _log(f"dance: {name} (stock animation)")
         if self.anim and self.anim.play(name, blocking=True):
             self._bump_mood(1)
             return True
-        _log("stock animation unavailable — arms party fallback")
-        return self.arms_party()
+        return False  # never restart a cancelled/failed performance via fallback
 
     def arms_party(self):
         """Always-safe celebration: lights, music-less boogie, arms only."""
@@ -1265,58 +1826,38 @@ class Body:
     def wander_step(self):
         """Pet-like exploration: ONE safe move + a curious look.
         Short, preflighted, edge-gated, battery-aware."""
-        import random
         try:
+            if not self.cfg.get("idle", {}).get("roam_enabled", True):
+                return False
+            if self.docked:
+                if not self.dock_roam_ready():
+                    return False
+                self._dock_auto_attempted = True
+                return self._undock()  # no additional random move this idle pass
             if self.actuators_held():
                 self.blink()
                 return False
             pct = self.battery_pct()
             low = self.cfg.get("idle", {}).get("low_battery_pct", 10)
-            if pct is not None and pct < low and not self.is_on_dock():
-                _log(f"wander: battery {pct}% < {low}% — checking return to charger")
-                result = self.go_home()
-                if result == "unknown":
-                    self.speak(f"Battery at {pct} percent. Please carry me to my dock to charge.")
-                elif result == "lost":
-                    self.speak("I can't find my dock — a little help, please?")
-                return True
-            if pct is not None and pct < low + 10:
-                # low but not critical: conserve, don't roam further
-                return False
-            if self.is_on_dock():
-                # on the dock: eyes and arms only, never wheels
-                if random.random() < 0.5:
-                    self.idle_flourish()
-                else:
-                    self.arm_angle(120, speed=45)
-                    time.sleep(0.3)
-                    self.arm_angle(20, speed=45)
-                    self.idle_flourish()
-                return True
+            if pct is None or pct <= low:
+                return False  # the central battery check owns return/retry notices
             if not self._motion_allowed("rotate"):
                 return self._escape_edge()
-            # roam radius: dead-reckoning drifts, so straying too far from the
-            # dock means it's time to head home while home is still findable
-            if self._pose is not None:
-                import math
-                radius = self.cfg.get("idle", {}).get("roam_radius_mm", 700)
-                if math.hypot(self._pose[0], self._pose[1]) > radius:
-                    _log("wander: roam radius reached — heading home")
-                    self.go_home()
-                    return True
-            move = random.choice(["look", "turn", "scoot", "turn", "scoot"])
-            if move == "look":
-                self.idle_flourish()
-                return True
-            if move == "turn":
-                self.drive_rotate(random.choice([-90, -60, 60, 90]), speed=35)
-            elif move == "scoot":
-                self.drive_guarded(random.choice([60, 90, 120]), speed=25)
-            self.idle_flourish()
-            return True
+            if not self.cfg.get("homing", {}).get("enabled", False):
+                return False  # free roaming requires a working return path
+            from .roaming import Roaming
+            self._approach_stop.clear()
+            self._roaming = True
+            stop = self.motion_stop_factory() if self.motion_stop_factory else None
+            result = Roaming(self, stop).run()
+            _log(f"roam result={result} distance_bound={self._roam_distance_bound}")
+            return result == "ok"
         except Exception as e:
             _log(f"wander_step: {e}")
             return False
+        finally:
+            self._roaming = False
+            self.drive_stop()
 
     def _escape_edge(self):
         """Stuck facing a REAL cliff: back up slowly (rear preflight +
@@ -1456,19 +1997,29 @@ class Body:
 
     # ----------------------------------------------------------------- sleep
     def sleep_pose(self):
-        if self.anim and self.anim.play("sleep", blocking=True):
-            return
+        # Quiet standby, not a cancellable stock snoring performance. Never
+        # reposition arms/wheels on the charger to achieve a cosmetic pose.
+        self.sleeping = True
+        self.react_enabled = False
+        self.stop_everything()
+        self._anim_requests.clear()
+        self._pending_pet = None
+        self._sfx_queue.clear()
         self.eyes("sleepy")
-        self.arms_down()
         self.led_color("Black")
+        _log("sleep: standby; idle motion and follow-ups disabled")
 
     def wake_up(self):
-        if self.anim and self.anim.play("wakeup", blocking=True):
-            return
+        self.sleeping = False
+        self.react_enabled = True
         self.eyes("idle")
+        _log("sleep: awake")
 
     # --------------------------------------------------------------- cleanup
     def dispose(self):
+        self._tof_poll_stop.set()
+        if self._tof_poll_thread:
+            self._tof_poll_thread.join(timeout=1)
         self._power_stop.set()
         if self._power_thread:
             self._power_thread.join(timeout=2)

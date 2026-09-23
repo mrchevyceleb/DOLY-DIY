@@ -1,28 +1,8 @@
-"""Stock Blockly animation player.
+"""Stock Blockly playback through Body's safety gates, always on the main thread.
 
-Doly's stock behaviors live in /.doly/config/animations/*.xml as Blockly
-programs. This interpreter executes them against Body, so Spark inherits the
-whole stock library (salsa, fist bump, high five, petting, sleep, wakeup...)
-with Spark's safety layer still wrapped around every drive command.
-
-Block semantics (observed from the stock XML files):
-- Blocks run in document order.
-- field start=1 -> wait for THIS block to finish before continuing
-  (sound plays out, arm reaches angle, drive completes, delay elapses).
-- start=0 -> fire and continue immediately.
-- repeat {times, repeat_statement}: sequential loop.
-- sound {type_id, name}: DOLY -> /.doly/sounds/sound/<name>.wav,
-  MUSIC -> /.doly/sounds/music/<name>.wav, SFX -> /.doly/sounds/sfx/<name>.wav
-  (name lowercased). Optional complete_statement runs when the sound ends.
-- led {color_main, side}: solid color; side 0=Both 1=Left 2=Right.
-- led_animation {led_left/led_right}: per-side sequences of
-  led_animation_color {color_main, led_time, color_fade} steps.
-- arm_set_angle {angle, side, speed, brake}.
-- drive_distance {distance (mm), direction (1=fwd, 0=back), speed, accel, brake}.
-- drive_rotate_left/right {driveRotate (x10 = degrees), isCenter, speed, accel, brake}.
-- delay_ms {delay_ms}.
-- eye_animations {category, animation}: the animation name uppercased with
-  spaces -> underscores maps onto doly_eye.expressions members.
+Per https://doly.ai/blockly/, start=1 waits for the PREVIOUS block and start=0
+overlaps it. Distances are millimetres, rotations degrees, speeds percentages.
+Cooperative jobs keep music, lights and motion together without SDK workers.
 """
 import os
 import re
@@ -32,9 +12,6 @@ import time
 import xml.etree.ElementTree as ET
 
 _SOUND_DIRS = {"DOLY": "sound", "MUSIC": "music", "SFX": "sfx", "ANIMAL": "animal", "WUW": "wuw"}
-
-# Blockly XML colors -> doly ColorCode names (the ~20 values the stock
-# animations actually use, per a full scan of the animation directory).
 _HEX_TO_COLORCODE = {
     "#000000": "Black", "#ffffff": "White", "#ff0000": "Red", "#ff6600": "Orange",
     "#cc33cc": "Magenta", "#00ff00": "Lime", "#400000": "DarkRed", "#ffff00": "Yellow",
@@ -57,199 +34,278 @@ def _statement(block, name):
     return st.findall("block") if st is not None else []
 
 
+class _Completion:
+    def __init__(self, ready=lambda: True):
+        self.ready = ready
+        self.finished = False
+        self.cancelled = False
+
+    def done(self):
+        if not self.finished:
+            self.finished = self.cancelled or self.ready()
+        return self.finished
+
+
 class AnimPlayer:
     def __init__(self, body, cfg):
         self.body = body
         self.dir = cfg.get("animations", {}).get("dir", "/.doly/config/animations")
         self._stop = threading.Event()
-        self._thread = None
+        self._playing = False
+        self.petting = False
         self._sound_cache = {}
+        self._jobs, self._pending, self._resources = [], [], {}
 
-    # ------------------------------------------------------------- lifecycle
     def stop(self):
         self._stop.set()
 
     def playing(self):
-        return bool(self._thread and self._thread.is_alive())
+        return self._playing
 
     def play(self, name, blocking=True):
-        """Play an animation by file stem ('salsa', 'fist_bump', ...)."""
-        path = os.path.join(self.dir, f"{name}.xml")
-        if not os.path.exists(path):
-            _log(f"missing animation {name}")
+        """False on missing/empty programs, execution failure or cancellation.
+
+        Sensor callbacks use Body.queue_anim; native sounds must run on the
+        main thread alongside recognition, never race Vosk on another thread.
+        """
+        if (not blocking or threading.current_thread() is not threading.main_thread()
+                or self._playing or not re.fullmatch(r"[a-zA-Z0-9_]+", name)):
+            _log(f"refused concurrent/background or invalid animation {name!r}")
             return False
         try:
-            blocks = ET.parse(path).getroot().findall("block")
+            root = ET.parse(os.path.join(self.dir, f"{name}.xml")).getroot()
+            for element in root.iter():
+                element.tag = element.tag.rsplit("}", 1)[-1]
+            blocks = root.findall("block")
+            if not any(b.get("type") != "start_animation" for b in blocks):
+                raise ValueError("no executable blocks")
+            # Validate nested callbacks before any actuator dispatch.
+            for block in root.iter("block"):
+                kind = block.get("type")
+                if kind not in ("start_animation", "led_animation_color") and not hasattr(self, f"_b_{kind}"):
+                    raise ValueError(f"unsupported block {kind}")
         except Exception as e:
-            _log(f"parse {name}: {e}")
+            _log(f"load {name}: {e}")
             return False
-        self.stop()
-        if self._thread:
-            self._thread.join(timeout=2)
         self._stop.clear()
+        self._jobs, self._pending, self._resources = [], [], {}
+        self._playing = True
+        # Continued stroking is allowed only for the motor-free stock pet
+        # reactions. A modified pet file with any motor block still stops.
+        self.petting = (name in {"petting1", "petting2", "petting3"}
+                        and not any(b.get("type", "").startswith(("drive_", "arm_"))
+                                    for b in root.iter("block")))
+        success = False
+        started = time.monotonic()
+        try:
+            self._spawn(self._sequence(blocks))
+            while (self._jobs or self._pending) and not self._stop.is_set():
+                if time.monotonic() - started > 180:
+                    raise TimeoutError("animation exceeded three minutes")
+                for job in list(self._jobs):
+                    iterator, waiting, result = job
+                    if result.cancelled:
+                        self._jobs.remove(job)
+                    elif waiting.done():
+                        try:
+                            job[1] = next(iterator)
+                        except StopIteration:
+                            result.finished = True
+                            self._jobs.remove(job)
+                self._pending = [p for p in self._pending if not p.done()]
+                if self._jobs or self._pending:
+                    self._stop.wait(0.01)
+            success = not self._stop.is_set()
+            _log(f"{name}: {'completed' if success else 'cancelled'} in {time.monotonic()-started:.2f}s")
+        except Exception as e:
+            _log(f"{name} failed: {e}")
+        finally:
+            if not success:
+                self.body.stop_everything()
+                if self.body.has.get("sound"):
+                    try:
+                        self.body._snd.abort()
+                        self.body._speaking_until = time.time() + 0.25
+                    except Exception as e:
+                        _log(f"sound stop: {e}")
+            self._jobs, self._pending, self._resources = [], [], {}
+            self._playing = False
+            self.petting = False
+        return success
 
-        def _run():
-            try:
-                self._run_blocks(blocks)
-            except Exception as e:
-                _log(f"{name} failed: {e}")
+    def _spawn(self, iterator):
+        result = _Completion(lambda: False)
+        self._jobs.append([iterator, _Completion(), result])
+        return result
 
-        if blocking:
-            _run()
-            return True
-        self._thread = threading.Thread(target=_run, daemon=True)
-        self._thread.start()
-        return True
+    def _track(self, ready, resources=()):
+        result = _Completion(ready)
+        self._pending.append(result)
+        for resource in resources:
+            old = self._resources.get(resource)
+            if old is not None and not old.done():
+                old.cancelled = True
+            self._resources[resource] = result
+        return result
 
-    # -------------------------------------------------------------- executor
-    def _run_blocks(self, blocks):
+    def _delay(self, seconds):
+        deadline = time.monotonic() + max(0, seconds)
+        return self._track(lambda: time.monotonic() >= deadline)
+
+    def _sequence(self, blocks):
+        previous = _Completion()
         for block in blocks:
             if self._stop.is_set():
                 return
-            self._run_block(block)
-
-    def _run_block(self, block):
-        btype = block.get("type")
-        f = _fields(block)
-        blocking = f.get("start") == "1"
-        handler = getattr(self, f"_b_{btype}", None)
-        if handler is None and btype not in ("start_animation",):
-            _log(f"unknown block {btype}")
-        if handler:
-            handler(f, blocking, block)
-
-    # --------------------------------------------------------------- blocks
-    def _b_delay_ms(self, f, blocking, block):
-        try:
-            time.sleep(max(0, int(f.get("delay_ms", "0"))) / 1000.0)
-        except Exception:
-            pass
-
-    def _b_repeat(self, f, blocking, block):
-        times = max(1, int(f.get("times", "1")))
-        inner = _statement(block, "repeat_statement")
-        for _ in range(times):
-            if self._stop.is_set():
-                return
-            self._run_blocks(inner)
-
-    def _b_eye_animations(self, f, blocking, block):
-        name = (f.get("animation") or "").upper().replace(" ", "_")
-        if name:
-            self.body.mood_eyes(name)
-
-    def _b_sound(self, f, blocking, block):
-        path = self._sound_path(f.get("type_id", "DOLY"), f.get("name", ""))
-        complete = _statement(block, "complete_statement")
-        if not path:
-            if complete:
-                self._run_blocks(complete)
-            return
-        self.body.play_sfx(path, defer=False)
-        if blocking or complete:
-            time.sleep(self.body._wav_duration(path) + 0.1)
-        if complete and not self._stop.is_set():
-            self._run_blocks(complete)
-
-    def _b_led(self, f, blocking, block):
-        self._led_solid(f.get("color_main", "#000000"), int(f.get("side", "0")))
-
-    def _b_led_animation(self, f, blocking, block):
-        seqs = []
-        for stmt_name, side in (("led_left", 1), ("led_right", 2)):
-            steps = [_fields(b) for b in _statement(block, stmt_name)
-                     if b.get("type") == "led_animation_color"]
-            if steps:
-                seqs.append((side, steps))
-
-        def _run_side(side, steps):
-            for st in steps:
+            if block.get("type") == "start_animation":
+                continue
+            fields = _fields(block)
+            if fields.get("start") == "1":
+                yield previous
                 if self._stop.is_set():
                     return
-                self._led_solid(st.get("color_main", "#000000"), side,
-                                fade=st.get("color_fade"),
-                                ms=int(st.get("led_time", "500")))
-                time.sleep(int(st.get("led_time", "500")) / 1000.0)
+            previous = getattr(self, f"_b_{block.get('type')}")(fields, block) or _Completion()
+        yield previous
 
-        threads = [threading.Thread(target=_run_side, args=(s, st), daemon=True)
-                   for s, st in seqs]
-        for t in threads:
-            t.start()
-        if blocking:
-            for t in threads:
-                t.join()
+    def _b_delay_ms(self, f, block):
+        return self._delay(float(f.get("delay_ms", "0")) / 1000)
 
-    def _b_arm_set_angle(self, f, blocking, block):
-        side_xml = int(f.get("side", "0"))
-        angle = float(f.get("angle", "90"))
-        speed = self._arm_speed(int(f.get("speed", "10")))
-        self._arm_to(side_xml, angle, speed, wait=blocking)
+    def _b_repeat(self, f, block):
+        def repeat():
+            for _ in range(max(0, min(100, int(f.get("times", "1"))))):
+                yield self._spawn(self._sequence(_statement(block, "repeat_statement")))
+        return self._spawn(repeat())
 
-    def _b_drive_distance(self, f, blocking, block):
-        mm = float(f.get("distance", "0"))
-        if f.get("direction", "1") == "0":
-            mm = -mm
-        speed = self._drive_speed(int(f.get("speed", "20")))
-        self.body.drive_distance(mm, speed=speed)
-        # ALWAYS wait for drive completion — an animation that returns while
-        # the wheels still turn drops its safety flags (e.g. leaving-home)
-        # and lets the watchdog kill the ritual mid-lip
-        self._wait_drive()
+    def _b_eye_animations(self, f, block):
+        if not self.body.has.get("eye"):
+            return
+        name = f.get("animation", "").upper().replace(" ", "_")
+        if self.body.mood_eyes("NERVOUS" if name == "SHAKY" else name) is False:
+            raise RuntimeError(f"cannot show expression {name}")
+        return self._state_completion(lambda: self.body._eye.is_animating(), 15, ("eye",))
 
-    def _b_drive_rotate_left(self, f, blocking, block):
-        self._rotate(f, sign=-1, blocking=blocking)
+    def _b_eye_background(self, f, block):
+        # Stock love uses a HEARTS background. Match its expression without
+        # overwriting the user's persistent eye background.
+        return self._b_eye_animations({"animation": f.get("style", "HEARTS")}, block)
 
-    def _b_drive_rotate_right(self, f, blocking, block):
-        self._rotate(f, sign=1, blocking=blocking)
+    def _b_speak(self, f, block):
+        if self.body.speak(f.get("say", ""), wait=False) is False:
+            raise RuntimeError("cannot speak animation text")
+        return self._track(lambda: not self.body.speaking_recently(), ("sound",))
 
-    # --------------------------------------------------------------- helpers
-    def _rotate(self, f, sign, blocking):
-        deg = sign * float(f.get("driveRotate", "0")) * 10.0  # units: x10 degrees
-        speed = self._drive_speed(int(f.get("speed", "5")))
-        self.body.drive_rotate(deg, speed=speed)
-        self._wait_drive()  # always wait (see _b_drive_distance)
+    def _b_sound(self, f, block):
+        path = self._sound_path(f.get("type_id", "DOLY"), f.get("name", ""))
+        if not path or not self.body.play_sfx(path, defer=False):
+            raise RuntimeError(f"cannot play sound {f.get('name')}")
+        duration = self.body._wav_duration(path)
+        self.body._speaking_until = time.time() + duration + 0.25
+        deadline = time.monotonic() + duration
+        sound = self._track(lambda: time.monotonic() >= deadline, ("sound",))
+        complete = _statement(block, "complete_statement")
+        if complete:
+            def after_sound():
+                yield sound
+                if not sound.cancelled:
+                    yield from self._sequence(complete)
+            self._spawn(after_sound())
+        return sound
+
+    def _b_led(self, f, block):
+        sides = (1, 2) if f.get("side", "0") == "0" else (int(f["side"]),)
+        for side in sides:
+            old = self._resources.get(f"led{side}")
+            if old:
+                old.cancelled = True
+        self._led_solid(f.get("color_main", "#000000"), int(f.get("side", "0")))
+
+    def _b_led_animation(self, f, block):
+        def run_side(side, steps):
+            for step in steps:
+                st = _fields(step)
+                ms = max(0, int(st.get("led_time", "500")))
+                self._led_solid(st.get("color_main", "#000000"), side, st.get("color_fade"), ms)
+                yield self._delay(ms / 1000)
+        jobs = []
+        for name, side in (("led_left", 1), ("led_right", 2)):
+            old = self._resources.get(f"led{side}")
+            if old:
+                old.cancelled = True
+            job = self._spawn(run_side(side, _statement(block, name)))
+            self._resources[f"led{side}"] = job
+            jobs.append(job)
+        return _Completion(lambda: all(j.done() for j in jobs))
+
+    def _b_arm_set_angle(self, f, block):
+        return self._arm_to(int(f.get("side", "0")), round(float(f.get("angle", "90"))),
+                            self._arm_speed(int(f.get("speed", "40"))))
+
+    def _b_drive_distance(self, f, block):
+        mm = float(f.get("distance", "0")) * (-1 if f.get("direction") == "0" else 1)
+        if self.body.drive_distance(mm, speed=self._drive_speed(int(f.get("speed", "20")))):
+            return self._drive_completion()
+
+    def _b_drive_rotate_left(self, f, block):
+        return self._rotate(f, -1)
+
+    def _b_drive_rotate_right(self, f, block):
+        return self._rotate(f, 1)
+
+    def _rotate(self, f, sign):
+        if self.body.drive_rotate(sign * float(f.get("driveRotate", "0")),
+                                  speed=self._drive_speed(int(f.get("speed", "20"))),
+                                  from_center=f.get("isCenter", "TRUE").upper() == "TRUE"):
+            return self._drive_completion()
 
     @staticmethod
-    def _arm_speed(xml_speed):
-        return max(5, min(80, xml_speed * 4))  # stock 1..20 -> sdk 5..80
+    def _arm_speed(speed):
+        return max(1, min(80, speed))
 
     @staticmethod
-    def _drive_speed(xml_speed):
-        return max(15, min(60, xml_speed * 2 + 10))  # stock 1..40 -> sdk 15..60
+    def _drive_speed(speed):
+        return max(1, min(40, speed))
 
-    def _wait_drive(self, timeout=15.0):
-        deadline = time.time() + timeout
-        while time.time() < deadline and not self._stop.is_set():
-            try:
-                if self.body._drive.get_state() != self.body._drive.DriveState.Running:
-                    return
-            except Exception:
-                return
-            time.sleep(0.05)
+    def _state_completion(self, running, timeout, resources):
+        deadline = time.monotonic() + timeout
+        def ready():
+            if not running():
+                return True
+            if time.monotonic() >= deadline:
+                raise TimeoutError(f"{resources} did not finish")
+            return False
+        return self._track(ready, resources)
 
-    def _arm_to(self, side_xml, angle, speed, wait):
+    def _drive_completion(self):
+        d = self.body._drive
+        def running():
+            state = d.get_state()
+            if state == d.DriveState.Error:
+                raise RuntimeError("drive controller error")
+            return state == d.DriveState.Running
+        return self._state_completion(running, 15, ("drive",))
+
+    def _arm_to(self, side_xml, angle, speed, wait=False):
         b = self.body
         if b.actuators_held() or not b.has.get("arm"):
             return
-        side = {0: b._arm.ArmSide.Both, 1: b._arm.ArmSide.Left,
-                2: b._arm.ArmSide.Right}[side_xml]
-        try:
-            with b._power_lock:
-                if b.actuators_held():
-                    return
-                rc = b._arm.set_angle(b._next_id(), side, speed=speed, angle=angle,
-                                      with_brake=False)
-            if rc < 0:
-                _log(f"arm rc={rc} (angle {angle}, speed {speed})")
+        side = {0: b._arm.ArmSide.Both, 1: b._arm.ArmSide.Left, 2: b._arm.ArmSide.Right}[side_xml]
+        with b._power_lock:
+            if b.actuators_held() or self._stop.is_set():
                 return
-            if wait:
-                deadline = time.time() + 5
-                while time.time() < deadline and not self._stop.is_set():
-                    if b._arm.get_state(side) == b._arm.ArmState.Completed:
-                        break
-                    time.sleep(0.05)
-        except Exception as e:
-            _log(f"arm: {e}")
+            rc = b._arm.set_angle(b._next_id(), side, speed=int(speed), angle=int(round(angle)), with_brake=False)
+        if rc < 0:
+            raise RuntimeError(f"arm rc={rc} (angle {angle}, speed {speed})")
+        def running(arm_side):
+            state = b._arm.get_state(arm_side)
+            if state == b._arm.ArmState.Error:
+                raise RuntimeError("arm controller error")
+            return state == b._arm.ArmState.Running
+        # Replacing one side must not discard completion of the other arm.
+        parts = []
+        for side_num, arm_side in ((1, b._arm.ArmSide.Left), (2, b._arm.ArmSide.Right)):
+            if side_xml in (0, side_num):
+                parts.append(self._state_completion(lambda s=arm_side: running(s), 10, (f"arm{side_num}",)))
+        return _Completion(lambda: all(p.done() for p in parts))
 
     def _led_solid(self, hex_color, side_xml, fade=None, ms=0):
         b = self.body
@@ -270,7 +326,7 @@ class AnimPlayer:
             for s in sides:
                 b._led.process_activity(b._next_id(), s, activity)
         except Exception as e:
-            _log(f"led: {e}")
+            raise RuntimeError(f"led: {e}") from e
 
     def _sound_path(self, type_id, name):
         key = (type_id, name)

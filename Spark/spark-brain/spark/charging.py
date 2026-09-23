@@ -113,3 +113,15 @@ class ChargingMonitor:
             return True
         finally:
             self._lock.release()
+
+    def healthy(self):
+        """Fresh electrical readings, even during charge/discharge transition.
+
+        This is NOT proof of charging or permission for ordinary movement.
+        A bounded departure can cross zero current without treating it as
+        a failed sensor; stale readings and I2C faults still stop it.
+        """
+        with self._lock:
+            return (self.error is None and self.voltage is not None
+                    and 2.0 < self.voltage < 5.0 and len(self._samples) >= 5
+                    and time.monotonic() - self._last_read <= .6)
