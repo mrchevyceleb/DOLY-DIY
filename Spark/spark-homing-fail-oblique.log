@@ -1,0 +1,140 @@
+Sep 23 16:52:16 doly python[61703]: [body] approach proximity: [(0, -1, 7, 382229), (1, -1, 6, 382237)]
+Sep 23 16:52:28 doly python[64676]: [body] power: battery=0% charging=None parked=False shunt=-914.0 voltage=3.7920000000000003 error=None gaps=[] clear_since=None motors={'drive': 'DriveState.Completed', 'rpm': [0.0, 0.0], 'arms': ['ArmState.Completed', 'ArmState.Completed']}
+Sep 23 16:52:45 doly python[64676]: [body] approach proximity: [(0, -1, 6, 18440), (1, -1, 7, 18495)]
+Sep 23 16:52:47 doly python[64676]: [body] approach proximity: [(0, -1, 6, 20398), (1, -1, 6, 20406)]
+Sep 23 16:52:49 doly python[64676]: [body] approach proximity: [(0, -1, 11, 22507), (1, -1, 6, 22515)]
+Sep 23 16:52:51 doly python[64676]: [body] approach proximity: [(0, -1, 6, 24464), (1, -1, 11, 24472)]
+Sep 23 16:52:53 doly python[64676]: [body] approach proximity: [(0, -1, 6, 26568), (1, -1, 6, 26576)]
+Sep 23 16:52:55 doly python[64676]: [body] approach proximity: [(0, -1, 6, 28526), (1, -1, 6, 28534)]
+Sep 23 16:52:57 doly python[64676]: [body] approach proximity: [(0, -1, 13, 30518), (1, -1, 13, 30558)]
+Sep 23 16:52:58 doly python[64676]: [body] power: battery=69% charging=False parked=False shunt=-1147.375 voltage=3.7760000000000002 error=None gaps=[] clear_since=None motors={'drive': 'DriveState.Running', 'rpm': [10.53, 8.55], 'arms': ['ArmState.Completed', 'ArmState.Completed']}
+Sep 23 16:52:59 doly python[64676]: [body] approach proximity: [(0, -1, 13, 32486), (1, -1, 13, 32543)]
+Sep 23 16:53:01 doly python[64676]: [body] approach proximity: [(0, -1, 6, 34546), (1, -1, 7, 34601)]
+Sep 23 16:53:17 doly python[64676]: [body] approach proximity: [(0, -1, 6, 50061), (1, -1, 7, 50116)]
+Sep 23 16:53:28 doly python[64676]: [body] power: battery=73% charging=False parked=False shunt=-798.375 voltage=3.8080000000000003 error=None gaps=[] clear_since=None motors={'drive': 'DriveState.Completed', 'rpm': [0.0, 0.0], 'arms': ['ArmState.Completed', 'ArmState.Completed']}
+Sep 23 16:53:33 doly python[64676]: [body] approach proximity: [(0, -1, 6, 66635), (1, -1, 13, 66690)]
+Sep 23 16:53:49 doly python[64676]: [body] approach proximity: [(0, -1, 13, 82463), (1, -1, 13, 82508)]
+Sep 23 16:53:58 doly python[64676]: [body] power: battery=74% charging=False parked=False shunt=-696.625 voltage=3.8080000000000003 error=None gaps=[] clear_since=None motors={'drive': 'DriveState.Completed', 'rpm': [0.0, 0.0], 'arms': ['ArmState.Completed', 'ArmState.Completed']}
+Sep 23 16:54:05 doly python[64676]: [body] approach proximity: [(0, -1, 13, 98883), (1, -1, 13, 98922)]
+Sep 23 16:54:22 doly python[64676]: [body] approach proximity: [(0, -1, 13, 115419), (1, -1, 13, 115452)]
+Sep 23 16:54:27 doly python[64676]: [body] approach proximity: [(0, -1, 13, 120546), (1, -1, 13, 120586)]
+Sep 23 16:54:28 doly python[64676]: [body] power: battery=72% charging=False parked=False shunt=-920.125 voltage=3.8000000000000003 error=None gaps=[] clear_since=None motors={'drive': 'DriveState.Completed', 'rpm': [0.0, 0.0], 'arms': ['ArmState.Completed', 'ArmState.Completed']}
+Sep 23 16:54:29 doly python[64676]: [body] approach proximity: [(0, -1, 13, 122503), (1, -1, 13, 122545)]
+Sep 23 16:54:31 doly python[64676]: [body] approach proximity: [(0, -1, 13, 124602), (1, -1, 13, 124630)]
+Sep 23 16:54:32 doly python[64676]: [home] turn yaw=58.1 error=-20.2
+Sep 23 16:54:32 doly python[64676]: [home] turn yaw=37.3 error=0.6
+Sep 23 16:54:33 doly python[64676]: [home] plane view heading=37.3 candidates=[59.498190051374046]
+Sep 23 16:54:33 doly python[64676]: [home] turn yaw=37.3 error=10.0
+Sep 23 16:54:33 doly python[64676]: [body] approach proximity: [(0, 139, 0, 126548), (1, -1, 13, 126581)]
+Sep 23 16:54:33 doly python[64676]: [home] turn yaw=48.6 error=-1.2
+Sep 23 16:54:34 doly python[64676]: [home] plane view heading=48.6 candidates=[49.300336808376045]
+Sep 23 16:54:34 doly python[64676]: [home] measured dock plane heading=97.4
+Sep 23 16:54:35 doly python[64676]: [home] marker x=18.5mm z=139.7mm bearing=7.5 normal=48.66088299774614 visual=[49.29180882947534]
+Sep 23 16:54:35 doly python[64676]: [body] approach proximity: [(0, -1, 13, 128517), (1, 175, 0, 128535)]
+Sep 23 16:54:36 doly python[64676]: [home] marker x=19.6mm z=181.5mm bearing=6.2 normal=48.532236147160205 visual=[49.37065969428793]
+Sep 23 16:54:37 doly python[64676]: [body] approach proximity: [(0, -1, 13, 130631), (1, -1, 13, 130659)]
+Sep 23 16:54:38 doly python[64676]: [home] marker x=21.9mm z=226.5mm bearing=5.5 normal=48.15389447235552 visual=[49.15014547856156]
+Sep 23 16:54:38 doly python[64676]: [body] home attempt 1/3 result=too_close
+Sep 23 16:54:40 doly python[64676]: [body] approach proximity: [(0, -1, 13, 133646), (1, -1, 13, 133674)]
+Sep 23 16:54:42 doly python[64676]: [body] approach proximity: [(0, -1, 13, 135602), (1, -1, 13, 135631)]
+Sep 23 16:54:43 doly python[64676]: [home] plane view heading=49.8 candidates=[49.36530861204462]
+Sep 23 16:54:43 doly python[64676]: [home] turn yaw=49.8 error=-10.0
+Sep 23 16:54:44 doly python[64676]: [home] turn yaw=37.6 error=2.2
+Sep 23 16:54:44 doly python[64676]: [body] approach proximity: [(0, -1, 13, 137560), (1, -1, 13, 137605)]
+Sep 23 16:54:44 doly python[64676]: [home] plane view heading=37.6 candidates=[60.432173884798495]
+Sep 23 16:54:44 doly python[64676]: [home] measured dock plane heading=98.6
+Sep 23 16:54:45 doly python[64676]: [home] marker x=-36.9mm z=225.2mm bearing=-9.3 normal=60.89103555994501 visual=[60.43846111564806]
+Sep 23 16:54:46 doly python[64676]: [body] approach proximity: [(0, -1, 13, 139680), (1, -1, 13, 139726)]
+Sep 23 16:54:46 doly python[64676]: [home] marker x=-35.0mm z=269.2mm bearing=-7.4 normal=60.61300897913446 visual=[60.503458998040244]
+Sep 23 16:54:48 doly python[64676]: [home] marker x=-33.5mm z=315.6mm bearing=-6.1 normal=60.2902512581872 visual=[62.35793424104894]
+Sep 23 16:54:48 doly python[64676]: [home] turn yaw=38.3 error=-29.7
+Sep 23 16:54:48 doly python[64676]: [body] approach proximity: [(0, -1, 13, 141644), (1, -1, 13, 141695)]
+Sep 23 16:54:49 doly python[64676]: [home] turn yaw=6.7 error=1.9
+Sep 23 16:54:49 doly python[64676]: [home] turn yaw=6.9 error=31.4
+Sep 23 16:54:50 doly python[64676]: [body] approach proximity: [(0, -1, 13, 143757), (1, -1, 13, 143807)]
+Sep 23 16:54:50 doly python[64676]: [home] turn yaw=39.8 error=-1.5
+Sep 23 16:54:51 doly python[64676]: [home] marker x=-49.6mm z=289.2mm bearing=-9.7 normal=58.69415521936884 visual=[58.178525181079614]
+Sep 23 16:54:51 doly python[64676]: [home] turn yaw=39.9 error=-31.3
+Sep 23 16:54:52 doly python[64676]: [home] turn yaw=7.0 error=1.6
+Sep 23 16:54:52 doly python[64676]: [body] approach proximity: [(0, -1, 6, 145665), (1, -1, 6, 145673)]
+Sep 23 16:54:52 doly python[64676]: [home] turn yaw=7.1 error=32.8
+Sep 23 16:54:53 doly python[64676]: [home] turn yaw=39.5 error=0.4
+Sep 23 16:54:54 doly python[64676]: [home] marker x=-63.7mm z=250.8mm bearing=-14.3 normal=59.049566748909854 visual=[58.164729436019584]
+Sep 23 16:54:54 doly python[64676]: [home] turn yaw=39.6 error=-31.0
+Sep 23 16:54:54 doly python[64676]: [body] approach proximity: [(0, -1, 7, 147820), (1, -1, 6, 147827)]
+Sep 23 16:54:55 doly python[64676]: [home] turn yaw=7.1 error=1.5
+Sep 23 16:54:55 doly python[64676]: [home] turn yaw=7.4 error=32.1
+Sep 23 16:54:56 doly python[64676]: [body] approach proximity: [(0, -1, 13, 149767), (1, -1, 13, 149812)]
+Sep 23 16:54:56 doly python[64676]: [home] turn yaw=39.6 error=-0.0
+Sep 23 16:54:57 doly python[64676]: [home] marker x=-86.7mm z=225.1mm bearing=-21.1 normal=58.94471216516962 visual=[58.374606818249525]
+Sep 23 16:54:57 doly python[64676]: [home] turn yaw=39.7 error=-31.1
+Sep 23 16:54:58 doly python[64676]: [home] turn yaw=8.3 error=0.3
+Sep 23 16:54:58 doly python[64676]: [home] turn yaw=8.5 error=31.2
+Sep 23 16:54:58 doly python[64676]: [body] approach proximity: [(0, -1, 6, 151837), (1, -1, 6, 151844)]
+Sep 23 16:54:58 doly python[64676]: [body] power: battery=70% charging=False parked=False shunt=-1018.5 voltage=3.7960000000000003 error=None gaps=[] clear_since=None motors={'drive': 'DriveState.Running', 'rpm': [31.58, 24.35], 'arms': ['ArmState.Completed', 'ArmState.Completed']}
+Sep 23 16:54:59 doly python[64676]: [home] turn yaw=39.0 error=0.6
+Sep 23 16:55:00 doly python[64676]: [home] marker x=-111.1mm z=197.2mm bearing=-29.4 normal=59.484720710091494 visual=[56.63979835371153]
+Sep 23 16:55:00 doly python[64676]: [home] turn yaw=39.1 error=-30.5
+Sep 23 16:55:00 doly python[64676]: [body] approach proximity: [(0, -1, 13, 153840), (1, -1, 7, 153895)]
+Sep 23 16:55:01 doly python[64676]: [home] turn yaw=8.2 error=0.4
+Sep 23 16:55:01 doly python[64676]: [home] turn yaw=8.1 error=31.0
+Sep 23 16:55:02 doly python[64676]: [body] approach proximity: [(0, -1, 13, 155781), (1, -1, 13, 155823)]
+Sep 23 16:55:02 doly python[64676]: [home] turn yaw=38.8 error=0.3
+Sep 23 16:55:03 doly python[64676]: [body] home attempt 2/3 result=lost
+Sep 23 16:55:05 doly python[64676]: [body] approach proximity: [(0, -1, 13, 158346), (1, -1, 13, 158385)]
+Sep 23 16:55:07 doly python[64676]: [body] approach proximity: [(0, -1, 13, 160299), (1, -1, 13, 160338)]
+Sep 23 16:55:09 doly python[64676]: [body] approach proximity: [(0, -1, 6, 162376), (1, -1, 6, 162384)]
+Sep 23 16:55:11 doly python[64676]: [body] approach proximity: [(0, -1, 11, 164332), (1, -1, 6, 164339)]
+Sep 23 16:55:13 doly python[64676]: [body] approach proximity: [(0, -1, 6, 166440), (1, -1, 6, 166448)]
+Sep 23 16:55:15 doly python[64676]: [body] approach proximity: [(0, -1, 6, 168396), (1, -1, 6, 168403)]
+Sep 23 16:55:17 doly python[64676]: [body] approach proximity: [(0, -1, 13, 170395), (1, -1, 13, 170435)]
+Sep 23 16:55:19 doly python[64676]: [body] approach proximity: [(0, -1, 13, 172345), (1, -1, 13, 172384)]
+Sep 23 16:55:21 doly python[64676]: [home] turn yaw=101.0 error=-30.0
+Sep 23 16:55:21 doly python[64676]: [body] approach proximity: [(0, -1, 13, 174465), (1, -1, 13, 174488)]
+Sep 23 16:55:21 doly python[64676]: [home] turn yaw=69.9 error=1.0
+Sep 23 16:55:22 doly python[64676]: [home] plane view heading=70.0 candidates=[32.55859078134243]
+Sep 23 16:55:22 doly python[64676]: [home] turn yaw=70.0 error=10.0
+Sep 23 16:55:22 doly python[64676]: [home] turn yaw=81.1 error=-1.2
+Sep 23 16:55:23 doly python[64676]: [body] approach proximity: [(0, -1, 13, 176408), (1, -1, 13, 176426)]
+Sep 23 16:55:23 doly python[64676]: [home] plane view heading=81.1 candidates=[22.13718302207077]
+Sep 23 16:55:23 doly python[64676]: [home] measured dock plane heading=102.9
+Sep 23 16:55:24 doly python[64676]: [home] marker x=27.1mm z=211.1mm bearing=7.3 normal=21.63722024521246 visual=[21.933627269200763]
+Sep 23 16:55:24 doly python[64676]: [home] turn yaw=81.3 error=-68.4
+Sep 23 16:55:25 doly python[64676]: [body] approach proximity: [(0, -1, 6, 178491), (1, -1, 6, 178499)]
+Sep 23 16:55:25 doly python[64676]: [home] turn yaw=12.6 error=0.3
+Sep 23 16:55:26 doly python[64676]: [home] turn yaw=12.7 error=68.6
+Sep 23 16:55:27 doly python[64676]: [body] approach proximity: [(0, -1, 13, 180478), (1, -1, 13, 180518)]
+Sep 23 16:55:28 doly python[64676]: [home] turn yaw=81.6 error=-0.4
+Sep 23 16:55:28 doly python[64676]: [body] power: battery=67% charging=False parked=False shunt=-1180.0 voltage=3.7680000000000002 error=None gaps=[] clear_since=None motors={'drive': 'DriveState.Completed', 'rpm': [0.0, 0.0], 'arms': ['ArmState.Completed', 'ArmState.Completed']}
+Sep 23 16:55:29 doly python[64676]: [home] marker x=-3.6mm z=194.8mm bearing=-1.1 normal=21.223775726169492 visual=[20.14097748494416, 19.99833291710996]
+Sep 23 16:55:29 doly python[64676]: [home] turn yaw=81.7 error=-68.8
+Sep 23 16:55:29 doly python[64676]: [body] approach proximity: [(0, -1, 13, 182421), (1, -1, 13, 182455)]
+Sep 23 16:55:30 doly python[64676]: [home] turn yaw=10.5 error=2.4
+Sep 23 16:55:31 doly python[64676]: [body] approach proximity: [(0, -1, 7, 184561), (1, -1, 6, 184568)]
+Sep 23 16:55:31 doly python[64676]: [home] turn yaw=10.6 error=71.1
+Sep 23 16:55:33 doly python[64676]: [body] approach proximity: [(0, -1, 13, 186499), (1, -1, 13, 186531)]
+Sep 23 16:55:33 doly python[64676]: [home] turn yaw=81.4 error=0.3
+Sep 23 16:55:34 doly python[64676]: [home] marker x=-49.1mm z=178.4mm bearing=-15.4 normal=21.433080535739805 visual=[19.29168799172712, 19.293517112768672]
+Sep 23 16:55:34 doly python[64676]: [home] turn yaw=81.5 error=-68.6
+Sep 23 16:55:35 doly python[64676]: [body] approach proximity: [(0, -1, 13, 188461), (1, -1, 13, 188496)]
+Sep 23 16:55:36 doly python[64676]: [home] turn yaw=12.8 error=0.1
+Sep 23 16:55:36 doly python[64676]: [home] turn yaw=13.0 error=68.4
+Sep 23 16:55:37 doly python[64676]: [body] approach proximity: [(0, -1, 13, 190569), (1, -1, 13, 190607)]
+Sep 23 16:55:39 doly python[64676]: [home] turn yaw=80.8 error=0.6
+Sep 23 16:55:39 doly python[64676]: [body] approach proximity: [(0, -1, 13, 192523), (1, -1, 13, 192556)]
+Sep 23 16:55:39 doly python[64676]: [home] marker x=-74.3mm z=169.0mm bearing=-23.7 normal=22.009069305271055 visual=[21.773856200588067, 21.77508026462135]
+Sep 23 16:55:40 doly python[64676]: [home] marker x=-32.7mm z=176.0mm bearing=-10.5 normal=10.533582549899961 visual=[10.898243121438341, 10.89826812460769]
+Sep 23 16:55:41 doly python[64676]: [body] approach proximity: [(0, 158, 0, 194617), (1, -1, 13, 194645)]
+Sep 23 16:55:41 doly python[64676]: [home] marker x=-9.2mm z=177.9mm bearing=-3.0 normal=4.075406890720274 visual=[5.959896007640805, 5.959896868909889]
+Sep 23 16:55:42 doly python[64676]: [home] marker x=-1.5mm z=178.1mm bearing=-0.5 normal=1.9142435606421486 visual=[2.6887487734756164, 2.6887487449848892]
+Sep 23 16:55:43 doly python[64676]: [home] turn yaw=107.6 error=173.4
+Sep 23 16:55:43 doly python[64676]: [body] approach proximity: [(0, -1, 13, 196600), (1, 158, 0, 196618)]
+Sep 23 16:55:45 doly python[64676]: [body] approach proximity: [(0, -1, 13, 198558), (1, -1, 13, 198597)]
+Sep 23 16:55:47 doly python[64676]: [body] approach proximity: [(0, -1, 6, 200628), (1, -1, 6, 200636)]
+Sep 23 16:55:49 doly python[64676]: [home] turn yaw=-79.6 error=0.6
+Sep 23 16:55:53 doly python[64676]: [home] entry travelled=120mm result=alignment
+Sep 23 16:55:58 doly python[64676]: [body] power: battery=72% charging=False parked=False shunt=-773.875 voltage=3.7960000000000003 error=None gaps=[] clear_since=None motors={'drive': 'DriveState.Completed', 'rpm': [0.0, 0.0], 'arms': ['ArmState.Completed', 'ArmState.Completed']}
+Sep 23 16:56:01 doly python[64676]: [body] home attempt 3/3 result=alignment
+Sep 23 16:56:20 doly python[64676]: [body] approach proximity: [(0, -1, 6, 233849), (1, -1, 6, 233857)]
+Sep 23 16:56:29 doly python[64676]: [body] power: battery=72% charging=False parked=False shunt=-793.25 voltage=3.7960000000000003 error=None gaps=[] clear_since=None motors={'drive': 'DriveState.Completed', 'rpm': [0.0, 0.0], 'arms': ['ArmState.Completed', 'ArmState.Completed']}
+Sep 23 16:56:59 doly python[64676]: [body] power: battery=71% charging=False parked=False shunt=-807.75 voltage=3.7920000000000003 error=None gaps=[] clear_since=None motors={'drive': 'DriveState.Completed', 'rpm': [0.0, 0.0], 'arms': ['ArmState.Completed', 'ArmState.Completed']}
