@@ -73,13 +73,15 @@
     "low_battery_pct": 10,
     "battery_check_s": 10,
     "battery_retry_s": 60,
-    "roam_enabled": false,
+    "roam_enabled": true,
     "roam_full_pct": 100,
     "roam_cooldown_s": 1800,
-    "roam_radius_mm": 700
+    "roam_radius_mm": 3000,
+    "roam_reserve_pct_per_m": 2
   },
   "homing": {
-    "enabled": false
+    "enabled": true,
+    "attempts": 3
   },
   "moods": true,
   "conversation": {

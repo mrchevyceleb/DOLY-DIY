@@ -1700,7 +1700,13 @@ class Body:
         return True
 
     def go_home(self):
-        """Return using the visible dock; only electrical contact is arrival."""
+        """Return using the visible dock; only electrical contact is arrival.
+
+        One attempt closes at most ~1200mm of guarded travel, so distance
+        needs retries: each attempt sweeps for the marker fresh. Recoverable
+        results (limit, lost, alignment, a caught track on entry) get another
+        attempt while battery allows; deliberate stops and power faults do not.
+        """
         if self.is_on_dock():
             return "already"
         if self._homing:
@@ -1713,9 +1719,23 @@ class Body:
         self._homing = True
         try:
             stop = self.motion_stop_factory() if self.motion_stop_factory else None
-            result = Homing(self, stop).run()
-            _log(f"home result={result}")
-            return result
+            attempts = max(1, min(4, int(self.cfg.get("homing", {}).get("attempts", 3))))
+            final = "sensor"
+            for attempt in range(1, attempts + 1):
+                result = Homing(self, stop).run()
+                _log(f"home attempt {attempt}/{attempts} result={result}")
+                final = result
+                if result in ("arrived", "already", "cancelled", "busy", "power"):
+                    break
+                if self.is_on_dock():
+                    return "arrived"
+                pct = self.battery_pct()
+                if pct is not None and pct <= 3:
+                    break
+                if attempt < attempts:
+                    self.drive_stop()
+                    time.sleep(2)  # settle sensors; fresh camera session next
+            return final
         except InterruptedError:
             return "cancelled"
         except Exception as exc:
@@ -1823,6 +1843,19 @@ class Body:
         self.refresh_power()
         return self.docked
 
+    def _return_margin_pct(self):
+        """Battery reserve for the trip home from the anchored roam distance.
+
+        Far from the dock, return BEFORE the flat low-water mark so the
+        remaining charge covers the guarded approach + entry retries.
+        """
+        import math
+        bound = self._roam_distance_bound
+        per_m = self.cfg.get("idle", {}).get("roam_reserve_pct_per_m", 2)
+        if not bound or per_m <= 0:
+            return 0
+        return min(10, math.ceil(bound / 1000.0) * per_m)
+
     def wander_step(self):
         """Pet-like exploration: ONE safe move + a curious look.
         Short, preflighted, edge-gated, battery-aware."""
@@ -1839,7 +1872,7 @@ class Body:
                 return False
             pct = self.battery_pct()
             low = self.cfg.get("idle", {}).get("low_battery_pct", 10)
-            if pct is None or pct <= low:
+            if pct is None or pct <= low + self._return_margin_pct():
                 return False  # the central battery check owns return/retry notices
             if not self._motion_allowed("rotate"):
                 return self._escape_edge()

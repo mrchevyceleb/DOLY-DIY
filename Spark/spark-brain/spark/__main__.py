@@ -175,12 +175,15 @@ class Spark:
 
     def _low_battery_check(self, idle_cfg):
         """Low battery -> she takes herself home to charge (stock behavior).
-        Only when she knows where home is and isn't already on the dock."""
+        Only when she knows where home is and isn't already on the dock.
+        Far from the dock the trigger rises by the return margin so the
+        remaining charge covers the trip home."""
         try:
             pct = self.body.battery_pct()
+            threshold = idle_cfg.get("low_battery_pct", 10) + self.body._return_margin_pct()
             if self.body.is_on_dock():
                 return
-            if pct is None or pct > idle_cfg.get("low_battery_pct", 10):
+            if pct is None or pct > threshold:
                 return
             log("spark", f"battery {pct}% — checking return to charger")
             result = "blocked" if self.body.actuators_held() else self.body.go_home()
@@ -303,7 +306,8 @@ class Spark:
                     continue
                 if idle_action["act"] == "battery":
                     pct = self.body.battery_pct()
-                    low = pct is not None and pct <= idle_cfg.get("low_battery_pct", 10)
+                    threshold = idle_cfg.get("low_battery_pct", 10) + self.body._return_margin_pct()
+                    low = pct is not None and pct <= threshold
                     next_battery = time.time() + idle_cfg.get(
                         "battery_retry_s" if low else "battery_check_s", 60 if low else 10)
                     self._low_battery_check(idle_cfg)

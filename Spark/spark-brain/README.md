@@ -305,8 +305,16 @@ manual repositioning. Entry therefore includes a bounded 20mm trim, with a
 The subsequent leave/roam/return attempt in `/tmp/spark-home-roundtrip3.log`
 stopped on visual ambiguity. A later measured-plane approach reached the ramp
 but stopped after a six-degree heading change; the user confirmed one track
-was catching the dock (`/tmp/spark-home-plane10.log`). Reliable automatic
-round trips remain unverified, so both homing and free roaming stay disabled.
-The calibration pilots are temporary diagnostics, not an unattended service.
-All 78 regression tests pass locally. Camera refinement has been checked on
-captured robot images; a complete successful round trip is still required.
+was catching the dock (`/tmp/spark-home-plane10.log`). Because a single homing
+attempt closes at most ~1200mm and an entry misalignment is recoverable,
+`go_home` now retries (default 3 attempts, `homing.attempts`) on recoverable
+results — limit, lost, not_found, alignment, too_close, turn_unverified —
+while deliberate stops, power faults and battery at or below 3 percent do
+not retry. Roaming's fixed 800mm ceiling is gone: `roam_radius_mm` (now
+3000) is the real bound, and the return trigger rises with distance —
+`low_battery_pct` plus `roam_reserve_pct_per_m` (2%/m, capped +10%) from the
+anchored roam distance, so she leaves for home before the flat 10 percent
+when far away. Full-cycle roaming and homing are ENABLED as of 2026-09-23;
+a complete unattended floor round trip is still pending physical validation.
+All 83 regression tests pass locally; camera refinement has been checked on
+captured robot images.

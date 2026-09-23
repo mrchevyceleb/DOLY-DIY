@@ -43,7 +43,7 @@ class Roaming(Homing):
         from .dock_camera import DockCamera
         b = self.body
         self.deadline = time.monotonic()+45
-        radius = min(800, max(300, b.cfg.get("idle", {}).get("roam_radius_mm", 700)))
+        radius = min(3000, max(300, b.cfg.get("idle", {}).get("roam_radius_mm", 3000)))
         bound = b._roam_distance_bound
         if bound is None or bound+80 >= radius:
             with DockCamera(self.camera_interrupted) as camera:

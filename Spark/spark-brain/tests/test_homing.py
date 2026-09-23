@@ -279,6 +279,7 @@ class HomingTests(unittest.TestCase):
         spark.body = Mock()
         spark.body.is_on_dock.return_value = False
         spark.body.actuators_held.return_value = False
+        spark.body._return_margin_pct.return_value = 0
         spark.body.go_home.return_value = "arrived"
         for pct in (11, 10):
             spark.body.battery_pct.return_value = pct
@@ -296,6 +297,64 @@ class HomingTests(unittest.TestCase):
             self.assertFalse(b.wander_step())
             roaming.return_value.run.assert_called_once()
 
+    def test_far_from_home_raises_the_return_threshold(self):
+        from spark.__main__ import Spark
+        spark = Spark.__new__(Spark)
+        spark.body = Mock()
+        spark.body.is_on_dock.return_value = False
+        spark.body.actuators_held.return_value = False
+        spark.body._return_margin_pct.return_value = 6
+        spark.body.go_home.return_value = "arrived"
+        spark.body.battery_pct.return_value = 13  # above 10, below 10+6
+        spark._low_battery_check({"low_battery_pct": 10})
+        spark.body.go_home.assert_called_once()
+
+    def test_return_margin_scales_with_anchored_distance_and_caps(self):
+        b, _ = self.rig()
+        b.cfg = {"idle": {"roam_reserve_pct_per_m": 2}}
+        b._roam_distance_bound = None
+        self.assertEqual(b._return_margin_pct(), 0)
+        b._roam_distance_bound = 700
+        self.assertEqual(b._return_margin_pct(), 2)
+        b._roam_distance_bound = 2600
+        self.assertEqual(b._return_margin_pct(), 6)
+        b._roam_distance_bound = 9900
+        self.assertEqual(b._return_margin_pct(), 10)
+
+    def test_go_home_retries_recoverable_results_until_arrival(self):
+        b, _ = self.rig()
+        b.hw = Mock()
+        b.cfg = {"homing": {"enabled": True, "attempts": 3}}
+        b.battery_pct.return_value = 15
+        with patch("spark.homing.Homing") as homing, patch("time.sleep"):
+            homing.return_value.run.side_effect = ["limit", "alignment", "arrived"]
+            self.assertEqual(b.go_home(), "arrived")
+        self.assertEqual(homing.return_value.run.call_count, 3)
+
+    def test_go_home_returns_last_result_when_attempts_exhaust(self):
+        b, _ = self.rig()
+        b.hw = Mock()
+        b.cfg = {"homing": {"enabled": True, "attempts": 3}}
+        b.battery_pct.return_value = 15
+        with patch("spark.homing.Homing") as homing, patch("time.sleep"):
+            homing.return_value.run.return_value = "lost"
+            self.assertEqual(b.go_home(), "lost")
+        self.assertEqual(homing.return_value.run.call_count, 3)
+
+    def test_go_home_does_not_retry_deliberate_stops_or_dead_battery(self):
+        b, _ = self.rig()
+        b.hw = Mock()
+        b.cfg = {"homing": {"enabled": True, "attempts": 3}}
+        with patch("spark.homing.Homing") as homing, patch("time.sleep"):
+            homing.return_value.run.return_value = "cancelled"
+            self.assertEqual(b.go_home(), "cancelled")
+            homing.return_value.run.side_effect = None
+            homing.return_value.run.return_value = "limit"
+            homing.return_value.run.reset_mock()
+            b.battery_pct.return_value = 3
+            self.assertEqual(b.go_home(), "limit")
+        self.assertEqual(homing.return_value.run.call_count, 1)
+
     def test_roaming_does_not_translate_without_reacquiring_home(self):
         from spark.roaming import Roaming
         b, _ = self.rig()
@@ -308,9 +367,9 @@ class HomingTests(unittest.TestCase):
     def test_roaming_boundary_turns_back_toward_visible_home(self):
         from spark.roaming import Roaming
         b, _ = self.rig()
-        b._roam_distance_bound = 670
+        b._roam_distance_bound = 2950  # near the 3000mm roam boundary
         roam = Roaming(b)
-        roam.locate = Mock(return_value=("found", self.target(z=650)))
+        roam.locate = Mock(return_value=("found", self.target(z=2900)))
         with patch("spark.dock_camera.DockCamera"):
             self.assertEqual(roam.run(), "ok")
         b.drive_guarded.assert_called_once()
