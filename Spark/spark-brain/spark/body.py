@@ -761,15 +761,20 @@ class Body:
                     self._dock_clear_since = None
             if self.docked:
                 self._enforce_dock_stop()
-            # A full cell tapers around zero current. Valid mixed readings
-            # can count toward full-charge dwell; faults and established
-            # discharge cannot. This does not relax ordinary motor guards.
+            # A full cell tapers around zero current and the fuel gauge can
+            # dither a percent or two below full without ever reading 100.
+            # Arm at roam_full_pct and keep the dwell through dithering;
+            # only undocking, discharge or unhealthy telemetry reset it.
+            full_threshold = max(90, min(100, int(
+                self.cfg.get("idle", {}).get("roam_full_pct", 100))))
+            fullish = (self.battery_pct() is not None
+                       and self.battery_pct() >= full_threshold)
             if (self.docked and charging is not False and self._charging.healthy()
-                    and self.battery_pct() == 100
-                    and not self.sleeping and not self._leaving_home):
+                    and fullish and not self._leaving_home):
                 if self._full_charge_since is None:
                     self._full_charge_since = now
-            else:
+            elif (not self.docked or charging is False
+                    or not self._charging.healthy()):
                 self._full_charge_since = None
             # The dock latch is a motor interlock, never proof of charging.
             if self.docked and charging is False and not self._leaving_home:
