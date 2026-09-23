@@ -346,12 +346,25 @@ class Homing:
             supported = [a for a in angles if abs(angle_delta(a, yaw)) <= 8]
             _log(f"marker x={x:.1f}mm z={z:.1f}mm bearing={bearing:.1f} normal={yaw} visual={angles}")
             if not supported:
+                if not angles:
+                    # A transient corner-detection dropout (visual=[]) must
+                    # not abort a converging approach — recent frames held
+                    # valid poses. Re-observe briefly before giving up.
+                    misses = getattr(self, "_drop_frames", 0) + 1
+                    self._drop_frames = misses
+                    if misses <= 3:
+                        time.sleep(.4)
+                        continue
+                    self._drop_frames = 0
+                    return "alignment", None
+                self._drop_frames = 0
                 if abs(bearing) > 8:
                     result = self.body.rotate_guarded(max(-10, min(10, bearing*.45)), self.interlock)
                     if result != "ok":
                         return result, None
                     continue  # resolve the plane with the marker nearer image center
                 return "alignment", None
+            self._drop_frames = 0
             # Keep the measured world orientation through small pose flips.
             # The dock is stationary; a fresh image still must support it.
             if 175 <= z <= 220 and abs(bearing) <= 2 and abs(yaw) <= 5:
