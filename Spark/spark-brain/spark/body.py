@@ -1693,12 +1693,12 @@ class Body:
         Rear-edge guards stay armed; charge onset stops the move early.
         """
         if (self.sleeping or self._homing or self._roaming or self._leaving_home
-                or self._docking_entry is not None or self._approaching):
+                or self._docking_entry is not None or self._approaching
+                or getattr(self, "_reseating", False)):
             return False
         now = time.monotonic()
         if now < getattr(self, "_next_reseat_probe", 0):
             return False
-        self._next_reseat_probe = now + 600  # bounded cadence, success or fail
         if self.docked or self.refresh_power() is True:
             return True  # already seated
         gaps = set(self._edge_gaps())
@@ -1711,10 +1711,12 @@ class Body:
         pct = self.battery_pct()
         if pct is None or pct <= 2 or not self._charging.healthy():
             return False  # uncertain power stays held
+        self._next_reseat_probe = now + 600  # consume the cadence only on a real attempt
         stop = self.motion_stop_factory() if self.motion_stop_factory else (lambda: False)
         self._approach_stop.clear()
+        self._reseating = True
         deadline = time.monotonic() + 15
-        seated, travelled = False, 0
+        seated, moved = False, False
 
         def _verify_seat():
             settle = time.monotonic() + 6
@@ -1726,6 +1728,7 @@ class Body:
 
         _log("reseat probe: dock profile without contact — seating")
         try:
+            travelled = 0
             while travelled < 25 and time.monotonic() < deadline:
                 contact = False
                 with self._power_lock:
@@ -1739,19 +1742,22 @@ class Body:
                     rc = self._drive.go_distance(self._next_id(), step, 10, False, True)
                     if rc is False or (rc is not None and rc < 0):
                         break
+                moved = True
                 end, running, complete = time.monotonic() + 1.5, False, False
                 while time.monotonic() < end:
                     with self._power_lock:
                         if self.refresh_power() is True:
                             contact = True
                             break
-                        if (stop() or self.sleeping
-                                or any(g.startswith("Back") for g in self._edge_gaps())):
+                        if (stop() or self.sleeping or self._approach_stop.is_set()
+                                or any(g.startswith("Back") for g in self._edge_gaps())
+                                or self._hazard_active("backward")):
                             break
                     state = self._drive.get_state()
                     if state == self._drive.DriveState.Running:
                         running = True
-                    elif state == self._drive.DriveState.Completed and running:
+                    elif state == self._drive.DriveState.Completed:
+                        # a 12mm step at speed 10 can finish before the first poll
                         complete = True
                         break
                     elif state == self._drive.DriveState.Error:
@@ -1769,9 +1775,10 @@ class Body:
                     break
         finally:
             self.drive_stop()
+            self._reseating = False
         if seated:
             _log("reseat probe: charge confirmed — seated")
-        else:
+        elif moved:
             self._pose = None
             self._roam_distance_bound = None
             _log("reseat probe: no contact after seating move")

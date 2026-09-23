@@ -374,17 +374,15 @@ class HomingTests(unittest.TestCase):
         b.speak.assert_not_called()
 
     def test_reseat_probe_ignores_other_gap_profiles(self):
-        b, _ = self.rig()
-        b.hw = Mock()
-        b.has = {"drive": True, "edge": True}
-        b.docked = False
-        b._edge_gaps = Mock(return_value=["Front_Left"])
-        b._drive = Mock()
-        self.assertFalse(b.reseat_probe())
-        b._drive.go_distance.assert_not_called()
-        b._edge_gaps = Mock(return_value=["Front_Left", "Back_Right"])
-        self.assertFalse(b.reseat_probe())
-        b._drive.go_distance.assert_not_called()
+        for profile in (["Front_Left"], ["Front_Left", "Back_Right"]):
+            b, _ = self.rig()
+            b.hw = Mock()
+            b.has = {"drive": True, "edge": True}
+            b.docked = False
+            b._edge_gaps = Mock(return_value=profile)
+            b._drive = Mock()
+            self.assertFalse(b.reseat_probe())
+            b._drive.go_distance.assert_not_called()
 
     def test_roaming_does_not_translate_without_reacquiring_home(self):
         from spark.roaming import Roaming
