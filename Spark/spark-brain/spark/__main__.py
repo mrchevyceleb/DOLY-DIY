@@ -106,6 +106,7 @@ class Spark:
         self.router = Router(cfg, self.body, self.brain, self.memory)
         self.router.llm_reply = self._llm_reply
         self.talk_trigger = threading.Event()
+        self._motion_wake_pending = threading.Event()  # name said during motion
         self.listening = False
         if self.body.hw:
             self._wire_touch()
@@ -281,7 +282,14 @@ class Spark:
                 # Playback and its short echo tail finish BEFORE the window
                 # starts. The capture thread drains ALSA throughout the reply.
                 self._wait_for_playback(mic)
-                in_followup = follow_pending and not self.body.sleeping
+                # Her name said mid-motion: she stopped to listen — take the
+                # turn now instead of demanding the name again.
+                pending = getattr(self, "_motion_wake_pending", None)
+                motion_wake = (pending is not None and pending.is_set()
+                               and not self.body.sleeping)
+                if motion_wake:
+                    pending.clear()
+                in_followup = (follow_pending or motion_wake) and not self.body.sleeping
                 follow_pending = False
 
                 triggered_by_wake = None
@@ -376,19 +384,30 @@ class Spark:
                                   and follow_cfg.get("follow_ups", 2) > 0)
 
     def _motion_stop_listener(self, mic, recognizer):
-        """Reuse loaded Vosk weights; recognize STOP while approach runs."""
+        """Recognize STOP and her NAME while approach/roam runs.
+
+        A tiny grammar maps near-name speech to 'spark' far more reliably
+        than full-vocabulary Vosk. Hearing the name stops the motion and
+        arms a pending wake so the voice loop listens right after.
+        """
         import json
         mic.discard()
         mic.retain(1)
         stop_rec = recognizer._kaldi_cls(recognizer.model, self.cfg["audio"]["sample_rate"],
-                                        '["stop", "spark stop", "[unk]"]')
+                                        '["stop", "spark stop", "spark", '
+                                        '"hey spark", "sparky", "hey sparky", "[unk]"]')
 
         def check():
             for frame in mic.drain_pending():
                 result = stop_rec.Result() if stop_rec.AcceptWaveform(frame) else stop_rec.PartialResult()
                 parsed = json.loads(result)
-                if "stop" in (parsed.get("text", "") or parsed.get("partial", "")).split():
+                words = (parsed.get("text", "") or parsed.get("partial", "")).split()
+                if "stop" in words:
                     log("spark", "voice stop during approach")
+                    return True
+                if any(w in ("spark", "sparky") for w in words):
+                    log("spark", "wake word during motion — stopping to listen")
+                    self._motion_wake_pending.set()
                     return True
             return False
         return check
