@@ -18,8 +18,10 @@ class Recognizer:
         self._kaldi_cls = KaldiRecognizer
         self._finalized = []
 
-    def begin(self):
-        self.rec = self._kaldi_cls(self.model, self.sample_rate)
+    def begin(self, grammar=None):
+        """Start a fresh decode; optional grammar turns Vosk into a KWS."""
+        self.rec = (self._kaldi_cls(self.model, self.sample_rate, json.dumps(grammar))
+                    if grammar else self._kaldi_cls(self.model, self.sample_rate))
         self._finalized = []
 
     def feed(self, pcm):

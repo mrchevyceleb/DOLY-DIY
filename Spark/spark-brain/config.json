@@ -66,6 +66,7 @@
     ],
     "chirp": "/.doly/sounds/wuw/wuw_1.wav",
     "wait_timeout_s": 6.0,
+    "wake_keyword_rms": 1800,
     "wake_weak_rms": 3000,
     "wake_verify_fuzzy_rms": 4500
   },

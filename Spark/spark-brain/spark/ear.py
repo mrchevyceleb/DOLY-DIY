@@ -393,21 +393,32 @@ def listen_for_wake(frames, recognizer, cfg, wake_words, tap_check=None,
     # the utterance was LOUD — real wake attempts are near-field speech;
     # TV/music/chatter whispering a lookalike word stays below this.
     weak_min_peak = a.get("wake_weak_rms", 1400)
-    # vosk-small's realistic transcription set for the spoken wake word
-    _WEAK = {"clark", "clarks", "stark", "starks", "park", "mark",
+    # Vosk-small's realistic transcription set for the spoken wake word.
+    _WEAK = {"bar", "bars", "bark", "barks", "bart", "barkley",
+             "clark", "clarks", "stark", "starks", "park", "mark",
              "dark", "dock", "spar", "spork", "shark", "spec", "speck",
              "spock", "spa", "step", "steps"}
     _HEADS = {"spark", "sparky"} | {
         name.lower().split()[-1] for name in wake_words
         if name.strip() and name.lower().split()[-1] not in {"hey"}}
+    # Wake mode is keyword spotting, not open dictation. This prevents loud,
+    # overlapping family speech from turning "Spark" into arbitrary English.
+    wake_grammar = sorted({name.lower().strip() for name in wake_words if name.strip()}
+                          | {"spark", "sparky", "hey spark", "hey sparky"}
+                          | _WEAK | {"the park", "a spark", "hey clark", "hey stark"})
+    wake_grammar.append("[unk]")
+    keyword_min_peak = a.get("wake_keyword_rms", 1800)
 
-    def _is_wake(tokens, peak=0):
+    def _is_wake(tokens, peak=0, exact_only=False):
         if not tokens:
             return False
         first = tokens[0]
         pair = tuple(tokens[:2])
-        if has_wake_name(" ".join(tokens), wake_words):
+        exact = has_wake_name(" ".join(tokens), wake_words)
+        if exact and peak >= keyword_min_peak:
             return True
+        if exact_only:
+            return False
         # acoustic confusions: 'clark'/'stark'/'the park' — accept only on
         # SHORT utterances (a lone word = a wake attempt), so conversation
         # mentioning them mid-sentence doesn't false-wake.
@@ -429,7 +440,9 @@ def listen_for_wake(frames, recognizer, cfg, wake_words, tap_check=None,
         nonlocal next_verify
         tokens = text.lower().split()
         if _is_wake(tokens, peak):
-            return WakeResult(text)
+            # Retain original audio: constrained KWS only knows the name;
+            # command ASR must still hear "go home" in the same breath.
+            return WakeResult(text, b"".join(audio))
         # Vosk sometimes drops Spark entirely ('or how much battery...').
         # Check real speech even when its local transcript is empty. Only
         # an explicit wake name from the original audio can authorize a turn.
@@ -455,7 +468,7 @@ def listen_for_wake(frames, recognizer, cfg, wake_words, tap_check=None,
                     return WakeResult(verified)
         return None
 
-    recognizer.begin()
+    recognizer.begin(wake_grammar)
     preroll = deque(maxlen=10)
     idle_silence = 0
     while True:
@@ -488,7 +501,7 @@ def listen_for_wake(frames, recognizer, cfg, wake_words, tap_check=None,
                 onset = voiced and rms >= (arm_rms if vad else onset_rms)
                 voiced_run = voiced_run + 1 if onset else 0
                 if voiced_run >= (3 if vad else 1):
-                    recognizer.begin()  # fresh decode session at onset
+                    recognizer.begin(wake_grammar)  # constrained keyword decode
                     audio.extend(preroll)
                     final = None
                     for lead in preroll:
@@ -522,7 +535,7 @@ def listen_for_wake(frames, recognizer, cfg, wake_words, tap_check=None,
                 # one must NOT authorize a later quiet weak-word hallucination
                 peak = 0
                 voiced_frames = 0
-                recognizer.begin()
+                recognizer.begin(wake_grammar)
                 audio.clear()
                 partial_candidate = None
                 partial_count = 0
@@ -531,7 +544,7 @@ def listen_for_wake(frames, recognizer, cfg, wake_words, tap_check=None,
                 partial = recognizer.partial().lower()
                 # Only strong names can wake early. Confusions still need a
                 # completed short utterance and the existing loudness gate.
-                if _is_wake(partial.split(), peak=0):
+                if _is_wake(partial.split(), peak=peak, exact_only=True):
                     name = tuple(partial.split()[:2]) if partial.startswith("hey ") else partial.split()[0]
                     partial_count = partial_count + 1 if name == partial_candidate else 1
                     partial_candidate = name
