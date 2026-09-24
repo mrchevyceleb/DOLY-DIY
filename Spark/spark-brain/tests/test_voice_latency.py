@@ -200,6 +200,18 @@ class VoiceLatencyTests(unittest.TestCase):
         text, _ = spark._listen_command(Mock(), Mock(), WakeResult("spark stop"))
         self.assertEqual(text, "stop")
 
+    def test_constrained_keyword_rejects_a_long_forced_spark(self):
+        # A constrained decoder can force unrelated loud chatter to "spark";
+        # only a short wake-sized utterance may authorize locally.
+        rec = Mock()
+        rec.feed.return_value = None
+        rec.partial.return_value = ""
+        rec.finish.return_value = "spark"
+        speech, room = pcm(5000), pcm(1000)
+        frames = [room]*5 + [speech]*90 + [room]*40
+        self.assertFalse(listen_for_wake(iter(frames), rec, CFG, ["spark"],
+                                         noise_floor=lambda: 1000))
+
     def test_loud_vosk_garble_of_the_name_wakes_locally(self):
         # 'Spark!' spoken clearly but transcribed 'bark' — loud, lone word
         rec = Mock()

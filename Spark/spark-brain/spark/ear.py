@@ -407,17 +407,19 @@ def listen_for_wake(frames, recognizer, cfg, wake_words, tap_check=None,
                           | {"spark", "sparky", "hey spark", "hey sparky"}
                           | _WEAK | {"the park", "a spark", "hey clark", "hey stark"})
     wake_grammar.append("[unk]")
-    keyword_min_peak = a.get("wake_keyword_rms", 1800)
+    keyword_min_peak = a.get("wake_keyword_rms", 2500)
+    keyword_max_ms = a.get("wake_keyword_max_ms", 1400)
 
-    def _is_wake(tokens, peak=0, exact_only=False):
+    def _is_wake(tokens, peak=0, exact_only=False, speech_ms=0):
         if not tokens:
             return False
         first = tokens[0]
         pair = tuple(tokens[:2])
+        short_enough = not speech_ms or speech_ms <= keyword_max_ms
         exact = has_wake_name(" ".join(tokens), wake_words)
-        if exact and peak >= keyword_min_peak:
+        if exact and short_enough and peak >= keyword_min_peak:
             return True
-        if exact_only:
+        if exact_only or not short_enough:
             return False
         # acoustic confusions: 'clark'/'stark'/'the park' — accept only on
         # SHORT utterances (a lone word = a wake attempt), so conversation
@@ -439,7 +441,7 @@ def listen_for_wake(frames, recognizer, cfg, wake_words, tap_check=None,
     def resolve(text):
         nonlocal next_verify
         tokens = text.lower().split()
-        if _is_wake(tokens, peak):
+        if _is_wake(tokens, peak, speech_ms=voiced_frames*20):
             # Retain original audio: constrained KWS only knows the name;
             # command ASR must still hear "go home" in the same breath.
             return WakeResult(text, b"".join(audio))
@@ -544,11 +546,12 @@ def listen_for_wake(frames, recognizer, cfg, wake_words, tap_check=None,
                 partial = recognizer.partial().lower()
                 # Only strong names can wake early. Confusions still need a
                 # completed short utterance and the existing loudness gate.
-                if _is_wake(partial.split(), peak=peak, exact_only=True):
+                if _is_wake(partial.split(), peak=peak, exact_only=True,
+                            speech_ms=voiced_frames*20):
                     name = tuple(partial.split()[:2]) if partial.startswith("hey ") else partial.split()[0]
                     partial_count = partial_count + 1 if name == partial_candidate else 1
                     partial_candidate = name
-                    if partial_count >= 2:
+                    if partial_count >= 3:
                         print(f"[ear] WAKE via partial: '{partial}'", file=sys.stderr, flush=True)
                         return WakeResult(partial, b"".join(audio))
                 else:
