@@ -200,6 +200,17 @@ class VoiceLatencyTests(unittest.TestCase):
         text, _ = spark._listen_command(Mock(), Mock(), WakeResult("spark stop"))
         self.assertEqual(text, "stop")
 
+    def test_paused_okay_does_not_discard_followup_request(self):
+        spark = Spark.__new__(Spark)
+        spark.cfg = CFG
+        spark.whisper = None
+        rec, mic = Mock(), Mock()
+        rec.finish.side_effect = ["Okay.", "Set a timer"]
+        with patch("spark.ear.record_utterance", side_effect=[pcm(3000)*5, pcm(3000)*5]) as capture:
+            text, _ = spark._listen_command(mic, rec, timeout_s=12, followup=True)
+        self.assertEqual(text, "Set a timer")
+        self.assertEqual(capture.call_count, 2)
+
     def test_constrained_keyword_rejects_a_long_forced_spark(self):
         # A constrained decoder can force unrelated loud chatter to "spark";
         # only a short wake-sized utterance may authorize locally.
@@ -362,6 +373,35 @@ class VoiceLatencyTests(unittest.TestCase):
                 spark.voice_loop()
         self.assertEqual([c.kwargs["timeout_s"] for c in spark._listen_command.call_args_list], [6, 8])
         spark.body.wake_reaction.assert_called_once()
+        spark.body.speak.assert_not_called()
+
+    def test_short_signoff_closes_followup_without_reply_or_another_window(self):
+        from spark.__main__ import _followup_done
+        for text in ("Thanks!", "OK, thanks.", "Got it", "All set, Spark", "Thank you"):
+            self.assertTrue(_followup_done(text), text)
+        for text in ("thanks, set a timer", "got it, and what's the weather?",
+                     "all set for tomorrow", "okay", "ok"):
+            self.assertFalse(_followup_done(text), text)
+
+        spark = Spark.__new__(Spark)
+        spark.cfg = {**CFG, "conversation": {"follow_up_window_s": 12}}
+        spark.body = Mock(sleeping=False, has={k: True for k in ("helper", "touch", "tts", "sound")})
+        spark.body.speaking_recently.return_value = False
+        spark.talk_trigger = Mock()
+        spark.talk_trigger.is_set.return_value = False
+        spark._wait_for_wake = Mock(side_effect=[WakeResult("spark"), StopIteration])
+        spark._listen_command = Mock(side_effect=[("what time is it", b""), ("OK, thanks.", b"")])
+        spark.converse = Mock()
+        mic = Mock()
+        mic.__enter__ = Mock(return_value=mic)
+        mic.__exit__ = Mock(return_value=False)
+        with patch("spark.asr.Recognizer"), patch("spark.ear.MicStream", return_value=mic), \
+                patch("spark.__main__.threading.Thread"), patch("spark.__main__.sd_notify"):
+            with self.assertRaises(StopIteration):
+                spark.voice_loop()
+        self.assertEqual([c.kwargs["timeout_s"] for c in spark._listen_command.call_args_list], [6, 12])
+        spark.converse.assert_called_once_with("what time is it")
+        self.assertEqual(spark._wait_for_wake.call_count, 2)  # name needed again
         spark.body.speak.assert_not_called()
 
     def test_sleep_skips_followup_and_idle_until_name_or_tap(self):

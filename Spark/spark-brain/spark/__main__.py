@@ -38,6 +38,26 @@ _ASR_HALLUCINATIONS = {
 }
 _HALLUCINATION_MIN_PEAK = 2500  # 16-bit amplitude; ambient noise peaks ~1000
 
+# Only complete, short sign-offs close a follow-up. A request such as
+# "thanks, can you set a timer?" must still reach the command router.
+_FOLLOWUP_SIGNOFFS = {
+    "thanks", "thank you", "ok thanks", "okay thanks", "alright thanks",
+    "got it", "ok got it", "okay got it", "all set", "i am all set",
+    "that s all", "that is all", "that s it", "no thanks", "no thank you",
+    "bye", "goodbye",
+}
+
+
+def _followup_done(text):
+    words = re.findall(r"[a-z]+", text.casefold())
+    if words[:2] == ["hey", "spark"]:
+        words = words[2:]
+    elif words and words[0] in ("spark", "sparky"):
+        words = words[1:]
+    if words and words[-1] in ("spark", "sparky"):
+        words = words[:-1]
+    return " ".join(words) in _FOLLOWUP_SIGNOFFS
+
 
 def _pcm_peak(pcm):
     """Peak absolute amplitude of 16-bit LE mono PCM (fast, no numpy)."""
@@ -354,7 +374,8 @@ class Spark:
                     text, pcm = self._listen_command(
                         mic, recognizer, triggered_by_wake,
                         timeout_s=(follow_cfg.get("follow_up_window_s", 8) if in_followup
-                                   else wake_cfg.get("wait_timeout_s", 6.0)))
+                                   else wake_cfg.get("wait_timeout_s", 6.0)),
+                        followup=in_followup)
                 finally:
                     self.listening = False
                     self.body.react_enabled = True
@@ -383,6 +404,11 @@ class Spark:
                         self._misses = 0
                     continue
                 self._misses = 0
+
+                if in_followup and _followup_done(text):
+                    log("spark", f"follow-up closed: '{text}'")
+                    self.body.eyes("idle")
+                    continue  # next pass requires her name or a tap
 
                 log("spark", f"heard: '{text}'")
                 self.converse(text)
@@ -423,7 +449,7 @@ class Spark:
             return False
         return check
 
-    def _listen_command(self, mic, recognizer, wake=None, timeout_s=6.0):
+    def _listen_command(self, mic, recognizer, wake=None, timeout_s=6.0, followup=False):
         from .ear import CommandAudio, record_utterance, strip_wake_prefix
 
         if wake and not wake.prefix_pcm:
@@ -464,6 +490,12 @@ class Spark:
             # a name-only segment. Its queued command still deserves a decode.
             deadline += time.perf_counter() - started
             command = strip_wake_prefix(text, wake.text if wake else "")
+            # A paused "okay ... set a timer" may endpoint twice. Do not
+            # dismiss or answer the first segment and discard the second.
+            if followup and command.casefold().strip(" .,!?'") in ("ok", "okay"):
+                if time.monotonic() < deadline:
+                    continue
+                return "", b""
             if command or not text or time.monotonic() >= deadline:
                 return command, pcm
             # Early recognition may endpoint on just "Spark". Keep listening
