@@ -87,7 +87,7 @@
   },
   "moods": true,
   "conversation": {
-    "follow_up_window_s": 8,
+    "follow_up_window_s": 20,
     "follow_ups": 2
   }
 }
