@@ -43,12 +43,21 @@ class Roaming(Homing):
         from .dock_camera import DockCamera
         b = self.body
         self.deadline = time.monotonic()+45
+        # Boxed in too close to rotate (locate sweeps and moves both blocked):
+        # back clear of the proximity zone before anything else.
+        if getattr(b, "_roam_blocked_count", 0) >= 5:
+            b._roam_blocked_count = 3
+            result = b.drive_guarded(-40, speed=15, segment_mm=20, interlock=self.interlock)
+            if result != "ok":
+                return result
         radius = min(3000, max(300, b.cfg.get("idle", {}).get("roam_radius_mm", 3000)))
         bound = b._roam_distance_bound
         if bound is None or bound+80 >= radius:
             with DockCamera(self.camera_interrupted) as camera:
                 result, dock = self.locate(camera)
             if result != "found":
+                b._roam_blocked_count = (getattr(b, "_roam_blocked_count", 0) + 1
+                                         if result == "obstacle" else 0)
                 return result
             b._roam_distance_bound = math.hypot(dock.camera_x_mm, dock.camera_z_mm)+80
             if b._roam_distance_bound+80 >= radius:
@@ -63,11 +72,6 @@ class Roaming(Homing):
         if reason:
             return reason
         stuck = getattr(b, "_roam_blocked_count", 0)
-        if stuck >= 5:
-            # boxed in too close to even rotate: back clear of the proximity
-            # zone, then pick a fresh heading next tick
-            b._roam_blocked_count = 3
-            return b.drive_guarded(-40, speed=15, segment_mm=20, interlock=self.interlock)
         if random.random() < .4 or stuck >= 3:
             # repeated obstacles demand a decisive new heading, not a twitch
             turn = random.choice([-15, -10, 10, 15]) if stuck < 3 else random.choice([-45, -30, 30, 45])
