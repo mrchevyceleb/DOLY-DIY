@@ -47,7 +47,11 @@ class Roaming(Homing):
         # back clear of the proximity zone before anything else.
         if getattr(b, "_roam_blocked_count", 0) >= 5:
             b._roam_blocked_count = 3
-            result = b.drive_guarded(-40, speed=15, segment_mm=20, interlock=self.interlock)
+            self.reversing = True  # front ToF must not veto a backward escape
+            try:
+                result = b.drive_guarded(-40, speed=15, segment_mm=20, interlock=self.interlock)
+            finally:
+                self.reversing = False
             if result != "ok":
                 return result
         radius = min(3000, max(300, b.cfg.get("idle", {}).get("roam_radius_mm", 3000)))
