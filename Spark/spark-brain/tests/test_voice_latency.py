@@ -18,7 +18,7 @@ from spark.__main__ import Spark
 
 CFG = {"audio": {"input_device": "test", "sample_rate": 16000,
                  "silence_ms": 460, "max_utterance_ms": 5000,
-                 "start_rms": 900, "stop_rms": 500, "wake_weak_rms": 4000,
+                 "start_rms": 900, "stop_rms": 500, "wake_weak_rms": 3000,
                  "highpass_hz": 0}}
 
 
@@ -129,12 +129,12 @@ class VoiceLatencyTests(unittest.TestCase):
     def test_due_idle_action_waits_for_speech_but_tap_interrupts(self):
         rec = Mock()
         rec.feed.return_value = None
-        rec.partial.return_value = "park"
-        rec.finish.return_value = "park"
+        rec.partial.return_value = "spark"
+        rec.finish.return_value = "spark"
         idle = Mock(return_value=True)
         frames = [pcm(5000)]*20 + [pcm(300)]*50
         result = listen_for_wake(iter(frames), rec, CFG, ["spark"], idle_check=idle)
-        self.assertEqual(result.text, "park")
+        self.assertEqual(result.text, "spark")
         idle.assert_not_called()
         self.assertFalse(listen_for_wake(iter([pcm(300)]*60), rec, CFG, ["spark"], idle_check=idle))
         idle.assert_called_once()
@@ -223,25 +223,86 @@ class VoiceLatencyTests(unittest.TestCase):
         self.assertFalse(listen_for_wake(iter(frames), rec, CFG, ["spark"],
                                          noise_floor=lambda: 1000))
 
-    def test_loud_vosk_garble_of_the_name_wakes_locally(self):
-        # 'Spark!' spoken clearly but transcribed 'bark' — loud, lone word
+    def test_loud_vosk_garble_needs_independent_name_verification(self):
+        # 'Spark!' can decode as 'bark', but TV saying 'bar' can too.
         rec = Mock()
         rec.feed.return_value = None
         rec.partial.return_value = ""
         rec.finish.return_value = "bark"
         speech, room = pcm(5000), pcm(1000)
         frames = [room]*5 + [speech]*15 + [room]*40
+        self.assertFalse(listen_for_wake(iter(frames), rec, CFG, ["spark"],
+                                        noise_floor=lambda: 1000))
+        verify = Mock(return_value="Spark.")
         result = listen_for_wake(iter(frames), rec, CFG, ["spark"],
-                                 noise_floor=lambda: 1000)
-        self.assertTrue(result)
-        self.assertEqual(result.text, "bark")
-        # same garble too quiet stays asleep
-        rec2 = Mock()
-        rec2.feed.return_value = None
-        rec2.partial.return_value = ""
-        rec2.finish.return_value = "bark"
+                                 noise_floor=lambda: 1000, verify_wake=verify)
+        self.assertEqual(result.text, "Spark.")
+        # A quiet lookalike cannot even request the remote verifier.
+        verify.reset_mock()
         self.assertFalse(listen_for_wake(iter([room]*5 + [pcm(2000)]*15 + [room]*40),
-                                         rec2, CFG, ["spark"], noise_floor=lambda: 1000))
+                                         rec, CFG, ["spark"], noise_floor=lambda: 1000,
+                                         verify_wake=verify))
+        verify.assert_not_called()
+
+    def test_park_in_background_conversation_needs_actual_name_verification(self):
+        rec = Mock()
+        rec.feed.return_value = None
+        rec.partial.return_value = ""
+        verify = Mock(return_value="A park.")
+        room, speech = pcm(1000), pcm(5000)
+        frames = [room]*5 + [speech]*20 + [room]*40
+        rec.finish.return_value = "the park"
+        self.assertFalse(listen_for_wake(iter(frames), rec, CFG, ["spark"],
+                                        noise_floor=lambda: 1000, verify_wake=verify))
+        self.assertIn("the park", rec.begin.call_args.args[0])  # negative decoy, not a wake
+        rec.finish.return_value = "park"
+        for transcript in ("Park.", "Parks."):
+            verify.return_value = transcript
+            self.assertFalse(listen_for_wake(iter(frames), rec, CFG, ["spark"],
+                                            noise_floor=lambda: 1000, verify_wake=verify))
+        rec.finish.return_value = "bar"
+        verify.return_value = "Can you get a PR going?"
+        self.assertFalse(listen_for_wake(iter(frames), rec, CFG, ["spark"],
+                                        noise_floor=lambda: 1000, verify_wake=verify))
+        rec.finish.return_value = "a bar"
+        verify.return_value = "Spark."
+        verify.reset_mock()
+        self.assertFalse(listen_for_wake(iter([room]*5 + [pcm(2000)]*20 + [room]*40),
+                                         rec, CFG, ["spark"], noise_floor=lambda: 1000,
+                                         verify_wake=verify))
+        verify.assert_not_called()
+        rec.finish.return_value = "bar"
+        self.assertEqual(listen_for_wake(iter(frames), rec, CFG, ["spark"],
+                                         noise_floor=lambda: 1000, verify_wake=verify).text,
+                         "Spark.")
+
+    def test_long_exact_name_can_still_use_normal_volume_server_verification(self):
+        rec = Mock()
+        rec.feed.return_value = None
+        rec.partial.return_value = ""
+        rec.finish.return_value = "spark set a timer"
+        verify = Mock(return_value="Spark, set a timer.")
+        room, speech = pcm(1000), pcm(2000)  # below weak-word loudness gate
+        result = listen_for_wake(iter([room]*5 + [speech]*75 + [room]*40),
+                                 rec, CFG, ["spark"], noise_floor=lambda: 1000,
+                                 verify_wake=verify)
+        self.assertEqual(result.text, verify.return_value)
+
+    def test_rejected_segment_does_not_block_next_verified_name(self):
+        rec = Mock()
+        calls = [0]
+        def finalized(_):
+            calls[0] += 1
+            return {15: "noise", 30: "bark"}.get(calls[0])
+        rec.feed.side_effect = finalized
+        rec.partial.return_value = ""
+        verify = Mock(side_effect=["", "Spark."])
+        room, speech = pcm(1000), pcm(5000)
+        result = listen_for_wake(iter([room]*5 + [speech]*40 + [room]*40),
+                                 rec, CFG, ["spark"], noise_floor=lambda: 1000,
+                                 verify_wake=verify)
+        self.assertEqual(result.text, "Spark.")
+        self.assertEqual(verify.call_count, 2)
 
     def test_loud_parakeet_bart_still_wakes(self):
         rec = Mock()
@@ -254,6 +315,11 @@ class VoiceLatencyTests(unittest.TestCase):
         result = listen_for_wake(iter(frames), rec, CFG, ["spark"],
                                  noise_floor=lambda: 1000, verify_wake=verify)
         self.assertTrue(result)
+        self.assertEqual(result.text, verify.return_value)
+        rec.finish.return_value = "okay bark"
+        verify.return_value = "Hey Bart, can you hear me?"
+        result = listen_for_wake(iter(frames), rec, CFG, ["spark"],
+                                 noise_floor=lambda: 1000, verify_wake=verify)
         self.assertEqual(result.text, verify.return_value)
 
     def test_noisy_room_wake_endpoint_verifies_soundalike_and_keeps_full_command(self):

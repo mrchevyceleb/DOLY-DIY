@@ -389,9 +389,9 @@ def listen_for_wake(frames, recognizer, cfg, wake_words, tap_check=None,
     a = cfg["audio"]
     silence_limit = a["silence_ms"] // MicStream.FRAME_MS
     arm_rms = a.get("wake_arm_rms", 400)
-    # acoustic-confusion wake words ('clark', 'park', ...) only count when
-    # the utterance was LOUD — real wake attempts are near-field speech;
-    # TV/music/chatter whispering a lookalike word stays below this.
+    # Acoustic confusions are grammar decoys, NOT local authorization.
+    # Loud room chatter has already produced false wakes on 'the park'
+    # and 'bar'; only a separate ASR hearing her actual name may approve.
     weak_min_peak = a.get("wake_weak_rms", 1400)
     # Vosk-small's realistic transcription set for the spoken wake word.
     _WEAK = {"bar", "bars", "bark", "barks", "bart", "barkley",
@@ -413,30 +413,17 @@ def listen_for_wake(frames, recognizer, cfg, wake_words, tap_check=None,
     def _is_wake(tokens, peak=0, exact_only=False, speech_ms=0):
         if not tokens:
             return False
-        first = tokens[0]
-        pair = tuple(tokens[:2])
         short_enough = not speech_ms or speech_ms <= keyword_max_ms
-        exact = has_wake_name(" ".join(tokens), wake_words)
-        if exact and short_enough and peak >= keyword_min_peak:
-            return True
-        if exact_only or not short_enough:
-            return False
-        # acoustic confusions: 'clark'/'stark'/'the park' — accept only on
-        # SHORT utterances (a lone word = a wake attempt), so conversation
-        # mentioning them mid-sentence doesn't false-wake.
-        if not allow_weak or peak < weak_min_peak:
-            return False  # too quiet to be a real wake attempt
-        if (first in _WEAK or _near_wake(first, _HEADS)) and len(tokens) <= 2:
-            return True
-        if pair in {("the", "park"), ("a", "spark"), ("hey", "clark"),
-                    ("hey", "stark"), ("hey", "spa"), ("hey", "heart"),
-                    ("hey", "hart")} and len(tokens) <= 3:
-            return True
-        return False
+        return (has_wake_name(" ".join(tokens), wake_words)
+                and short_enough and peak >= keyword_min_peak)
 
     next_verify = 0.0
     vad = _speech_detector(cfg)
     energy = deque(maxlen=5)
+
+    def meaningful(tokens, articles=False):
+        fillers = {"ok", "okay", "hey"} | ({"a", "the"} if articles else set())
+        return next((word for word in tokens if word not in fillers), "")
 
     def resolve(text):
         nonlocal next_verify
@@ -448,7 +435,14 @@ def listen_for_wake(frames, recognizer, cfg, wake_words, tap_check=None,
         # Vosk sometimes drops Spark entirely ('or how much battery...').
         # Check real speech even when its local transcript is empty. Only
         # an explicit wake name from the original audio can authorize a turn.
-        if (verify_wake and voiced_frames >= 5 and peak >= a.get("start_rms", 900)
+        # Ambiguous local names need near-field loudness AND independent
+        # verification; never let the constrained decoder's 'bar'/'park'
+        # win merely because background conversation is loud.
+        head = meaningful(tokens, articles=True)
+        ambiguous = bool(head and not has_wake_name(text, wake_words)
+                         and (head in _WEAK or _near_wake(head, _HEADS)))
+        verify_floor = weak_min_peak if ambiguous else a.get("start_rms", 900)
+        if (verify_wake and voiced_frames >= 5 and peak >= verify_floor
                 and time.monotonic() >= next_verify):
             next_verify = time.monotonic() + 1
             check_started = time.monotonic()
@@ -459,15 +453,18 @@ def listen_for_wake(frames, recognizer, cfg, wake_words, tap_check=None,
             if verified:
                 if has_wake_name(verified, wake_words):
                     return WakeResult(verified)
-                # Parakeet itself garbles a loud name ('Bart, can you hear
-                # me?'); a near-match first word with real speech energy is
-                # still the name — quiet lookalikes keep needing the exact hit.
+                # Parakeet's known 'Bart' garble remains usable only when
+                # Vosk independently heard a rarer near-name. Common 'bar',
+                # 'park', 'mark' and 'dark' may never authorize fuzzily.
                 v_tokens = re.findall(r"[\w']+", verified.lower())
-                if v_tokens and v_tokens[0] in {"okay", "ok"}:
-                    v_tokens = v_tokens[1:]
-                if (v_tokens and _near_wake(v_tokens[0], _HEADS)
+                v_head = meaningful(v_tokens)
+                if (allow_weak and head in {"bart", "barkley", "bark"}
+                        and v_head in {"bart", "barkley"}
                         and peak >= a.get("wake_verify_fuzzy_rms", 4500)):
                     return WakeResult(verified)
+            # A rejected earlier segment must not suppress a name in the
+            # next completed segment inside the same one-second interval.
+            next_verify = 0.0
         return None
 
     recognizer.begin(wake_grammar)
