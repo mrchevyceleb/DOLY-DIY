@@ -902,7 +902,16 @@ class Body:
             return True
         # A full battery can taper to zero current. Ambiguous support must
         # also HOLD motion, never serve as permission to cross a plate lip.
-        if not self.has.get("edge") or len(self._edge_gaps()) >= 2:
+        gaps = set(self._edge_gaps())
+        # Only the dedicated, bounded side-escape may move with two gaps;
+        # all other actions remain immobilized. No bypass for diagonals.
+        recoverable_pair = gaps in ({"Front_Left", "Back_Left"},
+                                    {"Front_Right", "Back_Right"},
+                                    {"Front_Left", "Front_Right"},
+                                    {"Back_Left", "Back_Right"})
+        escape_owner = (self._escaping and getattr(self, "_escape_thread_id", None)
+                        == threading.get_ident())
+        if not self.has.get("edge") or (len(gaps) >= 2 and not (escape_owner and recoverable_pair)):
             return True
         return self.docked
 
@@ -1141,8 +1150,17 @@ class Body:
                     if self._leaving_home:
                         return  # bounded undock polls inline
                     if self.actuators_held():
-                        self.drive_stop()
-                        return
+                        gaps_now = set(self._edge_gaps())
+                        safe_retreat = (self._escaping
+                            and getattr(self, "_escape_generation", None) == self._hazard_gen
+                            and ((gaps_now == {"Front_Left", "Front_Right"} and direction == "backward")
+                                 or (gaps_now == {"Back_Left", "Back_Right"} and direction == "forward"))
+                            and self.refresh_power() is False
+                            and not self._power_fault and self._charging.healthy()
+                            and (self.battery_pct() or 0) > 3)
+                        if not safe_retreat:
+                            self.drive_stop()
+                            return
                     if self._drive.get_state() != self._drive.DriveState.Running:
                         return
                     gaps = self._edge_gaps()
@@ -1359,7 +1377,10 @@ class Body:
 
     # ----------------------------------------------------------------- drive
     def drive_distance(self, mm, speed=45):
-        self._roam_distance_bound = None  # ordinary/animation travel needs a new visual anchor
+        if not self._escaping:
+            self._roam_distance_bound = None  # ordinary travel loses the visual anchor
+        elif self._roam_distance_bound is not None:
+            self._roam_distance_bound += abs(mm)
         if not self.has.get("drive"):
             return False
         direction = "forward" if mm >= 0 else "backward"
@@ -1736,7 +1757,7 @@ class Body:
                                        "forward" if front else "backward")
             _log(f"dock departure: result={result} parked={self.docked}")
 
-    def reseat_probe(self):
+    def reseat_probe(self, force=False):
         """Dock profile (front-front gaps) with no electrical contact: one
         slow guarded reverse to seat the pins.
 
@@ -1749,7 +1770,8 @@ class Body:
                 or getattr(self, "_reseating", False)):
             return False
         now = time.monotonic()
-        if now < getattr(self, "_next_reseat_probe", 0):
+        if (now < getattr(self, "_next_forced_reseat_probe", 0) if force
+                else now < getattr(self, "_next_reseat_probe", 0)):
             return False
         if self.docked or self.refresh_power() is True:
             return True  # already seated
@@ -1764,6 +1786,8 @@ class Body:
         if pct is None or pct <= 2 or not self._charging.healthy():
             return False  # uncertain power stays held
         self._next_reseat_probe = now + 600  # consume the cadence only on a real attempt
+        if force:
+            self._next_forced_reseat_probe = now + 600
         stop = self.motion_stop_factory() if self.motion_stop_factory else (lambda: False)
         self._approach_stop.clear()
         self._reseating = True
@@ -1831,8 +1855,10 @@ class Body:
         if seated:
             _log("reseat probe: charge confirmed — seated")
         elif moved:
-            self._pose = None
-            self._roam_distance_bound = None
+            # An unconfirmed 25mm probe is not a pickup or a new anchor.
+            # Losing the distance bound here erased the homeward reserve.
+            if self._roam_distance_bound is not None:
+                self._roam_distance_bound += 25
             _log("reseat probe: no contact after seating move")
             if time.time() >= getattr(self, "_next_reseat_speak", 0):
                 self._next_reseat_speak = time.time() + 3600
@@ -1868,15 +1894,29 @@ class Body:
             return "busy"
         if not self.hw or not self.cfg.get("homing", {}).get("enabled", False):
             return "unknown"
-        # Edge-camped when asked to leave: back away from the lip first so
-        # the marker search may rotate. Escape refuses when boxed in; homing
-        # then reports the edge honestly instead of silently wedging.
-        gaps = self._edge_gaps()
-        if (any(g.startswith("Front") for g in gaps)
-                and not any(g.startswith("Back") for g in gaps)
-                and not self.actuators_held()):
-            _log("go_home: edge ahead — retreating before the search")
-            self._escape_edge()
+        pct = self.battery_pct()
+        if pct is None or pct <= 3:
+            return "power"
+        self._approach_stop.clear()  # fresh explicit return, including edge recovery
+        gaps = set(self._edge_gaps())
+        # The seated front-pair profile is also a possible real cliff. The
+        # 25mm reverse probe is safe in either case; only electrical contact
+        # counts as arrival. Don't wait for the idle probe's 10-minute timer.
+        front_pair = gaps == {"Front_Left", "Front_Right"}
+        if front_pair and self.reseat_probe(force=True):
+            return "arrived"
+        if front_pair and not self._edge_gaps():
+            # A 25mm probe clearing a REAL cliff is not enough clearance to
+            # safely sweep the corners during the camera search. Continue
+            # backing up with live rear-gap/power guards before any rotation.
+            result = self.drive_guarded(-60, speed=15, segment_mm=20,
+                interlock=lambda: "cancelled" if self._approach_stop.is_set() else None)
+            if result != "ok":
+                return "arrived" if self.is_on_dock() else "edge"
+        if self._edge_gaps():
+            _log("go_home: recovering from edge before marker search")
+            if not self._escape_edge():
+                return "edge"
         # An explicitly commanded return outvotes a stale directional latch:
         # live sensors read clear and every homing step re-checks real gaps,
         # so a genuine lip re-stops her immediately. The 60s quiet-hold is
@@ -2080,35 +2120,161 @@ class Body:
             self._roaming = False
             self.drive_stop()
 
+    def _escape_side_edge(self, side):
+        """Turn a side straddle inward in short center-pivot pulses.
+
+        A new gap event aborts the native drive immediately; never attempt
+        translation until the leading sensors are supported again.
+        """
+        original = {f"Front_{side}", f"Back_{side}"}
+        from .homing import angle_delta
+        generation = self._hazard_gen
+        self._escaping = True
+        self._escape_thread_id = threading.get_ident()
+        try:
+            for _ in range(5):
+                gaps = set(self._edge_gaps())
+                if gaps - original or self._hazard_gen != generation:
+                    return False
+                if not any(g.startswith("Front") for g in gaps):
+                    break
+                if (not self.has.get("drive") or not self.has.get("edge")
+                        or self.sleeping or not self._charging.healthy()
+                        or self.battery_pct() is None or self.battery_pct() <= 3
+                        or self.refresh_power() is not False):
+                    return False
+                before = self._imu_yaw
+                if before is None or time.monotonic()-self._imu_updated_at > .3:
+                    return False
+                # Positive SDK turns reduce yaw: right void -> left turn.
+                command = -12 if side == "Right" else 12
+                with self._power_lock:
+                    if set(self._edge_gaps()) - original or self._hazard_gen != generation:
+                        return False
+                    rc = self._drive.go_rotate(self._next_id(), command, True, 10, True, True)
+                    if rc is False or (rc is not None and rc < 0):
+                        return False
+                until = time.monotonic()+3
+                while time.monotonic() < until:
+                    if (self._hazard_gen != generation or set(self._edge_gaps()) - original
+                            or self._approach_stop.is_set() or self.sleeping):
+                        return False
+                    state = self._drive.get_state()
+                    if state == self._drive.DriveState.Error:
+                        return False
+                    if state == self._drive.DriveState.Completed:
+                        break
+                    time.sleep(.03)
+                else:
+                    return False
+                self.drive_stop()
+                delta = (angle_delta(self._imu_yaw, before)
+                         if self._imu_yaw is not None else 0)
+                if (time.monotonic()-self._imu_updated_at > .3
+                        or delta * (-command) < 2):
+                    return False
+                if self._roam_distance_bound is not None:
+                    self._roam_distance_bound += 15
+            else:
+                return False
+            # No forward gap: a short guarded move carries the unsupported
+            # rear corner inward. A new front gap or callback stops instantly.
+            if self._edge_gaps():
+                result = self.drive_guarded(40, speed=15, segment_mm=20,
+                    interlock=lambda: "edge" if self._hazard_gen != generation
+                    or any(g.startswith("Front") for g in self._edge_gaps()) else None)
+                if result != "ok":
+                    return False
+            if self._hazard_gen != generation or self._edge_gaps():
+                return False
+            with self._hazard_lock:
+                if self._hazard_gen == generation:
+                    self._edge_hazard = None
+                    self._hazard_clear_at = None
+                    self._hazard_airborne = False
+                    _log("escape_edge: side straddle cleared")
+                    return True
+            return False
+        finally:
+            self.drive_stop()
+            self._escaping = False
+            self._escape_thread_id = None
+
     def _escape_edge(self):
-        """Stuck facing a REAL cliff: back up slowly (rear preflight +
-        watchdog), then turn away from the gap side. Fires ONLY on a
-        confirmed current front gap — dock sensor noise, gap locks, and
-        unrelated motion interlocks all return False instead of moving."""
+        """Bounded retreat from an edge; ambiguous profiles remain held."""
         if self.is_on_dock():
             _log("escape_edge: docked — plate sensor noise is not a cliff")
             return False
         gaps = self._edge_gaps()
         _log(f"escape_edge: gaps={gaps}")
-        if len(gaps) >= 4:
-            _log("escape_edge: all-four void = airborne — refusing to move")
+        now = time.monotonic()
+        history = [t for t in getattr(self, "_edge_escape_attempts", []) if now-t < 180]
+        if len(history) >= 3:
+            _log("escape_edge: retry budget exhausted — waiting for help")
+            return False
+        self._edge_escape_attempts = history + [now]
+        profile = set(gaps)
+        if profile in ({"Front_Left", "Back_Left"},
+                       {"Front_Right", "Back_Right"}):
+            gen = self._hazard_gen
+            lock_left = getattr(self, "_gap_lock_until", 0)-time.time()
+            if lock_left > 0:
+                time.sleep(min(lock_left+.2, 4))
+            if self._hazard_gen != gen or set(self._edge_gaps()) != profile:
+                return False
+            return self._escape_side_edge("Left" if "Front_Left" in profile else "Right")
+        if profile == {"Back_Left", "Back_Right"}:
+            # Front is supported: a short forward step gets both rear
+            # sensors back over the table. A new gap/event cancels it.
+            gen = self._hazard_gen
+            lock_left = getattr(self, "_gap_lock_until", 0)-time.time()
+            if lock_left > 0:
+                time.sleep(min(lock_left+.2, 4))
+            if self._hazard_gen != gen or set(self._edge_gaps()) != profile:
+                return False
+            self._escaping = True
+            self._escape_generation = gen
+            self._escape_thread_id = threading.get_ident()
+            try:
+                result = self.drive_guarded(60, speed=15, segment_mm=20,
+                    interlock=lambda: "edge" if self._hazard_gen != gen
+                    or any(g.startswith("Front") for g in self._edge_gaps()) else None)
+                if result != "ok" or self._edge_gaps() or self._hazard_gen != gen:
+                    return False
+                with self._hazard_lock:
+                    if self._hazard_gen != gen:
+                        return False
+                    self._edge_hazard = None
+                    self._hazard_clear_at = None
+                    self._hazard_airborne = False
+                return True
+            finally:
+                self.drive_stop()
+                self._escaping = False
+                self._escape_thread_id = None
+                self._escape_generation = None
+        if len(profile) >= 3 or (any(g.startswith("Front") for g in gaps)
+                                  and any(g.startswith("Back") for g in gaps)):
+            _log("escape_edge: mixed/airborne gaps — refusing to move")
             return False
         front = [g for g in gaps if g.startswith("Front")]
         if not front:
             _log("escape_edge: no current front gap — staying put")
-            return False
-        if any(g.startswith("Back") for g in gaps):
-            _log("escape_edge: boxed in (front AND back gaps) — staying put")
             return False
         # The hazard latch stays SET for the whole escape — no window where
         # a blind forward command could slip in. The escaper's own drives
         # run under the _escaping exemption (the checks above PROVED
         # backward is clear). Cleared at the end ONLY if the edge is
         # verifiably gone; re-latched "forward" on any failure.
+        gen0 = getattr(self, "_hazard_gen", 0)
         lock_left = getattr(self, "_gap_lock_until", 0) - time.time()
         if lock_left > 0:
             time.sleep(min(lock_left + 0.2, 4.0))
+        if self._hazard_gen != gen0 or set(self._edge_gaps()) != profile:
+            return False
         self._escaping = True
+        self._escape_generation = gen0
+        self._escape_thread_id = threading.get_ident()
         try:
             if not self.drive_distance(-80, speed=20):
                 self._latch_hazard("forward")  # the front cliff is still there
@@ -2120,10 +2286,10 @@ class Body:
                 _log("escape_edge: retreat did not finish — staying put")
                 return False
             self.drive_stop()
-            still = [g for g in self._edge_gaps() if g.startswith("Front")]
-            if still:
+            still = self._edge_gaps()
+            if still or self._hazard_gen != gen0:
                 self._latch_hazard("forward")
-                _log(f"escape_edge: front gap persists after retreat ({still}) — not rotating")
+                _log(f"escape_edge: gap/event after retreat ({still}) — not rotating")
                 return False
             left = any(g.startswith("Front_Left") or g.endswith("Left") for g in gaps)
             right = any(g.startswith("Front_Right") or g.endswith("Right") for g in gaps)
@@ -2133,7 +2299,7 @@ class Body:
                 turn = 100
             else:
                 turn = 130  # full-front or unknown: big turn either way
-            if not self.drive_rotate(turn, speed=25):
+            if not self.drive_rotate(turn, speed=25, from_center=True):
                 self._latch_hazard("forward")
                 _log("escape_edge: rotation rejected — escape FAILED, staying put")
                 return False
@@ -2145,9 +2311,10 @@ class Body:
             self.drive_stop()
         finally:
             self._escaping = False
+            self._escape_thread_id = None
+            self._escape_generation = None
         # clear ONLY if nothing fresh latched during the escape drives:
         # sensor events race this path, so the generation counter decides
-        gen0 = getattr(self, "_hazard_gen", 0)
         front_after = [g for g in self._edge_gaps() if g.startswith("Front")]
         if front_after:
             self._latch_hazard("forward")

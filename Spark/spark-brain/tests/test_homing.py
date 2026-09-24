@@ -400,6 +400,88 @@ class HomingTests(unittest.TestCase):
             self.assertFalse(b.reseat_probe())
             b._drive.go_distance.assert_not_called()
 
+    def test_low_battery_does_not_skip_home_when_edge_holds_motors(self):
+        from spark.__main__ import Spark
+        spark = Spark.__new__(Spark)
+        spark.body = Mock(sleeping=False)
+        spark.body.battery_pct.return_value = 12
+        spark.body._return_margin_pct.return_value = 2
+        spark.body.is_on_dock.return_value = False
+        spark.body.actuators_held.return_value = True
+        spark.body.go_home.return_value = "edge"
+        with patch("spark.__main__.time.monotonic", return_value=100):
+            spark._low_battery_check({"low_battery_pct": 10})
+            spark._low_battery_check({"low_battery_pct": 10})
+        self.assertEqual(spark.body.go_home.call_count, 2)
+        spark.body.speak.assert_called_once()
+
+    def test_go_home_recovers_edge_before_search_and_fails_closed(self):
+        b, _ = self.rig()
+        b.hw = Mock()
+        b.cfg = {"homing": {"enabled": True}}
+        b.battery_pct.return_value = 16
+        b._edge_gaps.return_value = ["Front_Right", "Back_Right"]
+        b._escape_edge = Mock(return_value=False)
+        with patch("spark.homing.Homing") as homing:
+            self.assertEqual(b.go_home(), "edge")
+            b._escape_edge.assert_called_once()
+            homing.assert_not_called()
+
+    def test_failed_reseat_at_real_cliff_retreats_before_camera_search(self):
+        b, _ = self.rig()
+        b.hw = Mock()
+        b.cfg = {"homing": {"enabled": True, "attempts": 1}}
+        b.battery_pct.return_value = 16
+        b._edge_gaps.side_effect = [["Front_Left", "Front_Right"], [], [], []]
+        b.reseat_probe = Mock(return_value=False)
+        with patch("spark.homing.Homing") as homing:
+            homing.return_value.run.return_value = "arrived"
+            self.assertEqual(b.go_home(), "arrived")
+        b.reseat_probe.assert_called_once_with(force=True)
+        self.assertEqual(b.drive_guarded.call_args.args, (-60,))
+        b.drive_guarded.assert_called_once()
+
+    def test_oblique_heading_closes_in_bounded_verified_turns(self):
+        b, h = self.rig()
+        target = self.target(z=350)
+        target.dock_yaw_candidates_deg = [45]
+        camera = Mock()
+        camera.observe.side_effect = [target]*6 + [None]
+        headings = [0]
+        h.heading.side_effect = lambda: headings[0]
+        h.turn_to = Mock(side_effect=lambda target: headings.__setitem__(0, target) or "ok")
+        self.assertEqual(h.approach(camera), ("lost", None))
+        h.turn_to.assert_called_once_with(15)
+        b.drive_guarded.assert_not_called()
+
+    def test_entry_only_corrects_single_rear_corner(self):
+        from spark.dock_entry import DockEntry
+        b, _ = self.rig()
+        b._charging = Mock(charging=False)
+        b._charging.healthy.return_value = True
+        b._imu_yaw, b._imu_updated_at = 0, 100
+        b._edge_gaps.side_effect = [["Back_Right"], [], [], []]
+        b._docking_entry = None
+        b._wait_drive_idle = Mock(return_value=True)
+        def rotated(*args, **kwargs):
+            b._imu_yaw = -4
+            return True
+        b.drive_rotate = Mock(side_effect=rotated)
+        with patch("spark.dock_entry.time.monotonic", return_value=100):
+            entry = DockEntry(b, 220)
+            b._docking_entry = entry
+            entry.travelled = 80
+            entry.reason = "edge"
+            self.assertTrue(entry._correct())
+        self.assertEqual(entry.travelled, 50)
+        self.assertEqual(entry.corrections, 1)
+        self.assertIs(b._docking_entry, entry)
+        self.assertEqual(b.drive_rotate.call_args.args[0], 4)
+        b._edge_gaps.side_effect = None
+        b._edge_gaps.return_value = ["Back_Left", "Back_Right"]
+        entry.reason = "edge"
+        self.assertFalse(entry._correct())
+
     def test_roaming_does_not_translate_without_reacquiring_home(self):
         from spark.roaming import Roaming
         b, _ = self.rig()

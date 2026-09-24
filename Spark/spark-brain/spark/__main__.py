@@ -187,11 +187,20 @@ class Spark:
             if pct is None or pct > threshold:
                 return
             log("spark", f"battery {pct}% — checking return to charger")
-            result = "blocked" if self.body.actuators_held() else self.body.go_home()
-            if result == "unknown":
-                self.body.speak(f"My battery is at {pct} percent. Please carry me to my dock to charge.")
-            elif result not in ("arrived", "already", "cancelled", "busy"):
-                self.body.speak("I couldn't reach my charging contacts. Please help me onto the dock.")
+            # A same-side gap is why she needs recovery, not a reason to
+            # suppress the return. go_home owns the guarded edge escape.
+            if self.body.sleeping:
+                self.body.wake_up()
+            result = self.body.go_home()
+            if result not in ("arrived", "already", "cancelled", "busy"):
+                log("spark", f"low-battery return failed: {result}")
+                now = time.monotonic()
+                if now >= getattr(self, "_next_low_battery_speech", 0):
+                    self._next_low_battery_speech = now + 600
+                    if result == "unknown":
+                        self.body.speak(f"My battery is at {pct} percent. Please carry me to my dock to charge.")
+                    else:
+                        self.body.speak("I couldn't reach my charging contacts. Please help me onto the dock.")
         except Exception as e:
             log("spark", f"battery check failed: {e}")
 
@@ -239,14 +248,16 @@ class Spark:
                 if self.talk_trigger.is_set():
                     idle_action["act"] = "tap"
                     return True
+                now = time.time()
+                # Battery rescue must run even during quiet standby. The
+                # check wakes her only if she actually needs to go home.
+                if now >= next_battery:
+                    idle_action["act"] = "battery"
+                    return True
                 if self.body.sleeping:
                     return False
                 if self.body.take_charge_notice():
                     idle_action["act"] = "charge_notice"
-                    return True
-                now = time.time()
-                if now >= next_battery:
-                    idle_action["act"] = "battery"
                     return True
                 if (now >= next_wander and idle_cfg.get("roam_enabled", True)
                         and (not self.body.docked or self.body.dock_roam_ready())):

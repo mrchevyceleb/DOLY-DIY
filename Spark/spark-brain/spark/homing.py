@@ -291,13 +291,12 @@ class Homing:
             if plane is not None:
                 _log(f"measured dock plane heading={plane:.1f}")
                 return "ok", plane
-        # Close-range fallback: the plane never resolved, but a frontal
-        # marker whose own yaw candidates agree is adequate guidance —
-        # entry still refuses anything beyond five degrees off perpendicular.
+        # Fallback is guidance for reorientation, not docking permission.
+        # The final entry gate still insists on a fresh <=5-degree view.
         fallback = dock_yaw(observations)
-        if fallback is not None and abs(fallback) <= 10:
+        if fallback is not None and abs(fallback) <= 60:
             plane = start + fallback
-            _log(f"plane unresolved; frontal marker yaw fallback={plane:.1f}")
+            _log(f"plane unresolved; marker yaw fallback={plane:.1f}")
             return "ok", plane
         return "alignment", None
 
@@ -378,6 +377,28 @@ class Homing:
                     continue  # resolve the plane with the marker nearer image center
                 return "alignment", None
             self._drop_frames = 0
+            # Sidling alone preserves the old heading and can never satisfy
+            # the <=5-degree entry gate from a 50-degree oblique approach.
+            # Retreat to a safe visual standoff, then close the measured
+            # heading error in guarded 15-degree increments, re-observing
+            # the marker after EACH increment (never a blind 60-degree spin).
+            if abs(yaw) > 15:
+                plane_distance = z*math.cos(math.radians(yaw))-x*math.sin(math.radians(yaw))
+                if z < 320 or plane_distance < 175:
+                    if retreats >= 6 or travelled >= 1200:
+                        return "too_close", None
+                    result = self.body.drive_guarded(-40, speed=15, segment_mm=20,
+                                                     interlock=self.interlock)
+                    travelled += 40
+                    retreats += 1
+                    if result != "ok":
+                        return result, None
+                else:
+                    increment = max(-15, min(15, yaw))
+                    result = self.turn_to(heading+increment)
+                    if result != "ok":
+                        return result, None
+                continue
             # Keep the measured world orientation through small pose flips.
             # The dock is stationary; a fresh image still must support it.
             if 175 <= z <= 220 and abs(bearing) <= 2 and abs(yaw) <= 5:

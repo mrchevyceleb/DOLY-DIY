@@ -1,4 +1,4 @@
-"""Bounded reverse onto a recently observed dock; rear gaps always stop."""
+"""Bounded reverse onto a recently observed dock; rear gaps stop immediately."""
 import math
 import time
 
@@ -14,7 +14,80 @@ class DockEntry:
                                   else allow_front_after)
         self.deadline = time.monotonic()+15
         self.heading = body._imu_yaw
+        self.initial_heading = self.heading
         self.reason = None
+        self.corrections = 0
+
+    def _correct(self):
+        """Back off a one-corner ramp miss or small traction yaw drift.
+
+        Never drive into a gap. Front gaps, paired rear gaps, stale IMU,
+        contact uncertainty and repeated corrections remain hard stops.
+        """
+        b = self.body
+        gaps = set(b._edge_gaps())
+        drift = (angle_delta(b._imu_yaw, self.heading) if self.heading is not None
+                 and b._imu_yaw is not None else None)
+        rear = gaps in ({"Back_Left"}, {"Back_Right"})
+        if (self.corrections >= 2 or time.monotonic() >= self.deadline
+                or self.reason not in ("edge", "alignment")
+                or (self.reason == "edge" and not rear)
+                or (self.reason == "alignment" and (gaps or drift is None or abs(drift) > 10))
+                or b._imu_yaw is None or not math.isfinite(b._imu_yaw)
+                or time.monotonic()-b._imu_updated_at > .3
+                or b._charging.charging is not False or not b._charging.healthy()
+                or b._approach_stop.is_set() or b.sleeping or (self.stop and self.stop())):
+            return False
+        generation = b._hazard_gen
+        # Give the cliff sensor's emergency lock its full three seconds.
+        wait = getattr(b, "_gap_lock_until", 0)-time.time()
+        if wait > 0:
+            time.sleep(min(wait+.1, 3.5))
+        if b._hazard_gen != generation or time.monotonic() >= self.deadline:
+            return False
+        previous = b._docking_entry
+        b._docking_entry = None  # motion preflights still guard every move
+        try:
+            b.drive_stop()
+            if b.drive_guarded(30, speed=15, segment_mm=20,
+                    interlock=lambda: "cancelled" if b._approach_stop.is_set()
+                    or (self.stop and self.stop()) else
+                    "edge" if b._hazard_gen != generation else None) != "ok":
+                return False
+            b.drive_stop()
+            if b._edge_gaps() or b._hazard_gen != generation:
+                return False
+            # The former rear cliff latch protected the retreat; after the
+            # verified clear, retire it for ONE bounded pivot, generation-safe.
+            with b._hazard_lock:
+                if b._hazard_gen != generation:
+                    return False
+                b._edge_hazard = None
+                b._hazard_clear_at = None
+            if rear:
+                command = 4 if "Back_Right" in gaps else -4
+            else:
+                command = max(-6, min(6, drift))  # SDK command opposes IMU yaw
+            before = b._imu_yaw
+            if not b.drive_rotate(command, speed=10, from_center=True):
+                return False
+            if not b._wait_drive_idle(timeout=4, require_running=True):
+                return False
+            b.drive_stop()
+            if (b._edge_gaps() or b._hazard_gen != generation
+                    or b._imu_yaw is None or time.monotonic()-b._imu_updated_at > .3
+                    or abs(angle_delta(b._imu_yaw, before)) < 2
+                    or abs(angle_delta(b._imu_yaw, self.initial_heading)) > 8):
+                return False
+            self.heading = b._imu_yaw
+            self.travelled = max(0, self.travelled-30)
+            self.corrections += 1
+            self.reason = None
+            self.deadline = max(self.deadline, time.monotonic()+8)
+            return True
+        finally:
+            b.drive_stop()
+            b._docking_entry = previous
 
     def check(self):
         b = self.body
@@ -52,19 +125,39 @@ class DockEntry:
             while self.travelled < self.distance:
                 with b._power_lock:
                     b.refresh_power()
+                    reason = self.check()
+                    if reason:
+                        if reason not in ("edge", "alignment"):
+                            return reason
+                    else:
+                        step = min(20, self.distance-self.travelled)
+                if reason:
+                    if self._correct():
+                        continue
+                    return self.reason or reason
+                with b._power_lock:
                     if self.check():
                         return self.reason
-                    step = min(20, self.distance-self.travelled)
                     # Installed AiGoHome uses speed 10 for final entry.
                     rc = b._drive.go_distance(b._next_id(), step, 10, False, True)
                     if rc is False or (rc is not None and rc < 0):
                         return "not_started"
-                end, running, complete = time.monotonic()+1.5, False, False
+                end, running, complete, corrected = time.monotonic()+1.5, False, False, False
                 while time.monotonic() < end:
                     with b._power_lock:
                         b.refresh_power()
-                        if self.check():
-                            return self.reason
+                        reason = self.check()
+                    if reason:
+                        b.drive_stop()
+                        if reason in ("edge", "alignment"):
+                            # Native step may have travelled anywhere from 0
+                            # to 20mm before the stop. Credit its full bound
+                            # so corrections never exceed the entry limit.
+                            self.travelled += step
+                            if self._correct():
+                                corrected = True
+                                break
+                        return self.reason or reason
                     state = b._drive.get_state()
                     if state == b._drive.DriveState.Running:
                         running = True
@@ -76,6 +169,8 @@ class DockEntry:
                     time.sleep(.03)
                 if not b.drive_stop():
                     return "error"
+                if corrected:
+                    continue
                 if not complete:
                     return "timeout"
                 self.travelled += step
