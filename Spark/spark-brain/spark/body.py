@@ -1685,10 +1685,14 @@ class Body:
         result = "blocked"
         with self._power_lock:
             self.refresh_power()
-            # A rejected/cancelled voice departure must not be retried by
-            # idle roaming moments later. A new command may still retry.
-            self._dock_auto_attempted = True
             pct = self.battery_pct()
+            # A failed voice exit BELOW the automatic charge threshold must
+            # not consume the future full-charge roam. If already full,
+            # suppress an immediate automatic retry after a rejected command.
+            full_threshold = max(90, min(100, int(
+                self.cfg.get("idle", {}).get("roam_full_pct", 100))))
+            if pct is not None and pct >= full_threshold:
+                self._dock_auto_attempted = True
             if (not self.docked or self.sleeping or self._leaving_home
                     or not self.has.get("drive") or not self.has.get("edge")
                     or pct is None or pct <= 2 or not self._charging.healthy()

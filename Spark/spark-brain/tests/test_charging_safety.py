@@ -178,6 +178,24 @@ class ChargingSafetyTests(unittest.TestCase):
                     self.assertEqual(b._drive.go_distance.call_count, 1)
                 b._drive.abort.assert_called()
 
+    def test_failed_voice_exit_below_full_does_not_cancel_later_auto_roam(self):
+        b = self.body(pct=93, gaps=["Front_Left", "Front_Right"])
+        b.cfg["idle"]["roam_full_pct"] = 96
+        b.cfg["homing"] = {"enabled": True}
+        b._charging.healthy.return_value = True
+        b.refresh_power()
+        b._charging.sample.return_value = False  # contact drops during the command
+        self.assertFalse(b._undock())
+        self.assertEqual(b.last_departure_result, "edge")
+        self.assertFalse(b._dock_auto_attempted)
+        b.battery_pct = lambda: 96
+        b._charging.sample.return_value = True
+        with patch("spark.body.time.monotonic", return_value=100):
+            b.refresh_power()
+        with patch("spark.body.time.monotonic", return_value=161):
+            b.refresh_power()
+            self.assertTrue(b.dock_roam_ready())
+
     def test_full_charge_roaming_is_stable_once_per_visit_and_never_contact_loss(self):
         b = self.body(pct=100)
         b.cfg["homing"] = {"enabled": True}
