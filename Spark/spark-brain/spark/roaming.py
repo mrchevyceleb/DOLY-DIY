@@ -63,11 +63,17 @@ class Roaming(Homing):
         if reason:
             return reason
         stuck = getattr(b, "_roam_blocked_count", 0)
+        if stuck >= 5:
+            # boxed in too close to even rotate: back clear of the proximity
+            # zone, then pick a fresh heading next tick
+            b._roam_blocked_count = 3
+            return b.drive_guarded(-40, speed=15, segment_mm=20, interlock=self.interlock)
         if random.random() < .4 or stuck >= 3:
             # repeated obstacles demand a decisive new heading, not a twitch
-            b._roam_blocked_count = 0
             turn = random.choice([-15, -10, 10, 15]) if stuck < 3 else random.choice([-45, -30, 30, 45])
-            return b.rotate_guarded(turn, self.interlock)
+            result = b.rotate_guarded(turn, self.interlock)
+            b._roam_blocked_count = stuck + 1 if result == "obstacle" else 0
+            return result
         result = b.drive_guarded(60, speed=20, segment_mm=30, interlock=self.interlock)
         b._roam_blocked_count = stuck + 1 if result == "obstacle" else 0
         return result
