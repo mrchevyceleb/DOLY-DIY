@@ -345,6 +345,11 @@ class Spark:
                     continue
                 if idle_action["act"] == "battery":
                     self.body.reseat_probe()  # dock-face-without-contact self-heal
+                    if getattr(self.body, "last_reseat_result", None) == "no_contact":
+                        # Probe couldn't seat her. When the home frame proves
+                        # this ground is the dock's lip, retreat and run the
+                        # full visual return instead of dying beside the dock.
+                        self.body.recover_dock_face()
                     pct = self.body.battery_pct()
                     threshold = idle_cfg.get("low_battery_pct", 10) + self.body._return_margin_pct()
                     low = pct is not None and pct <= threshold

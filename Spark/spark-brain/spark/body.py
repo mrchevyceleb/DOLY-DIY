@@ -66,7 +66,9 @@ class Body:
         self._dock_auto_attempted = False
         self._next_auto_departure = 0.0
         self.last_departure_result = None
+        self.last_reseat_result = None
         self._dock_charge_seen_at = None
+        self._last_charging_at = None   # monotonic of last charging=True sample
         self._home_arrived = False
         self._edge_hazard = None   # None | "forward" | "backward" | "all":
         # latched after a real gap event — no blind drives TOWARD that edge
@@ -754,6 +756,10 @@ class Body:
             gaps = self._edge_gaps()
             if charging is True:
                 self._dock_charge_seen_at = now
+                if self.docked:
+                    # Confirmed-docked charging = electrical proof of where
+                    # the dock is; dock-face recovery trusts it for 30 min.
+                    self._last_charging_at = now
             elif charging is False or not self._charging.healthy():
                 self._dock_charge_seen_at = None
             if self.docked and (len(gaps) == 4 or not gaps):
@@ -1781,6 +1787,9 @@ class Body:
         reverse a retreat, so the direction is safe under both readings.
         Rear-edge guards stay armed; charge onset stops the move early.
         """
+        # Reset on EVERY call: a gate-skipped probe must not leave a stale
+        # failure feeding the idle escalation in __main__.
+        self.last_reseat_result = None
         if (self.sleeping or self._homing or self._roaming or self._leaving_home
                 or self._docking_entry is not None or self._approaching
                 or getattr(self, "_reseating", False)):
@@ -1807,8 +1816,8 @@ class Body:
         stop = self.motion_stop_factory() if self.motion_stop_factory else (lambda: False)
         self._approach_stop.clear()
         self._reseating = True
-        deadline = time.monotonic() + 15
-        seated, moved = False, False
+        deadline = time.monotonic() + 30
+        seated, moved, uncertain = False, False, False
 
         def _verify_seat():
             settle = time.monotonic() + 6
@@ -1821,7 +1830,11 @@ class Body:
         _log("reseat probe: dock profile without contact — seating")
         try:
             travelled = 0
-            while travelled < 25 and time.monotonic() < deadline:
+            # A slip can leave her more than one probe-length off the pins.
+            # Reverse is safe under both readings (seating at the dock,
+            # retreating from a cliff lip), so allow up to 75mm with a
+            # contact check after every 12mm step.
+            while travelled < 75 and time.monotonic() < deadline:
                 contact = False
                 with self._power_lock:
                     self.refresh_power()
@@ -1830,12 +1843,13 @@ class Body:
                             or any(g.startswith("Back") for g in self._edge_gaps())
                             or self._hazard_active("backward")):
                         break
-                    step = min(12, 25 - travelled)
+                    step = min(12, 75 - travelled)
                     rc = self._drive.go_distance(self._next_id(), step, 10, False, True)
                     if rc is False or (rc is not None and rc < 0):
                         break
                 moved = True
-                end, running, complete = time.monotonic() + 1.5, False, False
+                # 12mm at speed 10 takes ~1.2s; give the watchdog real margin.
+                end, running, complete = time.monotonic() + 2.5, False, False
                 while time.monotonic() < end:
                     with self._power_lock:
                         if self.refresh_power() is True:
@@ -1860,6 +1874,7 @@ class Body:
                     seated = _verify_seat()
                     break
                 if not complete:
+                    uncertain = True  # issued motion with unmeasured travel
                     break
                 travelled += step
                 if _verify_seat():
@@ -1870,16 +1885,125 @@ class Body:
             self._reseating = False
         if seated:
             _log("reseat probe: charge confirmed — seated")
+            self.last_reseat_result = "seated"
         elif moved:
-            # An unconfirmed 25mm probe is not a pickup or a new anchor.
-            # Losing the distance bound here erased the homeward reserve.
+            self.last_reseat_result = "no_contact"
+            # An unconfirmed probe is not a pickup or a new anchor, but its
+            # real travel still counts. Unmeasured partial travel instead
+            # invalidates the frame — a falsely trusted pose is worse
+            # than no pose (dock-face recovery keys off it).
+            if uncertain:
+                self._pose = None
+            elif travelled:
+                self._pose_update(dist_mm=-travelled)
             if self._roam_distance_bound is not None:
-                self._roam_distance_bound += 25
+                self._roam_distance_bound += travelled
             _log("reseat probe: no contact after seating move")
             if time.time() >= getattr(self, "_next_reseat_speak", 0):
                 self._next_reseat_speak = time.time() + 3600
                 self.speak("I'm sitting on my dock, but I'm not charging. Is my dock plugged in?")
         return seated
+
+    def recover_dock_face(self):
+        """Failed reseat at the dock face: retreat forward to open ground,
+        then run the full visual return — only when the live home frame
+        PROVES this ground is hers (anchored at this dock, still within
+        600mm of the origin, so she has driven this exact floor recently).
+
+        The front-pair profile alone is ambiguous (dock plate lip or a real
+        cliff edge). Three proofs disambiguate it: the pose frame (anchored
+        at this dock, still near the origin, heading still near 0 — a slip,
+        not wandering), AND electrical recency (CONFIRMED-docked charging
+        seen here within the last 30 minutes). Without them the old
+        behavior stands: stay held, keep probing, speak hourly.
+        """
+        import math
+        if (self.sleeping or self._homing or self._roaming or self._leaving_home
+                or self._docking_entry is not None or self._approaching
+                or getattr(self, "_reseating", False)):
+            return False
+        now = time.monotonic()
+        if now < getattr(self, "_next_dock_face_recovery", 0):
+            return False
+        if self.docked or self.refresh_power() is True:
+            return True  # seated by the probe or a nudge since
+        if set(self._edge_gaps()) != {"Front_Left", "Front_Right"}:
+            return False
+        pose = self._pose
+        if pose is None or math.hypot(pose[0], pose[1]) > 600:
+            return False  # no proof this ground is the dock's front lip
+        if abs(pose[2]) > 60:
+            return False  # slips leave her near heading 0; a turned pose
+                          # means wandering, not a slip — no proof of the lip
+        charge_at = getattr(self, "_last_charging_at", None)
+        if charge_at is None or now - charge_at > 1800:
+            return False  # no recent confirmed-docked charging proof
+        if (not self.has.get("drive") or not self.has.get("edge")
+                or time.time() < getattr(self, "_gap_lock_until", 0)):
+            return False
+        pct = self.battery_pct()
+        # Aligned with go_home's own <=3 refusal: retreating at 3% only to
+        # be refused the visual return would strand her beside the dock.
+        if pct is None or pct <= 3 or not self._charging.healthy():
+            return False
+        _log(f"dock-face recovery: pose={pose} — retreating to open ground")
+        DS = self._drive.DriveState
+        travelled, uncertain = 0, False
+        try:
+            # Raw steps like Departure's: the exact, unchanging front-pair
+            # profile is tolerated mid-step (it IS why she is pinned); gaps,
+            # contact and charging are polled DURING the step and any change
+            # stops the motors immediately.
+            while travelled < 60 and set(self._edge_gaps()) == {"Front_Left", "Front_Right"}:
+                with self._power_lock:
+                    self.refresh_power()
+                    if (self._charging.charging is True or self.sleeping
+                            or self._approach_stop.is_set()):
+                        break
+                    rc = self._drive.go_distance(self._next_id(), 20, 15, True, True)
+                    if rc is False or (rc is not None and rc < 0):
+                        break
+                end, running, complete = time.monotonic()+2.5, False, False
+                while time.monotonic() < end:
+                    with self._power_lock:
+                        if (self.refresh_power() is True
+                                or set(self._edge_gaps()) != {"Front_Left", "Front_Right"}
+                                or self.sleeping or self._approach_stop.is_set()):
+                            self.drive_stop()
+                            uncertain = True  # stopped mid-step: travel unmeasured
+                            break
+                    state = self._drive.get_state()
+                    if state == DS.Running:
+                        running = True
+                    elif state == DS.Completed and running:
+                        complete = True
+                        break
+                    elif state == DS.Error:
+                        uncertain = True
+                        break
+                    time.sleep(.03)
+                self.drive_stop()
+                if not complete:
+                    # Window expired or ended unconfirmed: the issued step
+                    # may have moved — the pose can no longer be trusted.
+                    uncertain = True
+                    break
+                travelled += 20
+                self._pose_update(dist_mm=20)
+        finally:
+            self.drive_stop()
+        if uncertain:
+            self._pose = None  # a falsely trusted frame is worse than none
+        gaps = set(self._edge_gaps())
+        if gaps:
+            # Failed or interrupted attempt: short backoff, not the long
+            # cooldown — a stranded low-battery robot must retry soon.
+            self._next_dock_face_recovery = time.monotonic() + 180
+            _log(f"dock-face recovery: still pinned after {travelled}mm gaps={gaps}")
+            return False
+        _log(f"dock-face recovery: clear after {travelled}mm — full visual return")
+        self._next_dock_face_recovery = time.monotonic() + 1800
+        return self.go_home() in ("arrived", "already")
 
     def dock_roam_ready(self):
         """One automatic departure per dock visit after a full minute at 100%."""
