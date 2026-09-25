@@ -15,7 +15,7 @@ _DOCK_FACE = {"Front_Left", "Front_Right"}
 
 
 class Departure:
-    def __init__(self, body, forward, gaps, stop, front_probe=False):
+    def __init__(self, body, forward, gaps, stop, front_probe=False, transient_ms=150):
         self.body = body
         self.forward = forward
         self.allowed_gaps = set(gaps)
@@ -25,6 +25,10 @@ class Departure:
         self.deadline = time.monotonic() + 10
         self.reason = None
         self.moved = False  # a commanded step completed this departure
+        # Motion rocks the sensors: a single dirty poll is flutter, not a
+        # cliff. A violation must persist this long before it is real.
+        self.transient_ms = transient_ms
+        self._violation_since = None
 
     def check(self):
         """Called with the body's power lock, including by its monitor."""
@@ -48,11 +52,22 @@ class Departure:
             # The seated dock reads exactly this front pair; driving out
             # over the base keeps reading it until open ground returns.
             dock_face = gaps == _DOCK_FACE and bool(self.allowed_gaps & _DOCK_FACE)
-            if (not b.has.get("edge") or not gaps <= allowed
-                    or (any(g.startswith(leading) for g in gaps) and not dock_face)):
-                self.reason = "edge"
-            else:
+            violated = (not b.has.get("edge") or not gaps <= allowed
+                        or (any(g.startswith(leading) for g in gaps) and not dock_face))
+            if not violated:
+                self._violation_since = None
                 self.allowed_gaps.intersection_update(gaps)
+            else:
+                if self.transient_ms <= 0:
+                    self.reason = "edge"  # debounce disabled (tests)
+                else:
+                    since = self._violation_since
+                    if since is None:
+                        self._violation_since = time.monotonic()
+                    elif (time.monotonic() - since) * 1000 >= self.transient_ms:
+                        self.reason = "edge"
+                    # transient flutter: judged again on the next poll; the
+                    # allowance stays untouched so recovery loses nothing
         return self.reason
 
     def trailing_gap(self, direction):

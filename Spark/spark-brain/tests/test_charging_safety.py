@@ -147,8 +147,10 @@ class ChargingSafetyTests(unittest.TestCase):
                         b._charging.sample.return_value = False
                         b._charging.charging = False
                         return "running"
-                    if failure != "stalled":
+                    if failure not in ("stalled", "edge"):
                         gaps.clear()
+                    # failure == "edge" keeps its Back gap: a real edge is
+                    # persistent, unlike one-poll sensor flutter
                     native["active"] = False
                     native["stopped"] = clock[0]
                     if failure == "motor_load_only":
@@ -242,7 +244,7 @@ class ChargingSafetyTests(unittest.TestCase):
             b = self.body(pct=80, gaps=gaps)
             b._leaving_home = True
             b._charging.healthy.return_value = True
-            d = Departure(b, forward, gaps, lambda: False)
+            d = Departure(b, forward, gaps, lambda: False, transient_ms=0)
             self.assertIsNone(d.check())
             gaps.clear()
             self.assertIsNone(d.check())
@@ -257,7 +259,7 @@ class ChargingSafetyTests(unittest.TestCase):
         b = self.body(pct=80, gaps=gaps)
         b._leaving_home = True
         b._charging.healthy.return_value = True
-        d = Departure(b, True, list(gaps), lambda: False)
+        d = Departure(b, True, list(gaps), lambda: False, transient_ms=0)
         d.front_probe = False                    # probe step already completed
         self.assertIsNone(d.check())             # post-probe verify tolerates the pair
         d.clearing = True
@@ -274,7 +276,7 @@ class ChargingSafetyTests(unittest.TestCase):
         b = self.body(pct=80, gaps=gaps)
         b._leaving_home = True
         b._charging.healthy.return_value = True
-        d = Departure(b, True, gaps, lambda: False)
+        d = Departure(b, True, gaps, lambda: False, transient_ms=0)
         d.clearing = True
         gaps.extend(["Back_Left", "Back_Right"])
         self.assertTrue(d.trailing_gap("Back"))
@@ -282,6 +284,24 @@ class ChargingSafetyTests(unittest.TestCase):
         gaps.append("Front_Left")
         self.assertFalse(d.trailing_gap("Back"))
         self.assertEqual(d.reason, "edge")
+
+    def test_departure_debounces_sensor_flutter(self):
+        # 2026-09-25: a one-poll Back reading as weight shifted aborted
+        # the authorized exit. Flutter is judged, not obeyed.
+        from spark.departure import Departure
+        gaps = ["Front_Left", "Front_Right"]
+        b = self.body(pct=80, gaps=gaps)
+        b._leaving_home = True
+        b._charging.healthy.return_value = True
+        d = Departure(b, True, list(gaps), lambda: False, transient_ms=10_000)
+        gaps.append("Back_Left")                 # single dirty poll
+        self.assertIsNone(d.check())             # not yet a verdict
+        self.assertEqual(d.allowed_gaps, {"Front_Left", "Front_Right"})  # allowance intact
+        gaps.remove("Back_Left")                 # flutter cleared
+        self.assertIsNone(d.check())
+        gaps.append("Back_Left")                 # persistent this time
+        d.transient_ms = 0
+        self.assertEqual(d.check(), "edge")
 
     def test_only_affirmative_movement_commands_can_leave_dock(self):
         from spark.router import Router

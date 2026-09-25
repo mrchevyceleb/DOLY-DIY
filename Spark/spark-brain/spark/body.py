@@ -477,6 +477,14 @@ class Body:
                 return  # bounded forward clearance, both front sensors supported
             if self._departure_gap_exempt(direction):
                 return  # authorized dock-face exit: front transitions are expected
+            if (self._leaving_home and self._departure is not None
+                    and dir_name != "All"):
+                # Sensor flutter while rolling off the base: the departure's
+                # debounced polled check owns the verdict. A single GPIO edge
+                # must not tear down the exit it authorized. Airborne (All)
+                # stays a full emergency.
+                _log(f"gap event during departure dir={dir_name} — polled check will judge")
+                return
             if self._leaving_home:
                 self._approach_stop.set()  # transient gaps cancel departure too
             if dir_name == "All" and self.docked:
