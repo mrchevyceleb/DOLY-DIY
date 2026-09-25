@@ -196,15 +196,53 @@ class GoveeLights:
             })
         return out
 
-    def _cloud_cmd(self, dev, command, data):
-        try:
-            self._cloud("PUT", "/devices/control",
-                        {"device": dev["device"], "model": dev["model"],
-                         "cmd": {"name": command, "value": data}})
+    # ---------------------------------------------------- command translation
+    # Canonical ops ("turn"/"brightness"/"color"/"temp"), two dialects: the
+    # LAN protocol packs color+temperature into one colorwc object; the
+    # CLOUD API uses separate color / colorTem commands with flat values.
+    @staticmethod
+    def _lan_payload(op, value):
+        if op == "turn":
+            return "turn", ("on" if value else "off")
+        if op == "brightness":
+            return "brightness", max(1, min(100, int(value)))
+        if op == "color":
+            return "colorwc", {"color": {"r": value[0], "g": value[1], "b": value[2]},
+                               "colorTemInKelvin": 0}
+        return "colorwc", {"color": {"r": 0, "g": 0, "b": 0},
+                           "colorTemInKelvin": max(2000, min(9000, int(value)))}
+
+    @staticmethod
+    def _cloud_payload(op, value):
+        if op == "turn":
+            return "turn", ("on" if value else "off")
+        if op == "brightness":
+            return "brightness", max(1, min(100, int(value)))
+        if op == "color":
+            return "color", {"r": value[0], "g": value[1], "b": value[2]}
+        return "colorTem", max(2000, min(9000, int(value)))
+
+    def _cmd(self, dev, op, value):
+        """Run one canonical op on one device over its transport."""
+        if dev.get("cloud") or not dev.get("ip"):
+            if not self.api_key:
+                return None
+            name, val = self._cloud_payload(op, value)
+            try:
+                self._cloud("PUT", "/devices/control",
+                            {"device": dev["device"], "model": dev["model"],
+                             "cmd": {"name": name, "value": val}})
+                return "ok"
+            except Exception as e:
+                _log(f"cloud control failed: {e}")
+                return None
+        name, val = self._lan_payload(op, value)
+        payload = {"msg": {"cmd": "dev", "device": dev["device"],
+                           "cmd": {"command": name, "data": val}}}
+        reply = self._send_recv(payload, dev.get("ip", ""))
+        if reply and reply.get("msg", {}).get("code") == 300:
             return "ok"
-        except Exception as e:
-            _log(f"cloud control failed: {e}")
-            return None
+        return None
 
     # -------------------------------------------------------------- api
     def devices(self):
@@ -215,7 +253,14 @@ class GoveeLights:
         if devs:
             return devs
         if self.api_key:
-            return self._cloud_devices()
+            if not self._devices or time.time() - self._last_scan >= 300:
+                cloud = self._cloud_devices()
+                if cloud:
+                    self._devices = cloud
+                    self._last_scan = time.time()
+                    self._save_cache()
+                    _log(f"cloud: {len(cloud)} device(s)")
+            return self._devices
         return []
 
     def _targets(self, label):
@@ -233,17 +278,13 @@ class GoveeLights:
             if not devs:
                 return ("none", "I can't find your Govee lights right now.")
             for dev in devs:
-                if dev.get("cloud") or not dev.get("ip"):
-                    if not self.api_key or self._cloud_cmd(dev, command, data) != "ok":
-                        return ("error", "I couldn't reach your lights just then.")
-                elif self._lan_cmd(dev, command, data) != "ok":
-                    if not (self.api_key and self._cloud_cmd(dev, command, data) == "ok"):
-                        return ("error", "I couldn't reach your lights just then.")
+                if self._cmd(dev, command, data) != "ok":
+                    return ("error", "I couldn't reach your lights just then.")
             return ("ok", "")
 
     # speech-facing -------------------------------------------------------
     def turn(self, on, label="all"):
-        state, why = self._apply("turn", "on" if on else "off", label)
+        state, why = self._apply("turn", bool(on), label)
         if state == "none" or state == "error":
             return why
         return "Lights on!" if on else "Lights off."
@@ -259,9 +300,7 @@ class GoveeLights:
         rgb = color_rgb(name) if isinstance(name, str) else name
         if not rgb:
             return "Hmm, I don't know that color."
-        state, why = self._apply(
-            "colorwc", {"color": {"r": rgb[0], "g": rgb[1], "b": rgb[2]},
-                        "colorTemInKelvin": 0}, label)
+        state, why = self._apply("color", rgb, label)
         if state == "none" or state == "error":
             return why
         n = (name if isinstance(name, str) else "that color").replace("_", " ").lower()
@@ -269,9 +308,7 @@ class GoveeLights:
 
     def color_temp(self, kelvin, label="all"):
         kelvin = max(2000, min(9000, int(kelvin)))
-        state, why = self._apply(
-            "colorwc", {"color": {"r": 0, "g": 0, "b": 0},
-                        "colorTemInKelvin": kelvin}, label)
+        state, why = self._apply("temp", kelvin, label)
         if state == "none" or state == "error":
             return why
         return "Warmer light." if kelvin < 4000 else "Cooler light."
