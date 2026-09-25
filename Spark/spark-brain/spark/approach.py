@@ -56,7 +56,9 @@ class Approach:
         if time.monotonic() >= self.deadline:
             return "limit"
         if b.actuators_held():
-            return "docked" if b.docked else "power"
+            if b.docked:
+                return "docked"
+            return "edge" if b._edge_gaps() else "power"
         if b.battery_pct() is None or b.battery_pct() <= 10:
             return "power"
         if b._edge_gaps() or b._hazard_active("forward") or b._hazard_active("backward"):

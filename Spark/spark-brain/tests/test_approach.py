@@ -153,6 +153,24 @@ class ApproachTests(unittest.TestCase):
         self.assertEqual(b._drive.free_drive.call_count, 2)
         b._pose_update.assert_not_called()
 
+    def test_edge_hold_reports_edge_not_power(self):
+        # two front gaps on a table: the refusal must blame the edge,
+        # not claim she needs to charge (regression: 2026-09-25 table test)
+        b = Body({}, hw=False)
+        b.hw = True
+        b.has["drive"] = True
+        b.has["edge"] = True
+        b.docked = False
+        b.actuators_held = Mock(return_value=True)
+        b._edge_gaps = Mock(return_value=["Front_Left", "Front_Right"])
+        with patch("spark.person_vision.PersonCamera") as camera:
+            self.assertEqual(b.come_here(), "edge")
+            camera.assert_not_called()
+        b._edge_gaps = Mock(return_value=[])
+        with patch("spark.person_vision.PersonCamera") as camera:
+            self.assertEqual(b.come_here(), "power")
+            camera.assert_not_called()
+
     def test_voice_stop_and_docked_command_never_open_camera(self):
         b = Body({}, hw=False)
         b.hw = True

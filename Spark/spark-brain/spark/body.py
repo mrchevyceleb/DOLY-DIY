@@ -1626,7 +1626,11 @@ class Body:
         if not self.hw or not self.has.get("drive"):
             return "unavailable"
         if self.actuators_held():
-            return "docked" if self.docked else "power"
+            if self.docked:
+                return "docked"
+            # two+ gaps hold the motors: that is an edge situation, not a
+            # charging one — never blame the battery for a cliff.
+            return "edge" if (self.has.get("edge") and self._edge_gaps()) else "power"
         if self.battery_pct() is None or self.battery_pct() <= 10:
             return "power"
         from .approach import Approach
