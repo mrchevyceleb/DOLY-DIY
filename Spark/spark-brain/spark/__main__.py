@@ -669,6 +669,7 @@ class Spark:
             "\n\n[Spoken reply: be warm and respectful; no insults, blame, threats, or sarcasm. "
             + ("Up to six concise sentences." if detailed else "One or two short sentences, at most 35 words.")
             + " Answer only what was asked. Never claim an action happened unless live state confirms it.]"
+            + " Reply in English only, whatever language the user text seems to be."
             + web_offer)
         reply_parts = []
         started = time.perf_counter()

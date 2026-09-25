@@ -637,10 +637,16 @@ class Router:
         alerts = self.cfg.get("alerts", {}) or {}
         max_s = max(30, min(int(alerts.get("celebrate_max_s", 600)), 3600))
         party_lights = alerts.get("party_lights", True)
+        sounds = self.cfg.get("sounds", {}) or {}
+        music = sounds.get("dance_music")
+        sfx_map = sounds.get("sfx_map", {}) or {}
+        cheers = [c for c in (sfx_map.get("collect"), sfx_map.get("pet"),
+                              sfx_map.get("click")) if c]
         try:
             b.eyes("speaking")
             b.speak(line)
             started = time.time()
+            last_music = 0.0
             cycle = 0
             while not stop.is_set() and time.time() - started < max_s:
                 pct = b.battery_pct()
@@ -653,11 +659,26 @@ class Router:
                         self.govee.color(_PARTY_COLORS[cycle % len(_PARTY_COLORS)])
                     except Exception:
                         pass
-                # her body: full dance when free, arms-only when held
+                # her body: full dance (with its music) when free; when held,
+                # arms-only boogie plus the dance track and cheering sfx
                 try:
                     if not (getattr(b, "docked", False) or b.actuators_held()):
                         b.dance()
                     else:
+                        # Music in BURSTS: play the track, then a quiet gap
+                        # at least as long as the track. Her speaker deafens
+                        # her own wake listener (no echo cancellation), so
+                        # the gaps are when Matt's "stop" can reach her.
+                        dur = 12.0
+                        try:
+                            dur = b._wav_duration(music) or 12.0
+                        except Exception:
+                            pass
+                        if music and time.time() - last_music >= dur + 6:
+                            last_music = time.time()
+                            b.play_sfx(music)      # deferred: main loop plays it
+                        elif cheers and cycle % 2 == 1 and time.time() - last_music >= dur + 3:
+                            b.play_sfx(cheers[(cycle // 2) % len(cheers)])
                         b.arms_party()
                 except Exception:
                     try:

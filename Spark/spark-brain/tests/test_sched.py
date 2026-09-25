@@ -170,12 +170,16 @@ class CorrectionTests(unittest.TestCase):
 class CelebrationTests(unittest.TestCase):
     def _router(self):
         r = _router()
-        r.cfg = {"state_dir": None, "alerts": {"celebrate": True,
-                                               "celebrate_max_s": 1,
-                                               "party_lights": False}}
+        r.cfg = {"state_dir": None,
+                 "alerts": {"celebrate": True, "celebrate_max_s": 1,
+                            "party_lights": False},
+                 "sounds": {"dance_music": "/sounds/salsa.wav",
+                            "sfx_map": {"collect": "/sfx/collect.wav",
+                                        "pet": "/sfx/buff.wav"}}}
         r.body.actuators_held = Mock(return_value=True)
         r.body.docked = False
         r.body.battery_pct = Mock(return_value=80)
+        r.body._wav_duration = Mock(return_value=12.0)
         return r
 
     def test_timer_fire_celebrates_until_stopped(self):
@@ -191,6 +195,8 @@ class CelebrationTests(unittest.TestCase):
         self.assertTrue(any("celebrate" in str(x).lower() for x in spoken))
         r.body.arms_party.assert_called()
         r.body.dance.assert_not_called()          # actuators held -> arms only
+        played = [c[0][0] for c in r.body.play_sfx.call_args_list]
+        self.assertIn("/sounds/salsa.wav", played)   # music joins the party
 
     def test_any_utterance_ends_the_party(self):
         r = self._router()
