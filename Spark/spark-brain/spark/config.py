@@ -25,6 +25,12 @@ _DEFAULTS = {
     "asr": {"model_path": "/opt/spark/vosk-model-small-en-us-0.15", "sample_rate": 16000},
     "tts": {"voice_model": 1, "volume": 1},
     "location": {"lat": None, "lon": None},
+    "web": {
+        "enabled": True,       # brain-triggered SEARCH/READ web tools
+        "max_hops": 2,         # tool calls per reply (search, then read)
+        "page_max_chars": 3500,
+        "page_timeout_s": 6,
+    },
     "state_dir": "/opt/spark/state",
 }
 

@@ -175,6 +175,14 @@ running with `qwen/qwen3.6-35b-a3b` loaded, context 8192, TTL off.
   for an explanation allow six sentences / 120 words. The stream closes at
   the limit so long answers do not delay the next listening window.
 - **'Search for...' / 'look up...'** -> web search -> brain answers from fresh results.
+- **Internet on demand** -> the brain itself decides when it needs the web. Any
+  free-speech reply may start with `SEARCH: <query>` (or `READ: <url>` to open a
+  page from earlier results); the stream is cut, the tool runs while she says
+  "Let me look that up.", and she re-answers with the results injected as
+  untrusted context. Her system prompt carries the current date/time so she
+  can tell stale knowledge from fresh questions. Zero added latency on turns
+  that don't need the web; at most `web.max_hops` (default 2) tool calls per
+  reply. `web.enabled: false` in config restores the purely-local brain.
 - Moria unreachable -> she says so, **stock commands still work**.
 
 The animation interpreter reads the installed namespace-qualified XML, obeys
@@ -193,7 +201,7 @@ resumes after playback; voice interruption during a routine is not implemented.
 | `config.json` | endpoints, model, VAD thresholds, voice + FX, roam/battery |
 | `spark/brain.py` | LM Studio streaming client + fallback model |
 | `spark/router.py` | stock-command router + voice switching + weather/timer + web search |
-| `spark/search.py` | DuckDuckGo web search (ddgs pkg + HTML fallback) |
+| `spark/search.py` | DuckDuckGo web search (ddgs pkg + HTML fallback), page fetcher, SEARCH/READ tool-call markers |
 | `spark/commands.py` | parity table — extend from the Doly app's 'Say' list |
 | `spark/body.py` | guarded Doly SDK wrappers (edges, homing, wander, TTS path) |
 | `spark/dock_vision.py` | read-only stock dock marker and camera pose diagnostic |
@@ -216,6 +224,8 @@ resumes after playback; voice interruption during a routine is not implemented.
   dock observation, including a travel margin; it is not a room map. The dock
   must remain visible from the same surface. Pickup invalidates the bound.
 - Add stock commands -> append to `COMMANDS` in `spark/commands.py`.
+- Web access -> `web.enabled`, `web.max_hops` (tool calls per reply),
+  `web.page_max_chars` / `web.page_timeout_s` for `READ:` page fetches.
 
 ## Dock calibration progress
 

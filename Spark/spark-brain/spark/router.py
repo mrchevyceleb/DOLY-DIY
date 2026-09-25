@@ -484,7 +484,8 @@ class Router:
         _log(f"search '{query}': {len(results)} results")
         context = websearch.context_block(query, results)
         if self.llm_reply is not None:
-            self.llm_reply(raw_text, extra_context=context)
+            # results already fetched; one READ hop so she can open a page
+            self.llm_reply(raw_text, extra_context=context, web_hops=1)
         else:
             for r in results[:2]:
                 self.body.speak(f"{r['title']}. {r['snippet']}")

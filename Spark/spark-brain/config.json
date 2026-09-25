@@ -50,6 +50,12 @@
     "lat": null,
     "lon": null
   },
+  "web": {
+    "enabled": true,
+    "max_hops": 2,
+    "page_max_chars": 3500,
+    "page_timeout_s": 6
+  },
   "state_dir": "/opt/spark/state",
   "edge": {
     "gap_gpio_state": "Low",
