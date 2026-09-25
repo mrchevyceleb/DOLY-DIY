@@ -17,6 +17,7 @@ import urllib.request
 from . import commands as cmds
 from . import search as websearch
 from .govee import GoveeLights
+from .sched import AlarmClock, fmt_clock, next_occurrence
 
 
 def _log(msg):
@@ -45,6 +46,15 @@ _GOVEE_RE = re.compile(r"\b(?:govee|lights?)\b", re.IGNORECASE)
 _HERS_LIGHTS_RE = re.compile(r"\byour\s+(?:lights?|leds?)\b", re.IGNORECASE)
 _GOVEE_OFF_RE = re.compile(r"\b(?:turn\s+off|switch\s+off|shut\s+off|lights?\s+off|kill|blackout)\b", re.I)
 _GOVEE_ON_RE = re.compile(r"\b(?:turn\s+on|switch\s+on|lights?\s+on|put\s+on|fire\s+up)\b", re.I)
+
+# alarms / timers / reminders — absolute and relative scheduling
+_ALARM_WORD_RE = re.compile(r"\balarms?\b|\bwake me\b", re.I)
+_ALARM_CANCEL_RE = re.compile(r"\b(?:cancel|clear|stop|kill|delete|forget)\b[^.]*\balarms?", re.I)
+_ALARM_QUERY_RE = re.compile(r"\b(?:what|which|when|how many)\b[^.]*\balarms?|\balarms?\b[^.]*\b(?:status|set|do i have)\b", re.I)
+_TIMER_CANCEL_RE = re.compile(r"\b(?:cancel|clear|stop|kill|delete|forget)\b[^.]*\btimer|\btimer\b[^.]*\b(?:off|cancel)\b", re.I)
+_TIMER_QUERY_RE = re.compile(r"\b(?:how much|how long|time left|status)\b[^.]*\btimer|\btimer\b[^.]*\bleft\b", re.I)
+_REMINDER_RE = re.compile(r"\bremind me\b", re.I)
+_REMINDER_PARSE_RE = re.compile(r"remind me\s+(?:to\s+|about\s+|that\s+)?(.+?)\s+(?:in|after)\s+(.+)$", re.I)
 
 EDGE_REFUSAL = ("I can't drive here — I'm either on my dock or too close to an edge. "
                 "Put me somewhere with room and ask again!")
@@ -102,6 +112,11 @@ class Router:
         except Exception as e:
             _log(f"govee unavailable: {e}")
             self.govee = None
+        try:
+            self.alarms = AlarmClock(cfg, self._scheduled_fire)
+        except Exception as e:
+            _log(f"alarm clock unavailable: {e}")
+            self.alarms = None
         self.llm_reply = None  # set by Spark: streamed brain reply w/ context
         self.last_motion_result = None
         self._last_motion_at = 0
@@ -129,6 +144,24 @@ class Router:
         if _SEARCH_INTENT.search(raw_text):
             self._web_search(raw_text)
             return True
+
+        # alarms, timers, reminders — local scheduling before anything fuzzy
+        low = text.lower()
+        alarms = getattr(self, "alarms", None)
+        if alarms is not None:
+            if _REMINDER_RE.search(low):
+                return self._set_reminder(text)
+            if _TIMER_CANCEL_RE.search(low):
+                n = alarms.cancel("timer")
+                self.body.speak("Timer cancelled." if n else "You don't have a timer running.")
+                return True
+            if _TIMER_QUERY_RE.search(low):
+                left = alarms.remaining("timer")
+                self.body.speak(f"{alarms._human(left)} left on your timer." if left is not None
+                                else "You don't have a timer running.")
+                return True
+            if _ALARM_WORD_RE.search(low):
+                return self._alarms(text)
 
         # Govee room lights: instant local control, checked before her own LEDs
         low = text.lower()
@@ -287,7 +320,10 @@ class Router:
             if not secs:
                 b.speak("How long should I set it for?")
                 return True
-            self._start_timer(secs)
+            if self.alarms is not None:
+                self.alarms.add_timer(secs)
+            else:
+                self._start_timer(secs)
             b.speak(self._describe_timer(secs) + ". I'm on it.")
             return True
 
@@ -487,7 +523,63 @@ class Router:
         except Exception as e:
             _log(f"voice persist failed (live switch still holds): {e}")
 
-    # ----------------------------------------------------------------- timer
+    # ---------------------------------------------------------------- sched
+    def _scheduled_fire(self, kind, label):
+        """Alarm/timer/reminder went off — speak it (runs on its own thread)."""
+        b = self.body
+        b.eyes("thinking")
+        if kind == "alarm":
+            try:
+                sfx = (self.cfg.get("sounds", {}).get("sfx_map", {}) or {}).get("alarm")
+                if sfx:
+                    b.play_sfx(sfx)
+            except Exception:
+                pass
+            b.speak(f"Alarm! {label or 'Time to get moving!'}")
+        elif kind == "reminder":
+            b.speak(f"Reminder: {label or 'time is up'}!")
+        else:
+            b.speak(f"Time's up!{(' ' + label) if label else ''}")
+        b.eyes("idle")
+
+    def _alarms(self, text):
+        """Set / cancel / query absolute-time alarms."""
+        b = self.body
+        if _ALARM_CANCEL_RE.search(text):
+            n = self.alarms.cancel("alarm")
+            b.speak("Alarm cancelled." if n else "You don't have any alarms set.")
+            return True
+        if _ALARM_QUERY_RE.search(text):
+            lines = [l for l in self.alarms.status_lines() if l.startswith("alarm")]
+            b.speak("You have " + "; ".join(lines) + "." if lines
+                    else "You don't have any alarms set.")
+            return True
+        parsed = cmds.parse_clock_time(text)
+        if not parsed:
+            b.speak("For what time should I set the alarm?")
+            return True
+        hour, minute, mer = parsed
+        when = next_occurrence(hour, minute, mer)
+        if when is None:
+            b.speak("I don't think that's a valid time.")
+            return True
+        self.alarms.add_alarm(when.timestamp(), label=fmt_clock(when.hour, when.minute))
+        b.speak(f"Alarm set for {fmt_clock(when.hour, when.minute)}.")
+        return True
+
+    def _set_reminder(self, text):
+        """'remind me to X in N minutes' -> labeled timer."""
+        m = _REMINDER_PARSE_RE.search(text)
+        if not m or not cmds.parse_timer(m.group(2)):
+            self.body.speak("When should I remind you?")
+            return True
+        label = m.group(1).strip().strip(".,!")
+        secs = cmds.parse_timer(m.group(2))
+        self.alarms.add_timer(secs, label=label, kind="reminder")
+        self.body.speak(f"Okay — I'll remind you to {label} in {self._describe_timer(secs).lower()}.")
+        return True
+
+    # --------------------------------------------------------------- timer
     def _start_timer(self, secs):
         t = threading.Timer(secs, self._timer_done, args=[secs])
         t.daemon = True

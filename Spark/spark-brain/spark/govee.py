@@ -1,13 +1,18 @@
 """Govee smart-light control — local LAN first, cloud fallback.
 
 LAN (no key, sub-second): UDP JSON to the light's :4003, replies to our
-:4001. Requires "LAN Control" enabled per device in the Govee Home app
-and the device on the same (non-isolated) WiFi.
+:4001. Only newer WiFi models support this (the app shows a "LAN
+Control" toggle on them).
 
-Cloud (api.govee.com, needs `govee.api_key` from the Govee Home app:
-Me -> Apply for API Key) covers WiFi devices regardless of the LAN
-toggle, at ~1s latency, and is used automatically when LAN discovery
-finds nothing or a LAN command goes unanswered.
+Cloud (2026 openapi: openapi.api.govee.com/router/api/v1) covers every
+WiFi device on the account — including models with no LAN support —
+when `govee.api_key` is set (Govee Home app: Me -> Apply for API Key;
+kept in the gitignored config.local.json on the robot). ~1s latency.
+
+Commands are canonical ops (turn/brightness/color/temp) translated per
+transport; cloud control is gated on each device's reported
+capabilities, and plain "lights" phrasing targets only light-type
+devices (the Office Heater answers only when named).
 
 Never raises; every call returns a human-speakable result string.
 """
@@ -17,11 +22,12 @@ import sys
 import threading
 import time
 import urllib.request
+import uuid
 
 _LISTEN_PORT = 4001   # devices reply here
 _DEV_PORT = 4003      # devices listen here
 _UDP_TIMEOUT = 1.2
-_CLOUD = "https://api.govee.com/v1"
+_CLOUD = "https://openapi.api.govee.com/router/api/v1"
 
 # cmds.COLORS names -> RGB (Govee uses 0-255)
 _RGB = {
@@ -47,6 +53,9 @@ def color_rgb(name):
 class GoveeLights:
     """Thread-safe facade over the LAN and cloud clients."""
 
+    _CLOUD_INSTANCE = {"turn": "powerSwitch", "brightness": "brightness",
+                       "color": "colorRgb", "temp": "colorTemperatureK"}
+
     def __init__(self, cfg):
         g = cfg.get("govee", {}) or {}
         self.enabled = g.get("enabled", True)
@@ -56,9 +65,9 @@ class GoveeLights:
         if sd:
             import pathlib
             self.state_path = pathlib.Path(sd) / "govee.json"
-        self._lock = threading.Lock()
+        self._lock = threading.RLock()   # reentrant: _apply -> devices -> scan
         self._sock = None
-        self._devices = []   # [{device, model, ip, name, supportCmds}]
+        self._devices = []
         self._last_scan = 0.0
         self._load_cache()
 
@@ -68,7 +77,8 @@ class GoveeLights:
             return
         try:
             data = json.loads(self.state_path.read_text(encoding="utf-8"))
-            self._devices = data.get("devices", [])
+            self._devices = [dict(d, caps=set(d.get("caps") or ()))
+                             for d in data.get("devices", [])]
         except Exception as e:
             _log(f"cache load failed: {e}")
 
@@ -76,23 +86,36 @@ class GoveeLights:
         if not self.state_path:
             return
         try:
+            stash = [dict(d, caps=sorted(d.get("caps") or ())) for d in self._devices]
             self.state_path.write_text(
-                json.dumps({"devices": self._devices}, indent=1), encoding="utf-8")
+                json.dumps({"devices": stash}, indent=1), encoding="utf-8")
         except Exception as e:
             _log(f"cache save failed: {e}")
 
     # --------------------------------------------------------------- lan
     def _udp(self):
+        """The shared UDP socket, or None if the port is unavailable.
+
+        Only one process can bind :4001 — typically the live service.
+        Anyone else (text REPL, --say, diagnostics) simply skips LAN
+        control and uses the cloud path.
+        """
         if self._sock is None:
-            s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-            s.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
-            s.bind(("0.0.0.0", _LISTEN_PORT))
-            self._sock = s
-        return self._sock
+            try:
+                s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+                s.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
+                s.bind(("0.0.0.0", _LISTEN_PORT))
+                self._sock = s
+            except OSError as e:
+                _log(f"udp :{_LISTEN_PORT} unavailable ({e}) — LAN control off this process")
+                self._sock = False
+        return self._sock or None
 
     def _send_recv(self, payload, ip, wait_s=_UDP_TIMEOUT):
         """One UDP round trip; returns the parsed reply dict or None."""
         s = self._udp()
+        if s is None:
+            return None
         s.settimeout(wait_s)
         try:
             s.sendto(json.dumps(payload).encode(), (ip, _DEV_PORT))
@@ -121,6 +144,8 @@ class GoveeLights:
             if not force and self._devices and time.time() - self._last_scan < 300:
                 return self._devices
             s = self._udp()
+            if s is None:
+                return self._devices
             s.settimeout(1.0)
             msg = json.dumps({"msg": {"cmd": "scan",
                                       "data": {"account_msg": "spark"}}}).encode()
@@ -149,8 +174,9 @@ class GoveeLights:
                         "model": d.get("model", ""),
                         "ip": addr[0],
                         "name": f"{d.get('model', 'light')} {dev[-4:]}",
-                        "supportCmds": sorted(d.get("supportCmds", [])
-                                              or ["turn", "brightness", "colorwc"]),
+                        "light": True,
+                        "caps": set(d.get("supportCmds", [])
+                                    or ["turn", "brightness", "colorwc"]),
                     }
             if found:
                 self._devices = list(found.values())
@@ -158,14 +184,6 @@ class GoveeLights:
                 self._save_cache()
                 _log(f"scan: {len(self._devices)} device(s) on LAN")
             return self._devices
-
-    def _lan_cmd(self, dev, command, data):
-        payload = {"msg": {"cmd": "dev", "device": dev["device"],
-                           "cmd": {"command": command, "data": data}}}
-        reply = self._send_recv(payload, dev.get("ip", ""))
-        if reply and reply.get("msg", {}).get("code") == 300:
-            return "ok"
-        return None
 
     # ------------------------------------------------------------- cloud
     def _cloud(self, method, path, body=None):
@@ -178,20 +196,22 @@ class GoveeLights:
             return json.loads(r.read())
 
     def _cloud_devices(self):
+        """2026 openapi: GET /user/devices -> data[] with capabilities."""
         try:
-            data = self._cloud("GET", "/devices").get("data", [])
+            data = self._cloud("GET", "/user/devices").get("data", [])
         except Exception as e:
             _log(f"cloud devices failed: {e}")
             return []
         out = []
-        for d in data.get("devices", []) if isinstance(data, dict) else data:
+        for d in data:
+            caps = {c.get("instance") for c in d.get("capabilities", [])}
             out.append({
                 "device": d.get("device", ""),
-                "model": d.get("model", ""),
+                "model": d.get("sku", ""),
                 "ip": None,
-                "name": d.get("deviceName") or f"{d.get('model', 'light')}",
-                "supportCmds": sorted(d.get("supportCmds", [])
-                                      or ["turn", "brightness", "colorwc"]),
+                "name": d.get("deviceName") or f"{d.get('sku', 'device')}",
+                "light": d.get("type", "") == "devices.types.light",
+                "caps": caps,
                 "cloud": True,
             })
         return out
@@ -199,7 +219,7 @@ class GoveeLights:
     # ---------------------------------------------------- command translation
     # Canonical ops ("turn"/"brightness"/"color"/"temp"), two dialects: the
     # LAN protocol packs color+temperature into one colorwc object; the
-    # CLOUD API uses separate color / colorTem commands with flat values.
+    # 2026 cloud API takes one capability object per command.
     @staticmethod
     def _lan_payload(op, value):
         if op == "turn":
@@ -213,25 +233,40 @@ class GoveeLights:
                            "colorTemInKelvin": max(2000, min(9000, int(value)))}
 
     @staticmethod
-    def _cloud_payload(op, value):
+    def _cloud_capability(op, value):
+        """Canonical op -> 2026 openapi capability object."""
         if op == "turn":
-            return "turn", ("on" if value else "off")
+            return {"type": "devices.capabilities.on_off",
+                    "instance": "powerSwitch", "value": 1 if value else 0}
         if op == "brightness":
-            return "brightness", max(1, min(100, int(value)))
+            return {"type": "devices.capabilities.range",
+                    "instance": "brightness", "value": max(1, min(100, int(value)))}
         if op == "color":
-            return "color", {"r": value[0], "g": value[1], "b": value[2]}
-        return "colorTem", max(2000, min(9000, int(value)))
+            r, g, b = value
+            return {"type": "devices.capabilities.color_setting",
+                    "instance": "colorRgb", "value": (r << 16) + (g << 8) + b}
+        return {"type": "devices.capabilities.color_setting",
+                "instance": "colorTemperatureK",
+                "value": max(2000, min(9000, int(value)))}
 
     def _cmd(self, dev, op, value):
-        """Run one canonical op on one device over its transport."""
+        """Run one canonical op on one device over its transport.
+
+        Returns "ok", "skip" (device lacks the capability) or None (failed).
+        """
         if dev.get("cloud") or not dev.get("ip"):
             if not self.api_key:
                 return None
-            name, val = self._cloud_payload(op, value)
+            caps = dev.get("caps") or set()
+            instance = self._CLOUD_INSTANCE.get(op)
+            if caps and instance and instance not in caps:
+                return "skip"
             try:
-                self._cloud("PUT", "/devices/control",
-                            {"device": dev["device"], "model": dev["model"],
-                             "cmd": {"name": name, "value": val}})
+                self._cloud("POST", "/device/control",
+                            {"requestId": uuid.uuid4().hex,
+                             "payload": {"sku": dev["model"],
+                                         "device": dev["device"],
+                                         "capability": self._cloud_capability(op, value)}})
                 return "ok"
             except Exception as e:
                 _log(f"cloud control failed: {e}")
@@ -268,8 +303,9 @@ class GoveeLights:
         if not devs:
             return []
         label = (label or "").lower()
-        if label in ("", "all", "my", "room", "the"):
-            return devs
+        if label in ("", "all", "my", "room", "the", "lights"):
+            lights = [d for d in devs if d.get("light", True)]
+            return lights or devs
         return [d for d in devs if label in d["name"].lower()]
 
     def _apply(self, command, data, label="all"):
@@ -277,9 +313,12 @@ class GoveeLights:
             devs = self._targets(label)
             if not devs:
                 return ("none", "I can't find your Govee lights right now.")
+            sent = 0
             for dev in devs:
-                if self._cmd(dev, command, data) != "ok":
-                    return ("error", "I couldn't reach your lights just then.")
+                if self._cmd(dev, command, data) == "ok":
+                    sent += 1
+            if sent == 0:
+                return ("error", "I couldn't reach your lights just then.")
             return ("ok", "")
 
     # speech-facing -------------------------------------------------------
@@ -317,5 +356,5 @@ class GoveeLights:
         devs = self.devices()
         if not devs:
             return "I can't find your Govee lights right now."
-        n = len(devs)
+        n = len([d for d in devs if d.get("light", True)]) or len(devs)
         return f"I see {n} Govee light{'s' if n != 1 else ''} ready to go."

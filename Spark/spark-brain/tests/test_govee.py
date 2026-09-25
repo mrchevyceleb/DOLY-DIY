@@ -103,11 +103,12 @@ class ClientBasicsTests(unittest.TestCase):
 
     def test_cloud_and_lan_payload_dialects(self):
         # same canonical op, two wire formats
-        self.assertEqual(GoveeLights._cloud_payload("turn", True), ("turn", "on"))
-        self.assertEqual(GoveeLights._cloud_payload("brightness", 40), ("brightness", 40))
-        self.assertEqual(GoveeLights._cloud_payload("color", (10, 20, 30)),
-                         ("color", {"r": 10, "g": 20, "b": 30}))
-        self.assertEqual(GoveeLights._cloud_payload("temp", 3200), ("colorTem", 3200))
+        cap = GoveeLights._cloud_capability("turn", True)
+        self.assertEqual((cap["instance"], cap["value"]), ("powerSwitch", 1))
+        cap = GoveeLights._cloud_capability("color", (10, 20, 30))
+        self.assertEqual((cap["instance"], cap["value"]), ("colorRgb", (10 << 16) + (20 << 8) + 30))
+        cap = GoveeLights._cloud_capability("temp", 3200)
+        self.assertEqual((cap["instance"], cap["value"]), ("colorTemperatureK", 3200))
         self.assertEqual(GoveeLights._lan_payload("color", (1, 2, 3)),
                          ("colorwc", {"color": {"r": 1, "g": 2, "b": 3},
                                       "colorTemInKelvin": 0}))
@@ -116,13 +117,24 @@ class ClientBasicsTests(unittest.TestCase):
     def test_cloud_control_flows_through_translate(self):
         g = GoveeLights({"govee": {"enabled": True}, "state_dir": None})
         g.api_key = "test-key"
-        g.devices = Mock(return_value=[{"device": "AB:CD", "model": "H6144",
-                                        "ip": None, "name": "strip",
-                                        "supportCmds": ["turn"], "cloud": True}])
+        g.devices = Mock(return_value=[
+            {"device": "AB:CD", "model": "H6144", "ip": None, "name": "strip",
+             "light": True, "caps": {"powerSwitch", "colorRgb"}, "cloud": True},
+            {"device": "EF:12", "model": "H7135", "ip": None, "name": "heater",
+             "light": False, "caps": {"powerSwitch"}, "cloud": True},
+        ])
+        g._targets = lambda label: g.devices()      # bypass light-only filter
         g._cloud = Mock(return_value={})
         self.assertEqual(g.turn(True), "Lights on!")
         body = g._cloud.call_args[0][2]
-        self.assertEqual(body["cmd"], {"name": "turn", "value": "on"})
+        self.assertEqual(body["payload"]["capability"],
+                         {"type": "devices.capabilities.on_off",
+                          "instance": "powerSwitch", "value": 1})
+        self.assertTrue(body["requestId"])
+        # color skips the colorless device, still succeeds on the capable one
+        g._cloud.reset_mock()
+        self.assertIn("Lights", g.color("Blue"))
+        self.assertEqual(g._cloud.call_count, 1)
 
     def test_no_devices_message(self):
         g = GoveeLights({"govee": {"enabled": True}, "state_dir": None})

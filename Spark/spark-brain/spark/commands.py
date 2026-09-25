@@ -199,6 +199,33 @@ def extract_color(text):
     return None
 
 
+def parse_clock_time(text):
+    """'7', '7:30', '7 30', 'seven thirty am', 'noon' -> (hour, minute, meridiem).
+
+    Meridiem matched loosely ('am', 'a.m.', 'in the evening'); None if no time.
+    """
+    low = " " + text.lower() + " "
+    if " noon" in low:
+        return 12, 0, "noon"
+    if " midnight" in low:
+        return 0, 0, "midnight"
+    mer = None
+    m = re.search(r"\b(a\.?m\.?|p\.?m\.?|in the (?:morning|afternoon|evening))\b", low)
+    if m:
+        mer = m.group(1)
+    nums = [int(n) for n in re.findall(r"\b(\d{1,2})\b", low)]
+    if not nums:
+        clock_words = {w: v for w, v in _NUM_WORDS.items()
+                       if w not in ("a", "an", "half")}
+        found = re.findall(r"\b(" + "|".join(sorted(clock_words, key=len, reverse=True))
+                           + r")\b", low)
+        nums = [clock_words[w] for w in found]
+    if not nums:
+        return None
+    hour = nums[0]
+    minute = nums[1] if len(nums) > 1 and nums[1] < 60 else 0
+    return hour, minute, mer
+
 _NUM_WORDS = {
     "zero": 0, "one": 1, "two": 2, "three": 3, "four": 4, "five": 5, "six": 6,
     "seven": 7, "eight": 8, "nine": 9, "ten": 10, "eleven": 11, "twelve": 12,

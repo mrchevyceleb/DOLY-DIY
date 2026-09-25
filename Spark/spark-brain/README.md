@@ -175,6 +175,17 @@ running with `qwen/qwen3.6-35b-a3b` loaded, context 8192, TTL off.
   for an explanation allow six sentences / 120 words. The stream closes at
   the limit so long answers do not delay the next listening window.
 - **'Search for...' / 'look up...'** -> web search -> brain answers from fresh results.
+- **Alarms / timers / reminders** -> "set an alarm for 7am" (am/pm/24h/word
+  times; bare 7-11 = morning, 1-6 = afternoon), "wake me at 6:30", "remind me
+  to water the plants in 20 minutes" (labeled timer), "cancel the timer/alarm",
+  "how much time is left". Persisted in state across restarts; alarms fire with
+  the alarm sfx + speech, reminders speak their label. Missed-while-down items
+  are dropped, not replayed.
+- **Govee room lights** -> "turn on my lights", "set my lights to blue",
+  "dim my lights to thirty", "warmer/cooler", "kill the lights". LAN protocol
+  first (no key; models without LAN support never answer), cloud API when
+  `govee.api_key` is set (kept in gitignored `config.local.json` on the robot).
+  "your lights" still means her own LEDs.
 - **Internet on demand** -> the brain itself decides when it needs the web. Any
   free-speech reply may start with `SEARCH: <query>` (or `READ: <url>` to open a
   page from earlier results); the stream is cut, the tool runs while she says
@@ -204,6 +215,8 @@ resumes after playback; voice interruption during a routine is not implemented.
 | `spark/router.py` | stock-command router + voice switching + weather/timer + web search |
 | `spark/search.py` | DuckDuckGo web search (ddgs pkg + HTML fallback), page fetcher, SEARCH/READ tool-call markers |
 | `spark/commands.py` | parity table — extend from the Doly app's 'Say' list |
+| `spark/sched.py` | persisted alarms, timers, reminders (survive restarts) |
+| `spark/govee.py` | Govee room lights: LAN client + cloud API fallback |
 | `spark/body.py` | guarded Doly SDK wrappers (edges, homing, wander, TTS path) |
 | `spark/dock_vision.py` | read-only stock dock marker and camera pose diagnostic |
 | `spark/ear.py` | arecord + WebRTC speech VAD + wake listener |

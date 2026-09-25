@@ -2,6 +2,7 @@
 import json
 import os
 import pathlib
+import sys
 
 _DEFAULTS = {
     "brain": {
@@ -56,6 +57,15 @@ def load_config(path=None):
     data = {}
     if path.exists():
         data = json.loads(path.read_text(encoding="utf-8"))
+    # robot-local overlay (gitignored): secrets like the Govee API key
+    # live here instead of the public repo, and redeploying config.json
+    # from the repo can never wipe them.
+    local = _ROOT / "config.local.json"
+    if local.exists():
+        try:
+            data = _merge(data, json.loads(local.read_text(encoding="utf-8")))
+        except Exception as e:
+            print(f"[config] local overlay failed: {e}", file=sys.stderr)
     cfg = _merge(_DEFAULTS, data)
     cfg["prompt"] = (_ROOT / "prompt.md").read_text(encoding="utf-8").strip()
     cfg["root"] = str(_ROOT)
