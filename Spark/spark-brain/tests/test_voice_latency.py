@@ -304,6 +304,32 @@ class VoiceLatencyTests(unittest.TestCase):
         self.assertEqual(result.text, "Spark.")
         self.assertEqual(verify.call_count, 2)
 
+    def test_muffled_name_dropped_by_whisper_wakes_via_vosk_family(self):
+        # 17:35 log: the endpoint split the utterance - segment A finalized
+        # 'barks [unk]' (below weak-verify loudness), segment B carried the
+        # command and verified to 'Ten seconds.' with no name at all.
+        from spark.ear import listen_for_wake
+        rec = Mock()
+        rec.feed.return_value = None
+        rec.partial.return_value = ""
+        rec.finish.side_effect = ["barks [unk]", "", ""]
+        speech, room = pcm(1500), pcm(400)
+        frames = ([room]*5 + [speech]*40 + [room]*25 +   # A: the name alone
+                  [speech]*15 + [room]*40)                # B: the command
+        verify = Mock(return_value="Ten seconds.")
+        result = listen_for_wake(iter(frames), rec, CFG, ["spark"],
+                                 noise_floor=lambda: 380, verify_wake=verify)
+        self.assertTrue(result)
+        self.assertEqual(result.text, "Ten seconds.")
+        # a family token followed by >2.5s of quiet must NOT authorize
+        # later room chatter
+        rec.finish.side_effect = ["barks", "", ""]
+        verify.return_value = "Some unrelated room conversation today"
+        stale = ([room]*5 + [speech]*40 + [room]*160 +   # name, then 3+ s quiet
+                 [speech]*15 + [room]*40)
+        self.assertFalse(listen_for_wake(iter(stale), rec, CFG, ["spark"],
+                                         noise_floor=lambda: 380, verify_wake=verify))
+
     def test_loud_parakeet_bart_still_wakes(self):
         rec = Mock()
         rec.feed.return_value = None

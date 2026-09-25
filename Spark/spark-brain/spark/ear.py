@@ -363,6 +363,13 @@ def _near_wake(token, heads):
     return min(_lev(token, v) for v in variants) <= 2
 
 
+# Strong name-family tokens: speech that Vosk's constrained wake grammar
+# decodes to these sounds like her name being said, not common words.
+_STRONG_NAME_FAMILY = {"spark", "sparky", "spar", "spork", "spock", "spec",
+                       "speck", "stark", "starks", "bark", "barks", "barkley",
+                       "bart"}
+
+
 def has_wake_name(text, wake_words):
     tokens = re.findall(r"[\w']+", text.lower())
     if tokens and tokens[0] in {"okay", "ok"}:
@@ -418,6 +425,7 @@ def listen_for_wake(frames, recognizer, cfg, wake_words, tap_check=None,
                 and short_enough and peak >= keyword_min_peak)
 
     next_verify = 0.0
+    last_family_final_at = 0.0   # a strong name-family token finalized recently
     vad = _speech_detector(cfg)
     energy = deque(maxlen=5)
 
@@ -427,6 +435,7 @@ def listen_for_wake(frames, recognizer, cfg, wake_words, tap_check=None,
 
     def resolve(text):
         nonlocal next_verify
+        nonlocal last_family_final_at
         tokens = text.lower().split()
         if _is_wake(tokens, peak, speech_ms=voiced_frames*20):
             # Retain original audio: constrained KWS only knows the name;
@@ -439,6 +448,10 @@ def listen_for_wake(frames, recognizer, cfg, wake_words, tap_check=None,
         # verification; never let the constrained decoder's 'bar'/'park'
         # win merely because background conversation is loud.
         head = meaningful(tokens, articles=True)
+        if head in _STRONG_NAME_FAMILY:
+            # Her name was (garbled but) spoken: the command often lands in
+            # the NEXT segment after the endpoint splits the utterance.
+            last_family_final_at = time.monotonic()
         ambiguous = bool(head and not has_wake_name(text, wake_words)
                          and (head in _WEAK or _near_wake(head, _HEADS)))
         verify_floor = weak_min_peak if ambiguous else a.get("start_rms", 900)
@@ -461,6 +474,19 @@ def listen_for_wake(frames, recognizer, cfg, wake_words, tap_check=None,
                 if (allow_weak and head in {"bart", "barkley", "bark"}
                         and v_head in {"bart", "barkley"}
                         and peak >= a.get("wake_verify_fuzzy_rms", 4500)):
+                    return WakeResult(verified)
+                # A muffled mic can strip the name from even the verified
+                # transcript (Vosk: 'barks [unk]', whisper: 'Ten seconds.').
+                # When Vosk independently heard a STRONG name-family token
+                # and the verifier confirms real command speech, accept at
+                # normal arming loudness. A stray wake just opens a short
+                # listening window; total deafness is the worse failure.
+                family_hint = (head in _STRONG_NAME_FAMILY
+                               or (last_family_final_at > 0
+                                   and time.monotonic() - last_family_final_at < 2.5))
+                if (allow_weak and family_hint
+                        and len(meaningful(v_tokens)) >= 2
+                        and peak >= a.get("start_rms", 900)):
                     return WakeResult(verified)
             # A rejected earlier segment must not suppress a name in the
             # next completed segment inside the same one-second interval.
