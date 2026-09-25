@@ -647,15 +647,23 @@ class Spark:
 
         detailed = bool(re.search(r"\b(explain|tell me about|in detail|step by step|"
                                   r"tell me a story|longer answer)\b", user_text, re.I))
+        web_offer = ""
+        if web_hops > 0:
+            web_offer = (" WEB TOOL available this turn: "
+                         + ("reply with ONLY 'READ: <url>' to open a page from the earlier "
+                            "results if you need more detail — otherwise answer now from "
+                            "the results you already have."
+                            if extra_context else
+                            "reply with ONLY 'SEARCH: <what to look up>' to run a web "
+                            "search — or 'READ: <url>' if Matt just gave you an "
+                            "address — then stop; the system fetches it and asks you "
+                            "again. Use it for anything current, live, or uncertain; "
+                            "never invent fresh facts instead."))
         messages[-1]["content"] += (
             "\n\n[Spoken reply: be warm and respectful; no insults, blame, threats, or sarcasm. "
             + ("Up to six concise sentences." if detailed else "One or two short sentences, at most 35 words.")
             + " Answer only what was asked. Never claim an action happened unless live state confirms it.]"
-            + (" WEB TOOL available this turn: reply with ONLY 'SEARCH: <what to look up>' "
-               "to run a web search, or 'READ: <url>' to open a page from earlier results — "
-               "then stop; the system fetches it and asks you again. Use it for anything "
-               "current, live, or uncertain; never invent fresh facts instead."
-               if web_hops > 0 else ""))
+            + web_offer)
         reply_parts = []
         started = time.perf_counter()
         try:
