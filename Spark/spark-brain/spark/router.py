@@ -225,6 +225,12 @@ class Router:
                 self.body.speak(f"{alarms._human(left)} left on your timer." if left is not None
                                 else "You don't have a timer running.")
                 return True
+            # any other bare 'timer' mention (often a garbled 'set a timer')
+            # opens the slot question instead of reaching the brain
+            if "timer" in low and not cmds.parse_timer(text):
+                self._pending = {"kind": "timer", "at": time.time()}
+                self.body.speak("How long should I set it for?")
+                return True
             if _ALARM_WORD_RE.search(low):
                 return self._alarms(text)
 

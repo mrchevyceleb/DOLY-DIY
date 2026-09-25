@@ -115,6 +115,15 @@ class PendingSlotTests(unittest.TestCase):
         self.assertIn("30 seconds", r.body.speak.call_args[0][0])
         self.assertIsNone(r._pending)
 
+    def test_garbled_timer_fragment_opens_slot(self):
+        # 'Sparks had a timer' -> command text 'had a timer.'
+        a = Mock(spec=AlarmClock)
+        r = _router(a)
+        r._pending = r._last_set = None
+        self.assertTrue(r.handle("had a timer"))
+        self.assertIn("How long", r.body.speak.call_args[0][0])
+        self.assertEqual(r._pending["kind"], "timer")
+
     def test_alarm_answer_fills_slot(self):
         a = Mock(spec=AlarmClock)
         r = self._router(a)
