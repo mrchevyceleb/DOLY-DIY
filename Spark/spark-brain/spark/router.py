@@ -128,6 +128,7 @@ class Router:
         self._last_motion_at = 0
         self._timers = []
         self._pending = None    # {"kind": "timer"|"alarm", "at": ts} awaiting the spoken answer
+        self._last_set = None   # {"kind": "timer"|"alarm", "at": ts} for "no, thirty seconds"
 
     # ------------------------------------------------------------------ main
     def handle(self, raw_text):
@@ -149,12 +150,14 @@ class Router:
             self._stop_celebration()
 
         # she asked "how long?" / "for what time?" — this utterance is the answer
+        low = text.lower()
         pending = getattr(self, "_pending", None)
         if pending and time.time() - pending.get("at", 0) < 45:
             if pending["kind"] == "timer":
                 secs = cmds.parse_timer(text)
                 if secs:
                     self._pending = None
+                    self._last_set = {"kind": "timer", "at": time.time()}
                     alarms0 = getattr(self, "alarms", None)
                     if alarms0 is not None:
                         alarms0.add_timer(secs)
@@ -168,6 +171,35 @@ class Router:
                     self._pending = None
                     return self._set_alarm_from(parsed)
             self._pending = None  # user moved on; route normally
+
+        # a misheard unit gets corrected in place: "no, thirty seconds"
+        last = getattr(self, "_last_set", None)
+        if last and time.time() - last.get("at", 0) < 20:
+            if re.match(r"\s*(no|nope|wrong|actually|make it|change it)\b", low):
+                if last["kind"] == "timer":
+                    secs = cmds.parse_timer(text)
+                    if secs:
+                        self._last_set = None
+                        alarms0 = getattr(self, "alarms", None)
+                        if alarms0 is not None:
+                            alarms0.cancel("timer")
+                            alarms0.add_timer(secs)
+                        else:
+                            for t in self._timers:
+                                t.cancel()
+                            self._timers.clear()
+                            self._start_timer(secs)
+                        self.body.speak("Got it — " + self._describe_timer(secs).lower() + ".")
+                        return True
+                else:
+                    parsed = cmds.parse_clock_time(text)
+                    if parsed:
+                        self._last_set = None
+                        alarms1 = getattr(self, "alarms", None)
+                        if alarms1 is not None:
+                            alarms1.cancel("alarm")
+                        return self._set_alarm_from(parsed)
+            self._last_set = None  # accepted, or not a correction
 
         # imagine prompts: she physically acts it out while narrating
         if _IMAGINE_RE.search(raw_text) and not cmds._NEGATION_RE.search(text):
@@ -354,6 +386,7 @@ class Router:
                 self._pending = {"kind": "timer", "at": time.time()}
                 b.speak("How long should I set it for?")
                 return True
+            self._last_set = {"kind": "timer", "at": time.time()}
             if self.alarms is not None:
                 self.alarms.add_timer(secs)
             else:
@@ -676,6 +709,7 @@ class Router:
         if when is None:
             self.body.speak("I don't think that's a valid time.")
             return True
+        self._last_set = {"kind": "alarm", "at": time.time()}
         self.alarms.add_alarm(when.timestamp(), label=fmt_clock(when.hour, when.minute))
         self.body.speak(f"Alarm set for {fmt_clock(when.hour, when.minute)}.")
         return True

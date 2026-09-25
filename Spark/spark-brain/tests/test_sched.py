@@ -133,6 +133,40 @@ class PendingSlotTests(unittest.TestCase):
         self.assertIsNone(r._pending)                        # slot forgotten
         a.add_timer.assert_not_called()
 
+class CorrectionTests(unittest.TestCase):
+    """'no, thirty seconds' right after a misheard-unit set re-sets it."""
+
+    def test_timer_correction(self):
+        a = Mock(spec=AlarmClock)
+        r = _router(a)
+        r._pending = r._last_set = None
+        self.assertTrue(r.handle("set a timer for thirty"))     # ASR ate 'seconds'
+        a.add_timer.assert_called_once_with(1800)               # read as minutes
+        self.assertTrue(r.handle("no, thirty seconds"))
+        a.cancel.assert_called_once_with("timer")
+        self.assertEqual(a.add_timer.call_args[0][0], 30)
+        self.assertIn("30 seconds", r.body.speak.call_args[0][0])
+
+    def test_alarm_correction(self):
+        a = Mock(spec=AlarmClock)
+        r = _router(a)
+        r._pending = r._last_set = None
+        self.assertTrue(r.handle("set an alarm for 7 am"))
+        a.add_alarm.assert_called_once()
+        self.assertTrue(r.handle("actually, make it 8 am"))
+        a.cancel.assert_called_once_with("alarm")
+        self.assertEqual(a.add_alarm.call_count, 2)
+
+    def test_plain_agreement_does_not_correct(self):
+        a = Mock(spec=AlarmClock)
+        r = _router(a)
+        r._pending = r._last_set = None
+        r.handle("set a timer for five minutes")
+        a.reset_mock()
+        self.assertTrue(r.handle("what time is it"))
+        a.cancel.assert_not_called()
+        a.add_timer.assert_not_called()
+
 class CelebrationTests(unittest.TestCase):
     def _router(self):
         r = _router()
