@@ -51,6 +51,22 @@ _ASR_HALLUCINATIONS = {
 }
 _HALLUCINATION_MIN_PEAK = 2500  # 16-bit amplitude; ambient noise peaks ~1000
 
+# Whisper renders ambient noise as tiny fragments ("Ta.", "Son."). A
+# real command is either multi-word, a known one-word command, or loud.
+_ONE_WORD_COMMANDS = {"stop", "dance", "spin", "yes", "no", "time", "date",
+                      "sleep", "wake", "party", "left", "right", "forward",
+                      "back", "thanks", "yeah", "okay"}
+_IMPLAUSIBLE_MIN_PEAK = 8000    # a lone LOUD word may still be real speech
+
+
+def _plausible_speech(text, peak):
+    words = [w for w in re.findall(r"[\w']+", text or "") if w]
+    if len(words) >= 2:
+        return True
+    if not words:
+        return False
+    return words[0].lower() in _ONE_WORD_COMMANDS or peak >= _IMPLAUSIBLE_MIN_PEAK
+
 # A muffled mic loses the fricative first: 'Spark' transcribes as 'Bark'.
 # The whisper verification accepts that garble only when a command
 # follows it (someone talking TO her) - a bare garble stays rejected,
@@ -411,6 +427,10 @@ class Spark:
                     log("spark", f"ignored sound event: '{text}'")
                     self.body.eyes("idle")
                     continue
+                if (text and pcm and not _plausible_speech(text, _pcm_peak(pcm))):
+                    log("spark", f"ignored implausible fragment: '{text}'")
+                    self.body.eyes("idle")
+                    continue
                 if (text and pcm and text.lower() in _ASR_HALLUCINATIONS
                         and _pcm_peak(pcm) < _HALLUCINATION_MIN_PEAK):
                     log("spark", f"ignored weak hallucination: '{text}'")
@@ -626,7 +646,9 @@ class Spark:
         if web_hops is None:
             web_hops = (default_hops
                         if web_cfg.get("enabled", True) and extra_context is None else 0)
-        self.memory.add("user", user_text)
+        # The user turn enters memory only once a reply exists (see
+        # _generate_reply): an unanswered noise fragment must not become
+        # a ghost the brain later "responds" to.
         self._generate_reply(user_text, extra_context, web_hops)
 
     def _generate_reply(self, user_text, extra_context, web_hops):
@@ -743,15 +765,17 @@ class Spark:
         except BrainOffline as e:
             log("spark", f"brain went offline: {e}")
             if reply_parts:
-                self.memory.add("assistant", " ".join(reply_parts))  # keep what was said
+                self.memory.add("user", user_text)                   # keep what was said
+                self.memory.add("assistant", " ".join(reply_parts))
             else:
-                self.body.speak(OFFLINE_LINE)
+                self.body.speak(OFFLINE_LINE)      # spoken = not a ghost turn
             self.body.eyes("idle")
             self.brain_online = False
             return
 
         reply = " ".join(reply_parts).strip()
         if reply:
+            self.memory.add("user", user_text)
             self.memory.add("assistant", reply)
         self.body.eyes("idle")
 
