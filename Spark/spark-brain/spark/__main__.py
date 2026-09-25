@@ -51,6 +51,12 @@ _ASR_HALLUCINATIONS = {
 }
 _HALLUCINATION_MIN_PEAK = 2500  # 16-bit amplitude; ambient noise peaks ~1000
 
+# A muffled mic loses the fricative first: 'Spark' transcribes as 'Bark'.
+# The whisper verification accepts that garble only when a command
+# follows it (someone talking TO her) - a bare garble stays rejected,
+# so TV 'bar' chatter still cannot wake her.
+_WAKE_GARBLE_RE = re.compile(r"^\s*(?:okay\s+|ok\s+)?(?:bark|barks|sparky?)[,!.]?\s+\S", re.I)
+
 # Only complete, short sign-offs close a follow-up. A request such as
 # "thanks, can you set a timer?" must still reach the command router.
 _FOLLOWUP_SIGNOFFS = {
@@ -566,7 +572,7 @@ class Spark:
             text = ""
             try:
                 text = self.whisper.transcribe_wake_pcm(pcm)
-                if has_wake_name(text, wake_words):
+                if has_wake_name(text, wake_words) or _WAKE_GARBLE_RE.match(text or ""):
                     return text
             except Exception as exc:
                 log("spark", f"wake check unavailable: {exc}")

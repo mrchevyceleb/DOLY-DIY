@@ -364,19 +364,12 @@ def _near_wake(token, heads):
 
 
 def has_wake_name(text, wake_words):
-    """True when the text leads with her name (or a near-name garble).
-
-    'bark'/'barks' are how a muffled or distant mic renders 'spark' —
-    the fricative s drops first. The Vosk wake grammar already emits
-    them as legal confusables; accepting them here keeps a dull mic
-    usable. A stray 'bark' wake just opens a 6s listening window.
-    """
     tokens = re.findall(r"[\w']+", text.lower())
     if tokens and tokens[0] in {"okay", "ok"}:
         tokens = tokens[1:]
     if not tokens:
         return False
-    return (tokens[0] in {"spark", "sparky", "bark", "barks"} or any(
+    return (tokens[0] in {"spark", "sparky"} or any(
         tokens[:len(name.split())] == name.lower().split() for name in wake_words if name.strip()))
 
 
