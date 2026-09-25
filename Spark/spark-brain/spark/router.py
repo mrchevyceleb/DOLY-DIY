@@ -121,6 +121,7 @@ class Router:
         self.last_motion_result = None
         self._last_motion_at = 0
         self._timers = []
+        self._pending = None    # {"kind": "timer"|"alarm", "at": ts} awaiting the spoken answer
 
     # ------------------------------------------------------------------ main
     def handle(self, raw_text):
@@ -135,6 +136,27 @@ class Router:
         if tokens and (tokens[0] == "stop" or tokens[-1] == "stop"):
             self.body.stop_everything()
             return True
+
+        # she asked "how long?" / "for what time?" — this utterance is the answer
+        pending = getattr(self, "_pending", None)
+        if pending and time.time() - pending.get("at", 0) < 45:
+            if pending["kind"] == "timer":
+                secs = cmds.parse_timer(text)
+                if secs:
+                    self._pending = None
+                    alarms0 = getattr(self, "alarms", None)
+                    if alarms0 is not None:
+                        alarms0.add_timer(secs)
+                    else:
+                        self._start_timer(secs)
+                    self.body.speak(self._describe_timer(secs) + ". I'm on it.")
+                    return True
+            elif pending["kind"] == "alarm":
+                parsed = cmds.parse_clock_time(text)
+                if parsed:
+                    self._pending = None
+                    return self._set_alarm_from(parsed)
+            self._pending = None  # user moved on; route normally
 
         # imagine prompts: she physically acts it out while narrating
         if _IMAGINE_RE.search(raw_text) and not cmds._NEGATION_RE.search(text):
@@ -318,6 +340,7 @@ class Router:
         if action == "timer":
             secs = cmds.parse_timer(text)
             if not secs:
+                self._pending = {"kind": "timer", "at": time.time()}
                 b.speak("How long should I set it for?")
                 return True
             if self.alarms is not None:
@@ -556,15 +579,19 @@ class Router:
             return True
         parsed = cmds.parse_clock_time(text)
         if not parsed:
+            self._pending = {"kind": "alarm", "at": time.time()}
             b.speak("For what time should I set the alarm?")
             return True
+        return self._set_alarm_from(parsed)
+
+    def _set_alarm_from(self, parsed):
         hour, minute, mer = parsed
         when = next_occurrence(hour, minute, mer)
         if when is None:
-            b.speak("I don't think that's a valid time.")
+            self.body.speak("I don't think that's a valid time.")
             return True
         self.alarms.add_alarm(when.timestamp(), label=fmt_clock(when.hour, when.minute))
-        b.speak(f"Alarm set for {fmt_clock(when.hour, when.minute)}.")
+        self.body.speak(f"Alarm set for {fmt_clock(when.hour, when.minute)}.")
         return True
 
     def _set_reminder(self, text):

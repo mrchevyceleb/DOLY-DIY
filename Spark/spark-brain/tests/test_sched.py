@@ -95,6 +95,44 @@ class RouterSchedTests(unittest.TestCase):
         self.assertIn("left on your timer", self._say("how much time is left on the timer", a))
 
 
+class PendingSlotTests(unittest.TestCase):
+    """Her own question must be answered by the next utterance (16:25 log)."""
+
+    def _router(self, alarms):
+        r = _router(alarms)
+        r._pending = None
+        return r
+
+    def test_timer_answer_fills_slot(self):
+        a = Mock(spec=AlarmClock)
+        r = self._router(a)
+        self.assertTrue(r.handle("set a timer"))
+        self.assertIn("How long", r.body.speak.call_args[0][0])
+        self.assertEqual(r._pending["kind"], "timer")
+        a.add_timer.assert_not_called()
+        self.assertTrue(r.handle("thirty seconds"))
+        a.add_timer.assert_called_once_with(30)
+        self.assertIn("30 seconds", r.body.speak.call_args[0][0])
+        self.assertIsNone(r._pending)
+
+    def test_alarm_answer_fills_slot(self):
+        a = Mock(spec=AlarmClock)
+        r = self._router(a)
+        self.assertTrue(r.handle("set an alarm"))
+        self.assertEqual(r._pending["kind"], "alarm")
+        self.assertTrue(r.handle("7 am"))
+        a.add_alarm.assert_called_once()
+        self.assertIn("Alarm set", r.body.speak.call_args[0][0])
+
+    def test_moving_on_clears_slot(self):
+        a = Mock(spec=AlarmClock)
+        r = self._router(a)
+        r.handle("set a timer")
+        a.reset_mock()
+        self.assertTrue(r.handle("what is the weather"))    # routes to weather
+        self.assertIsNone(r._pending)                        # slot forgotten
+        a.add_timer.assert_not_called()
+
 class AlarmClockTests(unittest.TestCase):
     def test_fire_and_persistence(self):
         import tempfile
