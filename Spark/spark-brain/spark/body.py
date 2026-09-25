@@ -441,23 +441,6 @@ class Body:
             _log(f"mood_eyes failed: {e}")
             return False
 
-    def _departure_gap_exempt(self, direction):
-        """Front gap GPIO events the authorized dock exit expects.
-
-        The seated dock reads exactly the front pair; rolling out over the
-        base transitions those sensors while the pair is still within the
-        departure's allowance (probe, contact verification, bounded
-        clearance). Once open ground returns the pair leaves the allowance
-        and a front event is a real cliff again.
-        """
-        d = getattr(self, "_departure", None)
-        if not (self._leaving_home and d is not None):
-            return False
-        if not str(direction).split(".")[-1].startswith("Front"):
-            return False
-        return bool(getattr(d, "front_probe", False)
-                    or {"Front_Left", "Front_Right"} & getattr(d, "allowed_gaps", set()))
-
     def _init_edge(self):
         """ToF edge sensors — the not-driving-off-tables subsystem."""
         import doly_edge as edge
@@ -472,17 +455,13 @@ class Body:
             if self._docking_entry is not None:
                 # A short pulse must still cancel entry after the GPIO clears.
                 self._docking_entry.reason = "edge"
-            if (self._leaving_home and self._departure is not None
-                    and self._departure.trailing_gap(dir_name)):
-                return  # bounded forward clearance, both front sensors supported
-            if self._departure_gap_exempt(direction):
-                return  # authorized dock-face exit: front transitions are expected
-            if (self._leaving_home and self._departure is not None
-                    and dir_name != "All"):
-                # Sensor flutter while rolling off the base: the departure's
-                # debounced polled check owns the verdict. A single GPIO edge
-                # must not tear down the exit it authorized. Airborne (All)
-                # stays a full emergency.
+            if (self._leaving_home and self._departure is not None):
+                # ANY gap event during the authorized exit — including the
+                # all-void tilt/pickup reading as the nose crosses off the
+                # base — is judged by the departure's debounced poll, never
+                # torn down from this interrupt. A real cliff or pickup
+                # persists and cancels within 150ms (wheels stop in the
+                # finally block); a tilt blip costs nothing.
                 _log(f"gap event during departure dir={dir_name} — polled check will judge")
                 return
             if self._leaving_home:

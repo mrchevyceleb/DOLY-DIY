@@ -303,6 +303,25 @@ class ChargingSafetyTests(unittest.TestCase):
         d.transient_ms = 0
         self.assertEqual(d.check(), "edge")
 
+    def test_departure_debounces_all_void_tilt_reading(self):
+        # 2026-09-25: the nose tilts crossing off the base and all four
+        # sensors read void for one poll - the exit must survive it; a
+        # real pickup persists and cancels.
+        from spark.departure import Departure
+        gaps = ["Front_Left", "Front_Right"]
+        b = self.body(pct=80, gaps=gaps)
+        b._leaving_home = True
+        b._charging.healthy.return_value = True
+        d = Departure(b, True, list(gaps), lambda: False, transient_ms=10_000)
+        gaps.extend(["Back_Left", "Back_Right"])     # all-void blip
+        self.assertIsNone(d.check())                 # judged, not obeyed
+        del gaps[2:]                                 # tilt settles
+        self.assertIsNone(d.check())
+        self.assertEqual(d.allowed_gaps, {"Front_Left", "Front_Right"})
+        gaps.extend(["Back_Left", "Back_Right"])     # persistent this time
+        d.transient_ms = 0
+        self.assertEqual(d.check(), "edge")
+
     def test_only_affirmative_movement_commands_can_leave_dock(self):
         from spark.router import Router
         b = Mock(docked=True, last_departure_result="edge")
