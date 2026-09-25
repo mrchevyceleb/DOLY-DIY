@@ -190,6 +190,7 @@ the previous-block completion rule, and schedules overlapping sound, lights
 and movement on the main thread. Sensor callbacks queue animation requests.
 It reports empty files, failed execution and cancellations as failures.
 Random ambient beeps remain suppressed; requested routines use their stock audio.
+All IMU shock reactions are eyes-only (pickups and bumps never beep).
 Tap a top touch pad during a performance to cancel it. The main speech loop
 resumes after playback; voice interruption during a routine is not implemented.
 

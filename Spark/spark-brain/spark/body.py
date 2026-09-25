@@ -370,8 +370,10 @@ class Body:
     _IMU_REACTIONS = {
         "ShockLight": ("BUMP", None, None),            # desk bumps: eyes only,
         "ShockMedium": ("BUGGED", None, None),         # no random clicks/damage
-        "ShockHard": ("DAMAGED", "alarm", None),
-        "ShockExtreme": ("DESTROYED", "alarm", None),
+        # eyes only — the alarm beep on every pickup/bump drove Matt
+        # up the wall (2026-09-25). Same policy as the desk-bump tiers.
+        "ShockHard": ("DAMAGED", None, None),
+        "ShockExtreme": ("DESTROYED", None, None),
         "ShortShake": ("DIZZY_L", "debuff", None),
         "LongShake": ("DIZZY_R", "debuff", None),
         "Vibrate": ("NERVOUS", None, None),
