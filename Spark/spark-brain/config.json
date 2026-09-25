@@ -47,8 +47,8 @@
     }
   },
   "location": {
-    "lat": null,
-    "lon": null
+    "lat": 40.6084,
+    "lon": -75.4782
   },
   "web": {
     "enabled": true,
