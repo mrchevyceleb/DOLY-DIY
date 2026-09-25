@@ -50,7 +50,9 @@ class Body:
         self._touch_interrupt = False
         self._dance_index = 0
         # homing: software dead-reckoning (doly_drive.get_position is broken
-        # in the pybind layer, so spark tracks its own estimate)
+        # in the pybind layer, so spark tracks its own estimate). Anchored
+        # to [0,0,0] whenever charging confirms the seated pose; home.py
+        # navigates those remembered coordinates on 'go home'.
         self._pose = None          # [x_mm, y_mm, heading_deg] or None = unknown
         self._homing = False
         self._roaming = False
@@ -778,10 +780,20 @@ class Body:
                                 self._hazard_airborne = False
                                 self._hazard_gen += 1
                     self._save_dock_hold()
-                    self._pose = None
+                    # Home frame anchored (stock HomeControl.SetHome): the
+                    # seated pose is the world origin, heading 0 = facing
+                    # away from the dock. Guarded moves dead-reckon from
+                    # here so 'go home' can drive remembered coordinates.
+                    self._pose = [0.0, 0.0, 0.0]
                     self._roam_distance_bound = None
                     self.stop_everything()
                     _log("charging confirmed: motors parked")
+                elif self._pose is None and self._charging.healthy():
+                    # Booted while parked on the charger (dock hold restored):
+                    # the seated pose is a known fixed reference, so the home
+                    # frame can anchor without a transition event. Healthy
+                    # (settled) readings only — a noisy sample never anchors.
+                    self._pose = [0.0, 0.0, 0.0]
                 self._dock_clear_since = None
                 if self._dock_pickup_at is not None and now - self._dock_pickup_at > 3:
                     self._dock_pickup_at = None  # reseated on powered dock

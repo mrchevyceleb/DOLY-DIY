@@ -479,6 +479,16 @@ class Homing:
         # Installed AiGoHome sets both arms to 0 before approaching.
         if self.body.has.get("arm") and not self.body.arm_angle(0, speed=30):
             return "posture"
+        # Stock-style home memory: drive the remembered standoff blind when
+        # the pose estimate is alive; 'skip'/'limit' still get the camera.
+        # 'lost' means the frame died mid-leg (pickup/airborne): motion is
+        # already stopped and the in-place visual search is the safe fallback.
+        from .home import navigate_home
+        _log(f"home memory: navigate_home pose={self.body._pose}")
+        result = navigate_home(self.body, self.interlock)
+        _log(f"home memory: navigate_home={result} pose={self.body._pose}")
+        if result not in ("ok", "skip", "limit", "lost"):
+            return result
         with DockCamera(self.camera_interrupted) as camera:
             result, observation = self.approach(camera)
         if result != "aligned":

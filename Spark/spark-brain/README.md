@@ -127,12 +127,20 @@ running with `qwen/qwen3.6-35b-a3b` loaded, context 8192, TTL off.
   bearing. This was checked against the board schematic and live mixer.
   See [TI's codec specifications](https://www.ti.com/product/TLV320AIC3110).
 - **'Go home' / battery at or below 10%** -> requests manual placement while
-  `homing.enabled` is false. The new camera-guided controller is implemented,
-  but remains disabled pending repeatable physical docking. It finds the stock
+  `homing.enabled` is false. The camera-guided controller finds the stock
   marker, approaches in short guarded steps, verifies a half-turn with the IMU,
   and backs in at stock speed with arms at 0 degrees. Arrival requires steady
   electrical charging with stopped motors. Centered but oblique or ambiguous
   marker poses are rejected; rear edge events always cancel entry.
+  **Home memory (stock-style, `spark/home.py`):** like the stock `HomeControl`,
+  the seated charging pose anchors a dead-reckoned world frame (the SDK's
+  `get_position` is broken in pybind, so guarded moves credit their own
+  estimate). 'Go home' first drives the remembered 450mm standoff blind —
+  no marker sighting needed — then the camera controller takes over for
+  alignment and entry as above. Each blind leg caps at 1200mm per attempt
+  with the usual live edge/power interlocks. A lost pose (pickup, airborne,
+  carried off the dock) disables blind navigation and homing falls back to
+  the pure visual search; docking again re-anchors the frame.
   See the [manufacturer's homing explanation](https://community.doly.ai/public/d/55-find-home-station-via-sdk).
 - **Charging** -> reactions stay parked, including after contact loss. An
   affirmative wheel movement/dance command authorizes a controlled departure.

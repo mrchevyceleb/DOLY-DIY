@@ -19,6 +19,7 @@ class Departure:
         self.stop = stop
         self.deadline = time.monotonic() + 10
         self.reason = None
+        self.moved = False  # a commanded step completed this departure
 
     def check(self):
         """Called with the body's power lock, including by its monitor."""
@@ -75,7 +76,13 @@ class Departure:
                 if clear_since is None:
                     clear_since = time.monotonic()
                 elif time.monotonic() - clear_since >= 1.25:
-                    b._pose = None
+                    if not self.moved:
+                        # Stale-hold release with no commanded travel: an
+                        # undetected displacement cannot be ruled out, so
+                        # the anchored frame must not survive it.
+                        b._pose = None
+                    # Contacts cleared by our own measured steps keep the
+                    # pose valid — completed steps credit their real travel.
                     return "ok"
             else:
                 clear_since = None
@@ -114,6 +121,8 @@ class Departure:
         self.front_probe = False  # never extend or repeat the measured probe
         if not completed:
             return "timeout"
+        self.moved = True
+        b._pose_update(dist_mm=20.0 if self.forward else -20.0)
         print(f"[departure] 20mm step completed gaps={b._edge_gaps()}",
               file=sys.stderr, flush=True)
         return "ok"
