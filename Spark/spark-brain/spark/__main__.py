@@ -791,6 +791,14 @@ class Spark:
 
     def converse(self, text):
         t0 = time.perf_counter()
+        # During a celebration her speaker floods her own mic: transcribed
+        # fragments of her hype lines must never become user turns. Only
+        # her name or an explicit stop reaches the pipeline.
+        if getattr(self.router, "_celebration", None) is not None:
+            low = text.lower()
+            if not re.search(r"(stop|spark|sparky|bark|barks)", low):
+                log("spark", f"ignored party echo: '{text[:40]}'")
+                return
         self.body.react_enabled = False  # sensor reactions off while conversing
         try:
             # 1) stock commands + web search — instant / tool paths
