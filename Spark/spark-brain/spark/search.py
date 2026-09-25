@@ -8,8 +8,11 @@ The brain triggers these itself by replying with 'SEARCH: <query>' or
 'READ: <url>' as its entire first spoken line (see parse_tool_call).
 """
 import html
+import ipaddress
 import re
+import socket
 import sys
+import urllib.error
 import urllib.parse
 import urllib.request
 
@@ -74,7 +77,7 @@ def context_block(query, results):
     for i, r in enumerate(results, 1):
         t = " ".join((r["title"] or "").split())[:80]
         s = " ".join((r["snippet"] or "").split())[:240]
-        lines.append(f"{i}. {t} — {s} [{r['url'][:100]}]")
+        lines.append(f"{i}. {t} — {s} [{r['url']}]")
     return "\n".join(lines)
 
 
@@ -84,23 +87,81 @@ _BLOCK_RE = re.compile(r"(?is)<(script|style|head|nav|footer|aside|svg|form|nosc
 _COMMENT_RE = re.compile(r"(?s)<!--.*?-->")
 _TAG_RE = re.compile(r"<[^>]+>")
 _TITLE_RE = re.compile(r"(?is)<title[^>]*>(.*?)</title>")
+_REDIRECTS = (301, 302, 303, 307, 308)
+
+
+class _NoRedirect(urllib.request.HTTPRedirectHandler):
+    """Auto-following would skip the public-host revalidation below."""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        return None
+
+
+def _public_http_target(url):
+    """True only for http(s) URLs whose host resolves to public space.
+
+    Blocks SSRF style reads of loopback, LAN, link-local, and reserved
+    ranges (the brain runs on Matt's network; a prompted or injected
+    READ must never point it at internal services).
+    """
+    try:
+        parsed = urllib.parse.urlsplit(url)
+    except ValueError:
+        return False
+    if parsed.scheme.lower() not in ("http", "https"):
+        return False
+    if parsed.username or parsed.password:          # no credentials relay
+        return False
+    try:
+        host = (parsed.hostname or "").strip("[]").lower()
+        port = parsed.port or (443 if parsed.scheme.lower() == "https" else 80)
+    except ValueError:                               # malformed port / IPv6 literal
+        return False
+    if not host:
+        return False
+    try:
+        infos = socket.getaddrinfo(host, port, proto=socket.IPPROTO_TCP)
+    except (socket.gaierror, UnicodeError, ValueError):
+        return False
+    for info in infos:
+        try:
+            ip = ipaddress.ip_address(info[4][0])
+        except ValueError:
+            return False
+        if not (ip.is_global and not ip.is_reserved):
+            return False
+    return True
 
 
 def read_page(url, max_chars=3500, timeout_s=6):
     """Fetch an http(s) page and return {'title', 'text'} or None.
 
-    Stdlib only: drops script/style/nav blocks and tags, keeps readable
-    text, capped at max_chars so a page never floods her small context.
+    Stdlib only: public-host gate on every redirect hop, content-type
+    gate, drops script/style/nav blocks and tags, keeps readable text,
+    capped at max_chars so a page never floods her small context.
     """
     url = (url or "").strip()
-    if not re.match(r"^https?://", url, re.I):
-        return None
-    req = urllib.request.Request(url, headers=dict(_UA))
-    with urllib.request.urlopen(req, timeout=timeout_s) as resp:
-        ctype = (resp.headers.get("Content-Type") or "").lower()
-        if not any(t in ctype for t in ("html", "text/plain", "xml", "json")):
+    opener = urllib.request.build_opener(_NoRedirect)
+    raw = None
+    for _ in range(4):  # initial fetch + up to 3 redirect hops
+        if not _public_http_target(url):
             return None
-        raw = resp.read(2_000_000).decode("utf-8", errors="replace")
+        req = urllib.request.Request(url, headers=dict(_UA))
+        try:
+            resp = opener.open(req, timeout=timeout_s)
+        except urllib.error.HTTPError as e:
+            if e.code in _REDIRECTS and e.headers.get("Location"):
+                url = urllib.parse.urljoin(url, e.headers["Location"])
+                continue
+            return None
+        with resp:
+            ctype = (resp.headers.get("Content-Type") or "").lower()
+            if not any(t in ctype for t in ("html", "text/plain", "xml", "json")):
+                return None
+            raw = resp.read(2_000_000).decode("utf-8", errors="replace")
+        break
+    if raw is None:
+        return None
     m = _TITLE_RE.search(raw)
     title = ""
     if m:

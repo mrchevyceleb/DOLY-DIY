@@ -1,14 +1,22 @@
 """Brain-triggered web tools: marker parsing, page fetch, tool loop."""
-import io
+import os
+import socket
 import sys
 import unittest
 from pathlib import Path
 from unittest.mock import Mock, patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+if not hasattr(os, "getuid"):
+    os.getuid = lambda: 0
 
 from spark import search as websearch
 from spark.__main__ import Spark
+
+
+def _public_dns(*args, **kwargs):
+    """Resolve like real DNS, but always to a public address (hermetic)."""
+    return [(socket.AF_INET, socket.SOCK_STREAM, socket.IPPROTO_TCP, "", ("93.184.216.34", 80))]
 
 
 class ParseToolCallTests(unittest.TestCase):
@@ -52,7 +60,10 @@ class ReadPageTests(unittest.TestCase):
         resp.read.return_value = data
         resp.__enter__ = Mock(return_value=resp)
         resp.__exit__ = Mock(return_value=False)
-        with patch("urllib.request.urlopen", return_value=resp):
+        opener = Mock()
+        opener.open.return_value = resp
+        with patch("urllib.request.build_opener", return_value=opener), \
+             patch.object(websearch.socket, "getaddrinfo", side_effect=_public_dns):
             return websearch.read_page("https://example.com/review")
 
     def test_extracts_title_and_text(self):
@@ -77,6 +88,20 @@ class ReadPageTests(unittest.TestCase):
     def test_rejects_non_http(self):
         self.assertIsNone(websearch.read_page("file:///etc/passwd"))
         self.assertIsNone(websearch.read_page(""))
+
+    def test_rejects_private_and_loopback_targets(self):
+        # SSRF guard: the brain must never READ Matt's LAN, loopback,
+        # link-local, or cloud-metadata addresses.
+        for bad in ("127.0.0.1", "192.168.50.204", "10.0.0.5", "169.254.169.254",
+                    "100.112.197.4", "::1", "fe80::1"):
+            with patch.object(websearch.socket, "getaddrinfo",
+                              return_value=[(socket.AF_INET, socket.SOCK_STREAM,
+                                             socket.IPPROTO_TCP, "", (bad, 80))]):
+                self.assertIsNone(websearch.read_page(f"http://{bad}/x"), bad)
+
+    def test_rejects_urls_with_credentials(self):
+        with patch.object(websearch.socket, "getaddrinfo", side_effect=_public_dns):
+            self.assertIsNone(websearch.read_page("http://user:pass@example.com/"))
 
     def test_page_block_render(self):
         block = websearch.page_block("https://x.io", {"title": "T", "text": "hello"})
@@ -122,6 +147,7 @@ class ToolLoopTests(unittest.TestCase):
 
     def test_read_tool_after_search(self):
         spark = self._spark()
+        spark.memory.messages.side_effect = lambda system: [{"role": "user", "content": "q"}]
         spark.brain.chat_stream.side_effect = [
             iter(["SEARCH: mars weather."]),
             iter(["READ: https://nasa.gov/mars."]),
@@ -134,6 +160,12 @@ class ToolLoopTests(unittest.TestCase):
             spark._llm_reply("what is the weather on mars?")
         self.assertEqual(spark.memory.add.call_args_list[-1][0],
                          ("assistant", "It is minus eighty."))
+        # the READ hop keeps the search results it supplements
+        final_messages = spark.brain.chat_stream.call_args_list[2][0][0]
+        content = final_messages[-1]["content"]
+        self.assertIn("Web search results for", content)
+        self.assertIn("Fetched page", content)
+        self.assertIn("-80F", content)
 
     def test_failed_search_degrades_gracefully(self):
         spark = self._spark()

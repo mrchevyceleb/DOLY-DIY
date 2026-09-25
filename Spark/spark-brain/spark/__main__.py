@@ -26,6 +26,15 @@ OFFLINE_LINE = "My big brain is offline right now, but I can still take commands
 WEB_SEARCH_FILLER = "Let me look that up."
 WEB_READ_FILLER = "Let me read that."
 
+
+def _clamp(value, default, lo, hi):
+    """Config numbers arrive from JSON: coerce to a bounded int, never crash."""
+    try:
+        value = int(value)
+    except (TypeError, ValueError):
+        return default
+    return max(lo, min(value, hi))
+
 # --- ASR noise guards -------------------------------------------------------
 # whisper describes non-speech audio parenthetically: '(beep)', '(water
 # splashing)', '[music]'. Those are not user utterances — never converse them.
@@ -597,9 +606,13 @@ class Spark:
         turn actually needs them. Persists partial output if the stream
         dies mid-reply.
         """
-        web_cfg = self.cfg.get("web", {})
+        web_cfg = self.cfg.get("web", {}) or {}
+        try:
+            default_hops = max(0, min(int(web_cfg.get("max_hops", 2)), 4))
+        except (TypeError, ValueError):
+            default_hops = 2
         if web_hops is None:
-            web_hops = (web_cfg.get("max_hops", 2)
+            web_hops = (default_hops
                         if web_cfg.get("enabled", True) and extra_context is None else 0)
         self.memory.add("user", user_text)
         self._generate_reply(user_text, extra_context, web_hops)
@@ -658,17 +671,18 @@ class Spark:
                                      "WEB SEARCH FAILED (no results or network unreachable). "
                                      "Tell Matt you could not check, or answer from memory "
                                      "with a clear caveat."),
-                        WEB_SEARCH_FILLER, user_text, web_hops)
+                        WEB_SEARCH_FILLER, user_text, extra_context, web_hops, join_s=12)
                 else:
-                    wcfg = self.cfg.get("web", {})
+                    wcfg = self.cfg.get("web", {}) or {}
                     self._run_web_tool(
                         lambda: websearch.read_page(arg,
-                                                    max_chars=wcfg.get("page_max_chars", 3500),
-                                                    timeout_s=wcfg.get("page_timeout_s", 6)),
+                                                    max_chars=_clamp(wcfg.get("page_max_chars", 3500), 3500, 500, 8000),
+                                                    timeout_s=_clamp(wcfg.get("page_timeout_s", 6), 6, 2, 15)),
                         lambda page: (websearch.page_block(arg, page) if page else
                                       "PAGE FETCH FAILED (blocked, too slow, or not a text "
-                                      "page). Answer from the search snippets you already have."),
-                        WEB_READ_FILLER, user_text, web_hops)
+                                      "page). Answer from the search results you already have."),
+                        WEB_READ_FILLER, user_text, extra_context, web_hops,
+                        join_s=_clamp(wcfg.get("page_timeout_s", 6), 6, 2, 15) + 4)
                 return
             if not first:
                 self.body.eyes("idle")
@@ -707,12 +721,15 @@ class Spark:
             self.memory.add("assistant", reply)
         self.body.eyes("idle")
 
-    def _run_web_tool(self, fetch, render, filler, user_text, web_hops):
+    def _run_web_tool(self, fetch, render, filler, user_text, prior_context, web_hops,
+                      join_s=12):
         """Fetch web data while the filler line plays, then re-ask the brain.
 
         The fetch overlaps the spoken filler so the tool costs the larger
-        of the two, not their sum. Re-asking decrements the hop budget so
-        one reply performs at most max_hops tool calls."""
+        of the two, not their sum. Earlier tool context is kept and the
+        new block appended, so a READ supplements the search results it
+        came from instead of replacing them. Re-asking decrements the hop
+        budget so one reply performs at most max_hops tool calls."""
         box = {}
 
         def _bg():
@@ -724,8 +741,12 @@ class Spark:
         t = threading.Thread(target=_bg, daemon=True)
         t.start()
         self.body.speak(filler)
-        t.join(timeout=10)
+        t.join(timeout=join_s)
+        if t.is_alive():
+            log("spark", f"web tool still running after {join_s}s — treating as failed")
         context = render(box.get("out"))
+        if prior_context:
+            context = prior_context + "\n\n" + context
         log("spark", f"web tool context: {len(context)} chars")
         self._generate_reply(user_text, context, web_hops - 1)
 
