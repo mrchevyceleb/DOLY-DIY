@@ -268,7 +268,8 @@ class Spark:
 
         # ONE persistent mic stream: always drained (no stale buffers)
         with MicStream(self.cfg) as mic:
-            self.body.motion_stop_factory = lambda: self._motion_stop_listener(mic, recognizer)
+            self.body.motion_stop_factory = lambda name_stops=True: self._motion_stop_listener(
+                mic, recognizer, name_stops=name_stops)
             idle_cfg = self.cfg.get("idle", {})
             def _reset_idle():
                 t = time.time()
@@ -438,12 +439,15 @@ class Spark:
                                   and follow_cfg.get("follow_up_window_s", 8) > 0
                                   and follow_cfg.get("follow_ups", 2) > 0)
 
-    def _motion_stop_listener(self, mic, recognizer):
+    def _motion_stop_listener(self, mic, recognizer, name_stops=True):
         """Recognize STOP and her NAME while approach/roam runs.
 
         A tiny grammar maps near-name speech to 'spark' far more reliably
         than full-vocabulary Vosk. Hearing the name stops the motion and
         arms a pending wake so the voice loop listens right after.
+        name_stops=False (dock departure) keeps only an explicit 'stop':
+        trailing speech around "Spark, come here" must not cancel the
+        exit step the same command authorized.
         """
         import json
         mic.discard()
@@ -458,9 +462,11 @@ class Spark:
                 parsed = json.loads(result)
                 words = (parsed.get("text", "") or parsed.get("partial", "")).split()
                 if "stop" in words:
-                    log("spark", "voice stop during approach")
+                    log("spark", "voice stop during motion")
                     return True
                 if any(w in ("spark", "sparky") for w in words):
+                    if not name_stops:
+                        continue  # departure: her name is not a stop word
                     log("spark", "wake word during motion — stopping to listen")
                     self._motion_wake_pending.set()
                     return True

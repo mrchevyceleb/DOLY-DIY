@@ -1743,7 +1743,9 @@ class Body:
                 return False
             self.stop_everything()
             self._approach_stop.clear()
-            stop = self.motion_stop_factory() if self.motion_stop_factory else lambda: False
+            # Departure stops only on an explicit 'stop': the wake word that
+            # authorized this command must not cancel it half a step in.
+            stop = self.motion_stop_factory(False) if self.motion_stop_factory else lambda: False
             departure = Departure(self, True, gaps, stop, front_probe=front_probe)
             self._departure = departure
             self._leaving_home = True
@@ -1819,7 +1821,7 @@ class Body:
         self._next_reseat_probe = now + 600  # consume the cadence only on a real attempt
         if force:
             self._next_forced_reseat_probe = now + 600
-        stop = self.motion_stop_factory() if self.motion_stop_factory else (lambda: False)
+        stop = self.motion_stop_factory(False) if self.motion_stop_factory else (lambda: False)
         self._approach_stop.clear()
         self._reseating = True
         deadline = time.monotonic() + 30
