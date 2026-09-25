@@ -442,17 +442,21 @@ class Body:
             return False
 
     def _departure_gap_exempt(self, direction):
-        """Front gap GPIO events during the authorized dock-face exit step.
+        """Front gap GPIO events the authorized dock exit expects.
 
-        Rolling off the dock face makes the front pair transition — that is
-        expected physics for the one measured 20mm probe, not a cliff. The
-        departure's own polled check still cancels on any violation (rear
-        gaps, new gap kinds, timeouts) at 30ms granularity.
+        The seated dock reads exactly the front pair; rolling out over the
+        base transitions those sensors while the pair is still within the
+        departure's allowance (probe, contact verification, bounded
+        clearance). Once open ground returns the pair leaves the allowance
+        and a front event is a real cliff again.
         """
         d = getattr(self, "_departure", None)
-        return bool(self._leaving_home and d is not None
-                    and getattr(d, "front_probe", False)
-                    and str(direction).split(".")[-1].startswith("Front"))
+        if not (self._leaving_home and d is not None):
+            return False
+        if not str(direction).split(".")[-1].startswith("Front"):
+            return False
+        return bool(getattr(d, "front_probe", False)
+                    or {"Front_Left", "Front_Right"} & getattr(d, "allowed_gaps", set()))
 
     def _init_edge(self):
         """ToF edge sensors — the not-driving-off-tables subsystem."""

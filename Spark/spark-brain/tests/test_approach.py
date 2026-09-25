@@ -205,6 +205,17 @@ class ApproachTests(unittest.TestCase):
         b._leaving_home = False
         self.assertFalse(b._departure_gap_exempt("EdgeDirection.Front"))
 
+    def test_clearance_front_profile_exempt_until_ground_returns(self):
+        from types import SimpleNamespace
+        b = Body({}, hw=False)
+        b._leaving_home = True
+        b._departure = SimpleNamespace(front_probe=False, clearing=True, forward=True,
+                                       allowed_gaps={"Front_Left", "Front_Right"})
+        self.assertTrue(b._departure_gap_exempt("EdgeDirection.Front"))   # still over the base
+        self.assertFalse(b._departure_gap_exempt("EdgeDirection.Back"))   # rear still guards
+        b._departure.allowed_gaps = set()  # open ground reached: allowance shed
+        self.assertFalse(b._departure_gap_exempt("EdgeDirection.Front"))  # real edge now stops
+
     def test_departure_ignores_bare_name_but_honors_stop(self):
         # trailing "Spark..." speech must not cancel a dock exit mid-step
         spark = Spark.__new__(Spark)

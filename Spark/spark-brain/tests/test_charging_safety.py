@@ -164,7 +164,11 @@ class ChargingSafetyTests(unittest.TestCase):
                 self.assertEqual(b.docked, failure is not None)
                 self.assertFalse(b._leaving_home)
                 self.assertIsNone(b._departure)
-                self.assertEqual(b._drive.go_distance.call_count, 5 if failure is None else 1)
+                # A deep seat keeps the dock-face pair through the whole
+                # bounded clearance, so "stalled" (gaps never clear) now
+                # also spends all five steps - and still fails closed.
+                full_clearance = failure in (None, "stalled")
+                self.assertEqual(b._drive.go_distance.call_count, 5 if full_clearance else 1)
                 self.assertEqual(b._drive.go_distance.call_args_list[0].args[1:],
                                  (20, 25, True, True))  # stock dock exits forward
                 b._drive.go_rotate.assert_not_called()
@@ -175,7 +179,7 @@ class ChargingSafetyTests(unittest.TestCase):
                     self.assertEqual(b.last_departure_result, "edge")
                     self.assertEqual(b._edge_hazard, "forward")
                     self.assertFalse(b._undock())  # no repeat into the same gap
-                    self.assertEqual(b._drive.go_distance.call_count, 1)
+                    self.assertEqual(b._drive.go_distance.call_count, 5)
                 b._drive.abort.assert_called()
 
     def test_failed_voice_exit_below_full_does_not_cancel_later_auto_roam(self):
@@ -244,6 +248,25 @@ class ChargingSafetyTests(unittest.TestCase):
             self.assertIsNone(d.check())
             gaps.append(trailing)
             self.assertEqual(d.check(), "edge")
+
+    def test_deep_seat_tolerates_dock_face_until_ground_returns(self):
+        # 2026-09-25: a deeper seat kept the front pair reading the dock
+        # base after the 20mm probe - the exit must still complete.
+        from spark.departure import Departure
+        gaps = ["Front_Left", "Front_Right"]
+        b = self.body(pct=80, gaps=gaps)
+        b._leaving_home = True
+        b._charging.healthy.return_value = True
+        d = Departure(b, True, list(gaps), lambda: False)
+        d.front_probe = False                    # probe step already completed
+        self.assertIsNone(d.check())             # post-probe verify tolerates the pair
+        d.clearing = True
+        self.assertIsNone(d.check())             # bounded clearance tolerates the pair
+        gaps.clear()                             # open ground reached under the nose
+        self.assertIsNone(d.check())             # allowance shed...
+        self.assertFalse({"Front_Left", "Front_Right"} & d.allowed_gaps)
+        gaps.append("Front_Left")                # ...so a real edge ahead stops it
+        self.assertEqual(d.check(), "edge")
 
     def test_clearance_can_leave_rear_lip_but_front_and_airborne_events_still_stop(self):
         from spark.departure import Departure

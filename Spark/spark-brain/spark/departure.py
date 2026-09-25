@@ -1,12 +1,17 @@
 """A measured 20mm dock exit, then guarded clearance before any turn.
 
-The stock dock's front gap profile cleared within this step in the floor
-test. Only a recently confirmed charger permits that initial profile. Once
-ground returns, front gaps always cancel; rear gaps are allowed only while
-moving straight forward to clear the base.
+Only a recently confirmed charger permits the initial profile. While the
+robot is still over the dock base the seated front pair may keep reading
+gaps — that exact pair stays allowed through the exit step, its contact
+verification and the bounded forward clearance. Once open ground returns
+under the front sensors the pair leaves the allowance for good, and any
+later front gap is a real edge. Rear gaps are allowed only while moving
+straight forward to clear the base.
 """
 import sys
 import time
+
+_DOCK_FACE = {"Front_Left", "Front_Right"}
 
 
 class Departure:
@@ -36,9 +41,15 @@ class Departure:
         else:
             gaps = set(b._edge_gaps())
             leading = "Front" if self.forward else "Back"
-            allowed = {"Back_Left", "Back_Right"} if self.clearing else self.allowed_gaps
+            if self.clearing:
+                allowed = {"Back_Left", "Back_Right"} | (self.allowed_gaps & _DOCK_FACE)
+            else:
+                allowed = self.allowed_gaps
+            # The seated dock reads exactly this front pair; driving out
+            # over the base keeps reading it until open ground returns.
+            dock_face = gaps == _DOCK_FACE and bool(self.allowed_gaps & _DOCK_FACE)
             if (not b.has.get("edge") or not gaps <= allowed
-                    or (not self.front_probe and any(g.startswith(leading) for g in gaps))):
+                    or (any(g.startswith(leading) for g in gaps) and not dock_face)):
                 self.reason = "edge"
             else:
                 self.allowed_gaps.intersection_update(gaps)
@@ -62,7 +73,7 @@ class Departure:
             b.refresh_power()
             return self.check()
 
-    def verify_contact_clear(self):
+    def verify_contact_clear(self, allow_dock_face=False):
         """Motor load alone cannot prove that the charging contacts cleared."""
         b = self.body
         until = min(self.deadline, time.monotonic() + 3)
@@ -70,7 +81,8 @@ class Departure:
         while time.monotonic() < until:
             if self.poll():
                 return self.reason
-            if b._edge_gaps():
+            gaps = set(b._edge_gaps())
+            if gaps and not (allow_dock_face and gaps == _DOCK_FACE):
                 return "edge"
             if b._charging.charging is False:
                 if clear_since is None:
@@ -140,7 +152,8 @@ class Departure:
         # SDK RPM reported zero during verified movement in the floor test.
         # Completion/odometry alone also cannot prove departure. Ground and
         # sustained discharge at rest are the required physical evidence.
-        result = self.verify_contact_clear()
+        # A deep seat keeps the front pair over the base here — allowed.
+        result = self.verify_contact_clear(allow_dock_face=True)
         if result != "ok":
             return result
         self.clearing = True
