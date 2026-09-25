@@ -16,6 +16,7 @@ import urllib.request
 
 from . import commands as cmds
 from . import search as websearch
+from .govee import GoveeLights
 
 
 def _log(msg):
@@ -38,6 +39,12 @@ _SEARCH_INTENT = re.compile(
     re.IGNORECASE,
 )
 
+
+# Govee room lights — "my/room/the lights", never her own LEDs/eyes
+_GOVEE_RE = re.compile(r"\b(?:govee|lights?)\b", re.IGNORECASE)
+_HERS_LIGHTS_RE = re.compile(r"\byour\s+(?:lights?|leds?)\b", re.IGNORECASE)
+_GOVEE_OFF_RE = re.compile(r"\b(?:turn\s+off|switch\s+off|shut\s+off|lights?\s+off|kill|blackout)\b", re.I)
+_GOVEE_ON_RE = re.compile(r"\b(?:turn\s+on|switch\s+on|lights?\s+on|put\s+on|fire\s+up)\b", re.I)
 
 EDGE_REFUSAL = ("I can't drive here — I'm either on my dock or too close to an edge. "
                 "Put me somewhere with room and ask again!")
@@ -90,6 +97,11 @@ class Router:
         self.body = body
         self.brain = brain
         self.memory = memory
+        try:
+            self.govee = GoveeLights(cfg)
+        except Exception as e:
+            _log(f"govee unavailable: {e}")
+            self.govee = None
         self.llm_reply = None  # set by Spark: streamed brain reply w/ context
         self.last_motion_result = None
         self._last_motion_at = 0
@@ -118,8 +130,16 @@ class Router:
             self._web_search(raw_text)
             return True
 
-        # color commands (need param extraction before fuzzy match)
+        # Govee room lights: instant local control, checked before her own LEDs
         low = text.lower()
+        if (self.govee and self.govee.enabled and _GOVEE_RE.search(low)
+                and not _HERS_LIGHTS_RE.search(low) and "eye" not in low):
+            reply = self._govee_lights(text)
+            if reply is not None:
+                self.body.speak(reply)
+                return True
+
+        # color commands (need param extraction before fuzzy match)
         if ("eye" in low or "eyes" in low) and ("color" in low or "colour" in low):
             color = cmds.extract_color(text)
             if color and self.body.eye_color(color):
@@ -191,6 +211,46 @@ class Router:
         _log(f"movement follow-up: {self.last_motion_result}")
         self.body.speak(reply)
         return True
+
+    # ---------------------------------------------------------------- govee
+    def _govee_lights(self, text):
+        """Parse a room-lights request; None lets other handlers try."""
+        low = text.lower()
+        g = self.govee
+        # on / off
+        if _GOVEE_OFF_RE.search(low):
+            return g.turn(False)
+        if _GOVEE_ON_RE.search(low):
+            return g.turn(True)
+        # brightness: "dim (to N%)", "set to 40", "half", word numbers
+        m = re.search(r"(?:dim|brighten|brightness|set|turn)[^0-9]{0,20}"
+                      r"(\d+|" + "|".join(cmds._NUM_WORDS) + r")\s*(?:%|percent)?\b", low)
+        if m and re.search(r"\b(?:dim|brighten|brightness|percent)\b", low):
+            pct = m.group(1)
+            pct = cmds._NUM_WORDS.get(pct, pct)
+            try:
+                return g.brightness(round(float(pct)))
+            except (TypeError, ValueError):
+                pass
+        if re.search(r"\bdim\b", low):
+            return g.brightness(30)
+        if re.search(r"\bbrighten\b|\bfull\b", low):
+            return g.brightness(100 if re.search(r"\bfull\b", low) else 75)
+        # white temperatures
+        if re.search(r"\bwarm\s*white\b|\bwarmer\b", low):
+            return g.color_temp(3200)
+        if re.search(r"\bcool\s*white\b|\bdaylight\b|\bcooler\b|\bwhiter\b", low):
+            return g.color_temp(6500)
+        # named color: "set my lights to blue", "make the lights purple"
+        color = cmds.extract_color(text)
+        if color:
+            return g.color(color)
+        # status / discovery check
+        if re.search(r"\b(?:status|see|find|which|how many)\b", low):
+            return g.status()
+        if re.search(r"\blights?\s*$", low.strip()):
+            return g.status()
+        return None
 
     # -------------------------------------------------------------- executor
     def _execute(self, action, text):

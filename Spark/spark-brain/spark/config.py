@@ -31,6 +31,10 @@ _DEFAULTS = {
         "page_max_chars": 3500,
         "page_timeout_s": 6,
     },
+    "govee": {
+        "enabled": True,       # room-light voice control (LAN first)
+        "api_key": None,       # Govee Home app: Me -> Apply for API Key
+    },
     "state_dir": "/opt/spark/state",
 }
 
