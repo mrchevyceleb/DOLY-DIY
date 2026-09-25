@@ -235,7 +235,7 @@ class Body:
         if rc != 0:
             raise RuntimeError(f"drive init rc={rc}")
         drive.on_complete(lambda i: None)
-        drive.on_error(lambda i, s, t: _log(f"drive error {i}"))
+        drive.on_error(lambda i, s, t: _log(f"drive error id={i} side={s} type={t}"))
         self._drive = drive
 
     def _init_led(self):
@@ -1960,7 +1960,7 @@ class Body:
             if pct is not None and pct <= 3:
                 return "power"
             recoverable = {"limit", "lost", "not_found", "alignment",
-                           "too_close", "turn_unverified"}
+                           "too_close", "turn_unverified", "timeout"}
             final = "sensor"
             for attempt in range(1, attempts + 1):
                 result = Homing(self, stop).run()

@@ -12,7 +12,9 @@ class DockEntry:
         self.travelled = 0
         self.allow_front_after = (max(0, self.distance-60) if allow_front_after is None
                                   else allow_front_after)
-        self.deadline = time.monotonic()+15
+        # Speed 10 moves ~10mm/s: the full distance needs ~distance/10
+        # seconds of motion alone, plus per-step overhead and corrections.
+        self.deadline = time.monotonic()+10+self.distance*0.15
         self.heading = body._imu_yaw
         self.initial_heading = self.heading
         self.reason = None
@@ -142,7 +144,9 @@ class DockEntry:
                     rc = b._drive.go_distance(b._next_id(), step, 10, False, True)
                     if rc is False or (rc is not None and rc < 0):
                         return "not_started"
-                end, running, complete, corrected = time.monotonic()+1.5, False, False, False
+                # A 20mm step at speed 10 needs ~2s; 1.5s made every step a
+                # coin flip against the completion watchdog (real stall loss).
+                end, running, complete, corrected = time.monotonic()+3, False, False, False
                 while time.monotonic() < end:
                     with b._power_lock:
                         b.refresh_power()
