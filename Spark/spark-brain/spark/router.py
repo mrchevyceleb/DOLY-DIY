@@ -24,6 +24,12 @@ def _log(msg):
     print(f"[router] {msg}", file=sys.stderr)
 
 
+# fired timers/alarms celebrate until stopped: routines, light shows, hype
+_PARTY_COLORS = ["Red", "Orange", "Gold", "Green", "Cyan", "Blue", "Purple", "Pink"]
+_PARTY_HYPE = ["Woo! Still going!", "Come on, this is my moment!",
+               "Tell me to stop whenever you're ready!", "Best timer ever!"]
+
+
 # "Imagine..." -> she acts it out: themed routine + the brain narrating theatrically
 _IMAGINE_RE = re.compile(r"\b(imagine|pretend|act like|act out)\b", re.IGNORECASE)
 _IMAGINE_THEMES = {
@@ -134,8 +140,13 @@ class Router:
         # emergency stop outranks EVERY other route (search, colors, table)
         tokens = text.split()
         if tokens and (tokens[0] == "stop" or tokens[-1] == "stop"):
+            self._stop_celebration()
             self.body.stop_everything()
             return True
+
+        # talking to her ends any running celebration — she attends to you
+        if getattr(self, "_celebration", None) is not None:
+            self._stop_celebration()
 
         # she asked "how long?" / "for what time?" — this utterance is the answer
         pending = getattr(self, "_pending", None)
@@ -548,8 +559,16 @@ class Router:
 
     # ---------------------------------------------------------------- sched
     def _scheduled_fire(self, kind, label):
-        """Alarm/timer/reminder went off — speak it (runs on its own thread)."""
+        """Alarm/timer/reminder went off. Timers and alarms celebrate
+        until Matt talks to her or says stop; reminders just speak."""
         b = self.body
+        alerts = self.cfg.get("alerts", {}) or {}
+        if kind in ("timer", "alarm") and alerts.get("celebrate", True):
+            line = (f"Alarm! {label or 'Time to get moving!'} Time to celebrate!"
+                    if kind == "alarm" else
+                    f"Time's up!{(' ' + label) if label else ''} Let's celebrate!")
+            self._start_celebration(kind, line)
+            return
         b.eyes("thinking")
         if kind == "alarm":
             try:
@@ -564,6 +583,73 @@ class Router:
         else:
             b.speak(f"Time's up!{(' ' + label) if label else ''}")
         b.eyes("idle")
+
+    # ------------------------------------------------------------ celebration
+    def _start_celebration(self, kind, line):
+        """Party until told to stop: routines, Govee color show, hype."""
+        self._stop_celebration()
+        stop = threading.Event()
+        self._celebration = stop
+        t = threading.Thread(target=self._celebrate, args=(line, stop), daemon=True)
+        t.start()
+
+    def _stop_celebration(self):
+        ev = getattr(self, "_celebration", None)
+        if ev is not None:
+            ev.set()
+            self._celebration = None
+
+    def _celebrate(self, line, stop):
+        b = self.body
+        alerts = self.cfg.get("alerts", {}) or {}
+        max_s = max(30, min(int(alerts.get("celebrate_max_s", 600)), 3600))
+        party_lights = alerts.get("party_lights", True)
+        try:
+            b.eyes("speaking")
+            b.speak(line)
+            started = time.time()
+            cycle = 0
+            while not stop.is_set() and time.time() - started < max_s:
+                pct = b.battery_pct()
+                if pct is not None and pct < 20:
+                    _log("celebration: low battery, ending")
+                    break
+                # the room joins in
+                if party_lights and self.govee:
+                    try:
+                        self.govee.color(_PARTY_COLORS[cycle % len(_PARTY_COLORS)])
+                    except Exception:
+                        pass
+                # her body: full dance when free, arms-only when held
+                try:
+                    if not (getattr(b, "docked", False) or b.actuators_held()):
+                        b.dance()
+                    else:
+                        b.arms_party()
+                except Exception:
+                    try:
+                        b.mood_eyes("SPARKLING")
+                    except Exception:
+                        pass
+                if stop.is_set():
+                    break
+                cycle += 1
+                if cycle % 4 == 0:
+                    b.speak(_PARTY_HYPE[(cycle // 4) % len(_PARTY_HYPE)])
+                else:
+                    stop.wait(1.5)
+            b.eyes("idle")
+            if not stop.is_set():
+                b.speak("Okay, party's over. That was fun!")
+        except Exception as e:
+            _log(f"celebration failed: {e}")
+            try:
+                b.eyes("idle")
+            except Exception:
+                pass
+        finally:
+            if getattr(self, "_celebration", None) is stop:
+                self._celebration = None
 
     def _alarms(self, text):
         """Set / cancel / query absolute-time alarms."""

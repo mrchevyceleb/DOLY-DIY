@@ -133,6 +133,47 @@ class PendingSlotTests(unittest.TestCase):
         self.assertIsNone(r._pending)                        # slot forgotten
         a.add_timer.assert_not_called()
 
+class CelebrationTests(unittest.TestCase):
+    def _router(self):
+        r = _router()
+        r.cfg = {"state_dir": None, "alerts": {"celebrate": True,
+                                               "celebrate_max_s": 1,
+                                               "party_lights": False}}
+        r.body.actuators_held = Mock(return_value=True)
+        r.body.docked = False
+        r.body.battery_pct = Mock(return_value=80)
+        return r
+
+    def test_timer_fire_celebrates_until_stopped(self):
+        r = self._router()
+        r._scheduled_fire("timer", None)
+        ev = r._celebration
+        self.assertIsNotNone(ev)
+        import time as _t
+        _t.sleep(0.3)
+        r._stop_celebration()
+        _t.sleep(0.3)
+        spoken = [c[0][0] for c in r.body.speak.call_args_list]
+        self.assertTrue(any("celebrate" in str(x).lower() for x in spoken))
+        r.body.arms_party.assert_called()
+        r.body.dance.assert_not_called()          # actuators held -> arms only
+
+    def test_any_utterance_ends_the_party(self):
+        r = self._router()
+        r._scheduled_fire("alarm", "7:30 AM")
+        self.assertIsNotNone(r._celebration)
+        self.assertTrue(r.handle("what time is it"))
+        import time as _t
+        _t.sleep(0.3)
+        self.assertIsNone(r._celebration)
+
+    def test_reminder_stays_spoken_only(self):
+        r = self._router()
+        r._scheduled_fire("reminder", "stretch")
+        self.assertIsNone(getattr(r, "_celebration", None))
+        spoken = [c[0][0] for c in r.body.speak.call_args_list]
+        self.assertTrue(any("stretch" in str(x) for x in spoken))
+
 class AlarmClockTests(unittest.TestCase):
     def test_fire_and_persistence(self):
         import tempfile

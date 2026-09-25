@@ -36,6 +36,11 @@ _DEFAULTS = {
         "enabled": True,       # room-light voice control (LAN first)
         "api_key": None,       # Govee Home app: Me -> Apply for API Key
     },
+    "alerts": {
+        "celebrate": True,       # fired timers/alarms party until stopped
+        "celebrate_max_s": 600,  # hard cap so an unattended alarm can't dance forever
+        "party_lights": True,    # cycle the Govee room lights too
+    },
     "state_dir": "/opt/spark/state",
 }
 

@@ -101,5 +101,10 @@
   "govee": {
     "enabled": true,
     "api_key": null
+  },
+  "alerts": {
+    "celebrate": true,
+    "celebrate_max_s": 600,
+    "party_lights": true
   }
 }

@@ -178,9 +178,15 @@ running with `qwen/qwen3.6-35b-a3b` loaded, context 8192, TTL off.
 - **Alarms / timers / reminders** -> "set an alarm for 7am" (am/pm/24h/word
   times; bare 7-11 = morning, 1-6 = afternoon), "wake me at 6:30", "remind me
   to water the plants in 20 minutes" (labeled timer), "cancel the timer/alarm",
-  "how much time is left". Persisted in state across restarts; alarms fire with
-  the alarm sfx + speech, reminders speak their label. Missed-while-down items
-  are dropped, not replayed.
+  "how much time is left", and her own follow-up questions are answered by the
+  next utterance ("thirty seconds"). Persisted in state across restarts;
+  missed-while-down items are dropped, not replayed. A bare number with the
+  unit dropped by ASR ("set a timer for thirty") reads as minutes.
+- **Fired timers/alarms celebrate** (`alerts.celebrate`): dance routines when
+  free (arms-only boogie when held/docked), Govee room-light color cycling,
+  hype lines — until Matt speaks to her or says stop. Capped at
+  `alerts.celebrate_max_s` (10 min) and by battery < 20%. Reminders stay
+  spoken-only.
 - **Govee room lights** -> "turn on my lights", "set my lights to blue",
   "dim my lights to thirty", "warmer/cooler", "kill the lights". LAN protocol
   first (no key; models without LAN support never answer), cloud API when
