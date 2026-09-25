@@ -226,6 +226,11 @@ resumes after playback; voice interruption during a routine is not implemented.
 - Add stock commands -> append to `COMMANDS` in `spark/commands.py`.
 - Web access -> `web.enabled`, `web.max_hops` (tool calls per reply),
   `web.page_max_chars` / `web.page_timeout_s` for `READ:` page fetches.
+  `READ:` resolves every host and refuses loopback/LAN/link-local/reserved
+  targets, and after a search it only opens URLs that search returned; web
+  context is capped at 9000 chars. Accepted residuals (home-robot threat
+  model): a DNS-rebinding attacker could race the resolve→connect window, and
+  a hung fetch thread is abandoned, not killed (daemon; bounded by usage rate).
 
 ## Dock calibration progress
 

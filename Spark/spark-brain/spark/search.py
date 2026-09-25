@@ -77,8 +77,13 @@ def context_block(query, results):
     for i, r in enumerate(results, 1):
         t = " ".join((r["title"] or "").split())[:80]
         s = " ".join((r["snippet"] or "").split())[:240]
-        lines.append(f"{i}. {t} — {s} [{r['url']}]")
+        lines.append(f"{i}. {t} — {s} [{(r['url'] or '')[:300]}]")
     return "\n".join(lines)
+
+
+def urls_in_context(context):
+    """Every http(s) URL mentioned in a tool-context block."""
+    return set(re.findall(r"https?://[^\s\]\)\"'>]+", context or ""))
 
 
 # --------------------------------------------------------------- page fetch
@@ -190,14 +195,17 @@ def parse_tool_call(sentence):
 
     'SEARCH: <query>' -> ("search", query); 'READ: <url>' -> ("read", url).
     None for ordinary speech, so a normal reply never misroutes into a tool.
+    READ keeps its URL byte-exact apart from one sentence-final period —
+    legal URL characters like '!' are never stripped.
     """
     m = _TOOL_CALL_RE.match(sentence or "")
     if not m:
         return None
     kind = m.group(1).lower()
-    arg = m.group(2).strip().strip("\"'").rstrip(" .!?…")
+    arg = m.group(2).strip().strip("\"'")
     if not arg:
         return None
     if kind == "read":
+        arg = re.sub(r"[.…]$", "", arg.strip())
         return ("read", arg) if re.match(r"^https?://", arg, re.I) else None
-    return "search", arg
+    return "search", arg.rstrip(" .!?…")

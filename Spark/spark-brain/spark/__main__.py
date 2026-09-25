@@ -673,6 +673,19 @@ class Spark:
                                      "with a clear caveat."),
                         WEB_SEARCH_FILLER, user_text, extra_context, web_hops, join_s=12)
                 else:
+                    # After a search, READ may only open a URL that search
+                    # returned — fetched pages cannot steer her elsewhere.
+                    # (First-hop reads of a URL Matt spoke stay allowed;
+                    # the public-host gate still applies either way.)
+                    if extra_context is not None and arg not in websearch.urls_in_context(extra_context):
+                        log("spark", f"read rejected (not from earlier results): {arg[:80]}")
+                        self._generate_reply(
+                            user_text,
+                            (extra_context + "\n\n" if extra_context else "")
+                            + "PAGE FETCH FAILED: that address was not among the earlier "
+                              "results. Answer from the results you already have.",
+                            web_hops - 1)
+                        return
                     wcfg = self.cfg.get("web", {}) or {}
                     self._run_web_tool(
                         lambda: websearch.read_page(arg,
@@ -747,6 +760,11 @@ class Spark:
         context = render(box.get("out"))
         if prior_context:
             context = prior_context + "\n\n" + context
+        # Cumulative budget: hops are few, but her context window is 8k
+        # tokens — keep the newest tool data when old blocks overflow.
+        budget = 9000
+        if len(context) > budget:
+            context = context[-budget:]
         log("spark", f"web tool context: {len(context)} chars")
         self._generate_reply(user_text, context, web_hops - 1)
 
