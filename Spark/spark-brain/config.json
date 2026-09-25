@@ -1,11 +1,11 @@
 {
   "brain": {
     "lm_studio_url": "http://192.168.50.204:1234",
-    "model": "qwen/qwen3.6-35b-a3b",
-    "fallback_model": "qwen/qwen3.5-9b",
-    "max_tokens": 250,
+    "model": "openai/gpt-oss-120b",
+    "fallback_model": "qwen/qwen3.6-35b-a3b",
+    "max_tokens": 512,
     "temperature": 0.8,
-    "reasoning_effort": "none",
+    "reasoning_effort": "low",
     "history_turns": 12,
     "request_timeout_s": 120
   },
