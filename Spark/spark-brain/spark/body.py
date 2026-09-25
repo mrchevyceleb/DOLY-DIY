@@ -441,6 +441,19 @@ class Body:
             _log(f"mood_eyes failed: {e}")
             return False
 
+    def _departure_gap_exempt(self, direction):
+        """Front gap GPIO events during the authorized dock-face exit step.
+
+        Rolling off the dock face makes the front pair transition — that is
+        expected physics for the one measured 20mm probe, not a cliff. The
+        departure's own polled check still cancels on any violation (rear
+        gaps, new gap kinds, timeouts) at 30ms granularity.
+        """
+        d = getattr(self, "_departure", None)
+        return bool(self._leaving_home and d is not None
+                    and getattr(d, "front_probe", False)
+                    and str(direction).split(".")[-1].startswith("Front"))
+
     def _init_edge(self):
         """ToF edge sensors — the not-driving-off-tables subsystem."""
         import doly_edge as edge
@@ -458,6 +471,8 @@ class Body:
             if (self._leaving_home and self._departure is not None
                     and self._departure.trailing_gap(dir_name)):
                 return  # bounded forward clearance, both front sensors supported
+            if self._departure_gap_exempt(direction):
+                return  # authorized dock-face exit: front transitions are expected
             if self._leaving_home:
                 self._approach_stop.set()  # transient gaps cancel departure too
             if dir_name == "All" and self.docked:
