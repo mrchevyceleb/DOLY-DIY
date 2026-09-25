@@ -246,7 +246,13 @@ def parse_timer(text):
     low = re.sub(r"\b(\d+)\s+(\d)\b", lambda m: str(int(m.group(1)) + int(m.group(2))), low)
     m = re.search(r"(\d+(?:\.\d+)?)\s*(second|seconds|minute|minutes|min|hour|hours|hrs?)", low)
     if not m:
-        return None
+        # ASR sometimes drops the unit ('set a timer for thirty'): a bare
+        # number in a timer request defaults to minutes; the spoken
+        # confirmation lets Matt correct it instantly.
+        m = re.search(r"(?:timer|remind)(?:\s+\w+){0,4}?\s(\d+(?:\.\d+)?)\s*$", low)
+        if not m:
+            return None
+        return float(m.group(1)) * 60
     n = float(m.group(1))
     unit = m.group(2)
     if unit.startswith("second"):
