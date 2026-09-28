@@ -74,6 +74,11 @@ def _plausible_speech(text, peak):
 _WAKE_GARBLE_RE = re.compile(
     r"^\s*(?:okay\s+|ok\s+|hey\s+)?(?:bark|barks|sparky?|sparks|park|bart|barkley)[,!.]?\s+\S", re.I)
 
+# The model sometimes answers with its own reply instructions instead of a
+# reply ('If no query is needed, respond with short reply.').
+_INSTRUCTION_ECHO_RE = re.compile(
+    r"\b(spoken reply|(search|query) is needed|web tool|short reply)\b", re.I)
+
 # Only complete, short sign-offs close a follow-up. A request such as
 # "thanks, can you set a timer?" must still reach the command router.
 _FOLLOWUP_SIGNOFFS = {
@@ -706,11 +711,12 @@ class Spark:
                             "results if you need more detail — otherwise answer now from "
                             "the results you already have."
                             if extra_context else
-                            "reply with ONLY 'SEARCH: <what to look up>' to run a web "
-                            "search — or 'READ: <url>' if Matt just gave you an "
-                            "address — then stop; the system fetches it and asks you "
-                            "again. Use it for anything current, live, or uncertain; "
-                            "never invent fresh facts instead."))
+                            # Qwen echoed the old wording as her reply ('If no
+                            # search is needed, just give the spoken reply.').
+                            "if answering needs current or live facts (forecasts, "
+                            "news, prices, scores), your whole reply must be one "
+                            "line: SEARCH: <search terms>. If Matt gave a web "
+                            "address, reply READ: <url>. Otherwise just answer Matt."))
         messages[-1]["content"] += (
             "\n\n[Spoken reply: be warm and respectful; no insults, blame, threats, or sarcasm. "
             + ("Up to six concise sentences." if detailed else "One or two short sentences, at most 35 words.")
@@ -764,6 +770,9 @@ class Spark:
                         WEB_READ_FILLER, user_text, extra_context, web_hops,
                         join_s=_clamp(wcfg.get("page_timeout_s", 6), 6, 2, 15) + 4)
                 return
+            if first and _INSTRUCTION_ECHO_RE.search(first):
+                log("spark", f"brain echoed its instructions: '{first[:60]}'")
+                first = ""
             if not first:
                 # Qwen 3.6 ignores reasoning_effort 'low' and can spend the
                 # whole token budget thinking: she then went silently mute.
