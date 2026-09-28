@@ -44,7 +44,16 @@ class Brain:
         """
         for model in self._model_candidates():
             try:
-                yield from self._stream_once(model, messages, on_delta)
+                produced = False
+                for delta in self._stream_once(model, messages, on_delta):
+                    produced = True
+                    yield delta
+                if not produced and model == self.model and self.fallback_model:
+                    # Qwen 3.6 intermittently finishes with no content at all
+                    # ('all week.' went unanswered); silence is the worst reply.
+                    print(f"[brain] {model} returned no content; trying fallback",
+                          file=sys.stderr)
+                    continue
                 if model != self.model:
                     self.using_fallback = True
                 return
@@ -109,6 +118,7 @@ class Brain:
             saw_done = False
             json_errors = 0
             n_out = 0
+            finish, extra = None, set()
             try:
                 for raw in resp:
                     line = raw.decode("utf-8", errors="replace").strip()
@@ -128,7 +138,10 @@ class Brain:
                     choices = chunk.get("choices") or []
                     if not choices:
                         continue
-                    delta = (choices[0].get("delta") or {}).get("content") or ""
+                    finish = choices[0].get("finish_reason") or finish
+                    raw_delta = choices[0].get("delta") or {}
+                    extra |= set(raw_delta) - {"content", "role"}
+                    delta = raw_delta.get("content") or ""
                     if not delta:
                         continue
                     n_out += 1
@@ -141,6 +154,10 @@ class Brain:
                 if not saw_done and n_out == 0:
                     # EOF before any output and before [DONE] = dead stream
                     raise BrainOffline("stream ended before completion with no output")
+                if n_out == 0:
+                    print(f"[brain] model={model} no content: finish={finish} "
+                          f"other={sorted(extra)} {time.perf_counter()-t0:.2f}s",
+                          file=sys.stderr)
             except BrainOffline:
                 raise
             except Exception as e:

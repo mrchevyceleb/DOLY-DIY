@@ -641,6 +641,8 @@ class Body:
         text = (text or "").strip()
         if not text:
             return True
+        if isinstance(getattr(self, "said", None), list):
+            self.said.append(text)  # converse() records command replies
         if not (self.has.get("tts") and self.has.get("sound")):
             if self._muted_sink:
                 self._muted_sink(text)

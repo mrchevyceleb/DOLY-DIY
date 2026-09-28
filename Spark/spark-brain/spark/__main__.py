@@ -854,7 +854,21 @@ class Spark:
         self.body.react_enabled = False  # sensor reactions off while conversing
         try:
             # 1) stock commands + web search — instant / tool paths
-            if self.router.handle(text):
+            history = getattr(self.memory, "history", None)
+            last_turn = history[-1] if history else None
+            self.body.said = []
+            try:
+                handled = self.router.handle(text)
+                said = " ".join(self.body.said)
+            finally:
+                self.body.said = None
+            if handled:
+                # 'What's the weather?' is answered by the router, and the
+                # follow-up 'all week.' then reached the brain with no weather
+                # in context. Record the exchange unless the handler did.
+                if said and history is not None and (history[-1] if history else None) is last_turn:
+                    self.memory.add("user", text)
+                    self.memory.add("assistant", said)
                 return
 
             # 2) the brain
