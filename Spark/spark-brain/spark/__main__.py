@@ -532,6 +532,36 @@ class Spark:
             return False
         return check
 
+    def _wake_continuation(self, mic, wake, said):
+        """Re-decode the verified clip together with the speech after it.
+
+        Decoded alone, the tail of 'Spark, what are people ...' came back
+        empty and she answered 'what are people'. Returns None when there
+        is no clip or no server ASR (the caller stitches text instead)."""
+        from .ear import CommandAudio, record_utterance
+        if not (wake.clip_pcm and getattr(self, "whisper", None)
+                and self.cfg.get("asr", {}).get("server_url")):
+            return None
+        mic.retain(45)
+        audio = CommandAudio(mic, b"", self.cfg["audio"]["sample_rate"])
+        rest = record_utterance(audio, self.cfg, wait_timeout_s=.6)
+        if not rest:
+            return said
+        started = time.perf_counter()
+        whole = self.whisper.transcribe_pcm(wake.clip_pcm + rest).strip()
+        log("spark", f"continuation {time.perf_counter()-started:.2f}s: '{whole}'")
+        words = list(re.finditer(r"[\w']+", whole))
+        said_words = re.findall(r"[\w']+", said.lower())
+        if not words or not said_words:
+            return said
+        # Drop the name part: the verified text minus the command it held
+        # ('Spark, what are people' - 'what are people' = one word).
+        skip = max(0, len(re.findall(r"[\w']+", wake.text)) - len(said_words))
+        for i in range(max(0, skip - 1), min(skip + 2, len(words))):
+            if words[i].group().lower() == said_words[0]:
+                return whole[words[i].start():]
+        return whole[words[skip].start():] if skip < len(words) else said
+
     def _listen_command(self, mic, recognizer, wake=None, timeout_s=6.0, followup=False):
         from .ear import CommandAudio, record_utterance, strip_wake_prefix
 
@@ -547,6 +577,9 @@ class Spark:
             # those must not absorb background talk.
             if said.rstrip().endswith((".", "?", "!")):
                 return said, b""
+            whole = self._wake_continuation(mic, wake, said)
+            if whole is not None:
+                return whole, b""
             rest, _ = self._listen_command(mic, recognizer, None, timeout_s=.6)
             return f"{said} {rest}".strip(), b""
         deadline = time.monotonic() + timeout_s

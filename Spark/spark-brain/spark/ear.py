@@ -324,6 +324,7 @@ class WakeResult:
     text: str
     prefix_pcm: bytes = b""
     command: str = ""  # verified speech that is all command (name heard earlier)
+    clip_pcm: bytes = b""  # the verified clip, to re-decode with its continuation
 
 
 def strip_wake_prefix(text, wake_text=""):
@@ -489,13 +490,14 @@ def listen_for_wake(frames, recognizer, cfg, wake_words, tap_check=None,
                 and time.monotonic() >= next_verify):
             next_verify = time.monotonic() + 1
             check_started = time.monotonic()
-            verified = verify_wake(b"".join(audio))
+            clip = b"".join(audio)
+            verified = verify_wake(clip)
             print(f"[ear] wake check {time.monotonic()-check_started:.2f}s: '{text}' -> '{verified}' "
                   f"(peak={peak} floor={floor:.0f} speech={voiced_frames*20}ms)",
                   file=sys.stderr, flush=True)
             if verified:
                 if has_wake_name(verified, wake_words):
-                    return WakeResult(verified)
+                    return WakeResult(verified, clip_pcm=clip)
                 v_tokens = re.findall(r"[\w']+", verified.lower())
                 v_head = meaningful(v_tokens)
                 # Vosk heard her name family AND the verifier heard its own
@@ -505,14 +507,15 @@ def listen_for_wake(frames, recognizer, cfg, wake_words, tap_check=None,
                                   verified, re.I) if v_head else None
                 if (allow_weak and family_head and named
                         and v_head.removesuffix("'s") in _VERIFIER_NAMES):
-                    return WakeResult(verified, command=named.group(1).strip())
+                    return WakeResult(verified, command=named.group(1).strip(),
+                                      clip_pcm=clip)
                 # Parakeet's known 'Bart' garble remains usable only when
                 # Vosk independently heard a rarer near-name. Common 'bar',
                 # 'park', 'mark' and 'dark' may never authorize fuzzily.
                 if (allow_weak and head in {"bart", "barkley", "bark"}
                         and v_head in {"bart", "barkley"}
                         and peak >= a.get("wake_verify_fuzzy_rms", 4500)):
-                    return WakeResult(verified)
+                    return WakeResult(verified, clip_pcm=clip)
                 # A muffled mic can strip the name from even the verified
                 # transcript (Vosk: 'barks [unk]', whisper: 'Ten seconds.').
                 # When Vosk independently heard a STRONG name-family token
@@ -534,7 +537,8 @@ def listen_for_wake(frames, recognizer, cfg, wake_words, tap_check=None,
                     # Exact aliases only: fuzzy matching would strip a real
                     # command word ('start ...') as if it were her name.
                     named = v_head.removesuffix("'s") in _STRONG_NAME_FAMILY
-                    return WakeResult(verified, command="" if named else verified)
+                    return WakeResult(verified, command="" if named else verified,
+                                      clip_pcm=clip)
             # A rejected earlier segment must not suppress a name in the
             # next completed segment inside the same one-second interval.
             next_verify = 0.0
