@@ -277,13 +277,13 @@ class VoiceLatencyTests(unittest.TestCase):
         verify.return_value = "Can you get a PR going?"
         self.assertFalse(listen_for_wake(iter(frames), rec, CFG, ["spark"],
                                         noise_floor=lambda: 1000, verify_wake=verify))
+        # Live miss: a real 'Spark' decoded as 'bar' at 2943 was never
+        # checked. Speaking-level 'bar' is verified; her name still decides.
         rec.finish.return_value = "a bar"
         verify.return_value = "Spark."
-        verify.reset_mock()
-        self.assertFalse(listen_for_wake(iter([room]*5 + [pcm(2000)]*20 + [room]*40),
+        self.assertEqual(listen_for_wake(iter([room]*5 + [pcm(2000)]*20 + [room]*40),
                                          rec, CFG, ["spark"], noise_floor=lambda: 1000,
-                                         verify_wake=verify))
-        verify.assert_not_called()
+                                         verify_wake=verify).text, "Spark.")
         rec.finish.return_value = "bar"
         self.assertEqual(listen_for_wake(iter(frames), rec, CFG, ["spark"],
                                          noise_floor=lambda: 1000, verify_wake=verify).text,

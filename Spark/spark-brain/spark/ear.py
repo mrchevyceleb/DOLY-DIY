@@ -471,13 +471,13 @@ def listen_for_wake(frames, recognizer, cfg, wake_words, tap_check=None,
             last_family_final_at = time.monotonic()
         ambiguous = bool(head and not has_wake_name(text, wake_words)
                          and (head in _WEAK or _near_wake(head, _HEADS)))
-        # Her garbled name ('bark', 'barkley') is checked at speaking level;
-        # only common words ('bar', 'park', 'mark') keep the loud floor.
-        # Live misses: 'barkley' at 2715 and 'bark [unk]' at 2601 vs 4000.
+        # Every name-like segment is checked at speaking level: only the
+        # verifier hearing her name (or a vocative 'Park,') can wake her, so
+        # a loud floor only made her deaf. Live misses: 'barkley' at 2715,
+        # 'bark [unk]' at 2601 and 'bar' at 2943, all under the old 4000.
         family_head = head in _STRONG_NAME_FAMILY
         quiet_family = ambiguous and family_head and peak < weak_min_peak
-        verify_floor = (weak_min_peak if ambiguous and not family_head
-                        else a.get("start_rms", 900))
+        verify_floor = a.get("start_rms", 900)
         if (family_head and not (voiced_frames >= 5 and peak >= verify_floor)):
             print(f"[ear] name-like '{text}' not checked (peak={peak} "
                   f"speech={voiced_frames*20}ms)", file=sys.stderr, flush=True)
