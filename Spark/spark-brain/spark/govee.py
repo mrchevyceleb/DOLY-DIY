@@ -371,6 +371,45 @@ class GoveeLights:
             return why
         return "Warmer light." if kelvin < 4000 else "Cooler light."
 
+    def _cloud_state(self, dev):
+        """{capability instance: value} for one cloud device, or None."""
+        try:
+            r = self._cloud("POST", "/device/state",
+                            {"requestId": uuid.uuid4().hex,
+                             "payload": {"sku": dev["model"], "device": dev["device"]}})
+            return {c.get("instance"): (c.get("state") or {}).get("value")
+                    for c in (r.get("payload") or {}).get("capabilities", [])}
+        except Exception as e:
+            _log(f"cloud state failed: {e}")
+            return None
+
+    def pulse(self, rgb=(255, 80, 180), hold_s=1.2):
+        """Excited blink: lit lamps flash a color, then go back to exactly
+        what they were showing. Lamps that are off stay off."""
+        if not (self.enabled and self.api_key):
+            return False
+        devs = [d for d in self._targets("all") if d.get("cloud") or not d.get("ip")]
+
+        def one(dev):
+            s = self._cloud_state(dev)
+            if not s or s.get("powerSwitch") != 1:
+                return
+            kelvin, color = s.get("colorTemperatureK"), s.get("colorRgb")
+            if not kelvin and not isinstance(color, int):
+                return   # can't restore what we can't read: leave it alone
+            self._cmd(dev, "color", rgb)
+            time.sleep(hold_s)
+            if kelvin:
+                self._cmd(dev, "temp", kelvin)
+            else:
+                self._cmd(dev, "color", ((color >> 16) & 255, (color >> 8) & 255, color & 255))
+        threads = [threading.Thread(target=one, args=(d,), daemon=True) for d in devs]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join(timeout=12)
+        return bool(devs)
+
     def status(self, label="all"):
         if self.enabled:
             self.scan(force=True)   # discovery request: look for new LAN lights

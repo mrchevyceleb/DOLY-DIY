@@ -132,6 +132,7 @@ class Router:
         self._timers = []
         self._pending = None    # {"kind": "timer"|"alarm", "at": ts} awaiting the spoken answer
         self._last_set = None   # {"kind": "timer"|"alarm", "at": ts} for "no, thirty seconds"
+        self.pet = None         # set by Spark: tricks, games, praise, notes
 
     # ------------------------------------------------------------------ main
     def handle(self, raw_text):
@@ -144,6 +145,8 @@ class Router:
         # emergency stop outranks EVERY other route (search, colors, table)
         tokens = text.split()
         if tokens and (tokens[0] == "stop" or tokens[-1] == "stop"):
+            if getattr(self, "pet", None) is not None:
+                self.pet.cancel()
             self._stop_celebration()
             self.body.stop_everything()
             return True
@@ -151,6 +154,15 @@ class Router:
         # talking to her ends any running celebration — she attends to you
         if getattr(self, "_celebration", None) is not None:
             self._stop_celebration()
+
+        # pet life: answers to her questions, tricks, games, praise, notes
+        pet = getattr(self, "pet", None)
+        if pet is not None:
+            result = pet.handle(text, raw_text)
+            if result == "brain":
+                return False   # a game turn: the brain hosts, no commands
+            if result:
+                return True
 
         # she asked "how long?" / "for what time?" — this utterance is the answer
         low = text.lower()
@@ -618,6 +630,13 @@ class Router:
         until Matt talks to her or says stop; reminders just speak."""
         b = self.body
         alerts = self.cfg.get("alerts", {}) or {}
+        if kind == "sunrise":
+            try:
+                ramp = int(label or 600)
+            except (TypeError, ValueError):
+                ramp = 600
+            threading.Thread(target=self._sunrise, args=(ramp,), daemon=True).start()
+            return
         if kind in ("timer", "alarm") and alerts.get("celebrate", True):
             line = (f"Alarm! {label or 'Time to get moving!'} Time to celebrate!"
                     if kind == "alarm" else
@@ -653,12 +672,49 @@ class Router:
         if ev is not None:
             ev.set()
             self._celebration = None
+        self._stop_sunrise()
+
+    def _stop_sunrise(self):
+        ev = getattr(self, "_sunrise_stop", None)
+        if ev is not None:
+            ev.set()
+            self._sunrise_stop = None
+
+    def _sunrise(self, ramp_s):
+        """Warm, dim light brightening to daylight before a morning alarm."""
+        g = self.govee
+        if not (g and g.enabled):
+            return
+        self._stop_sunrise()
+        stop = threading.Event()
+        self._sunrise_stop = stop
+        self._sunrise_started = time.time()
+        _log(f"sunrise: {ramp_s}s ramp")
+        try:
+            g.brightness(1)
+            g.color_temp(2200)
+            g.turn(True)
+            steps = 10
+            for i in range(1, steps + 1):
+                if stop.wait(max(5, ramp_s / steps)):
+                    return
+                if i == steps // 2:
+                    g.color_temp(2900)
+                g.brightness(round(100 * i / steps))
+            g.color_temp(4000)
+        except Exception as e:
+            _log(f"sunrise failed: {e}")
+        finally:
+            if getattr(self, "_sunrise_stop", None) is stop:
+                self._sunrise_stop = None
 
     def _celebrate(self, line, stop):
         b = self.body
         alerts = self.cfg.get("alerts", {}) or {}
         max_s = max(30, min(int(alerts.get("celebrate_max_s", 600)), 3600))
-        party_lights = alerts.get("party_lights", True)
+        # a sunrise already lit the room: party colors would undo it
+        party_lights = (alerts.get("party_lights", True)
+                        and time.time() - getattr(self, "_sunrise_started", 0) > 1800)
         sounds = self.cfg.get("sounds", {}) or {}
         music = sounds.get("dance_music")
         sfx_map = sounds.get("sfx_map", {}) or {}
@@ -731,6 +787,7 @@ class Router:
         """Set / cancel / query absolute-time alarms."""
         b = self.body
         if _ALARM_CANCEL_RE.search(text):
+            self._stop_sunrise()
             n = self.alarms.cancel("alarm")
             b.speak("Alarm cancelled." if n else "You don't have any alarms set.")
             return True
@@ -754,6 +811,14 @@ class Router:
             return True
         self._last_set = {"kind": "alarm", "at": time.time()}
         self.alarms.add_alarm(when.timestamp(), label=fmt_clock(when.hour, when.minute))
+        # morning alarms: the lamps rise like a sunrise for ten minutes first
+        alerts = self.cfg.get("alerts", {}) or {}
+        if (self.govee and self.govee.enabled and alerts.get("sunrise", True)
+                and 4 <= when.hour < 11):
+            lead = min(600, when.timestamp() - time.time() - 30)
+            if lead >= 120:
+                self.alarms.add_timer(when.timestamp() - lead - time.time(),
+                                      label=str(int(lead)), kind="sunrise")
         self.body.speak(f"Alarm set for {fmt_clock(when.hour, when.minute)}.")
         return True
 

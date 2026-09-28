@@ -105,6 +105,22 @@
   "alerts": {
     "celebrate": true,
     "celebrate_max_s": 600,
-    "party_lights": true
+    "party_lights": true,
+    "sunrise": true
+  },
+  "pet": {
+    "greet": true,
+    "bored": true,
+    "bedtime": true,
+    "notices": true,
+    "auto_notes": true,
+    "room_pulse": true,
+    "chase_turns": true,
+    "night_start": "23:00",
+    "night_end": "07:30",
+    "bedtime_start": "22:15",
+    "bedtime_end": "01:30",
+    "bedtime_brightness": 20,
+    "max_notes": 40
   }
 }

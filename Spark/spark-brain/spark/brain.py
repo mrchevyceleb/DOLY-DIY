@@ -37,12 +37,13 @@ class Brain:
             return False
 
     # ------------------------------------------------------------------- chat
-    def chat_stream(self, messages, on_delta=None):
+    def chat_stream(self, messages, on_delta=None, fallback=True):
         """Yield text deltas. Falls back to the small model on model errors.
 
         Returns a generator; total text is also fed to on_delta callback.
+        fallback=False (background asks) never loads the non-resident model.
         """
-        for model in self._model_candidates():
+        for model in self._model_candidates()[:None if fallback else 1]:
             try:
                 # An empty reply is NOT a reason to fall back: the fallback
                 # isn't resident on Moria, and loading it took 15 GB (36s)
@@ -54,7 +55,8 @@ class Brain:
             except BrainOffline:
                 raise
             except urllib.error.HTTPError as e:
-                if e.code in (400, 404, 422) and model == self.model and self.fallback_model:
+                if (e.code in (400, 404, 422) and model == self.model and self.fallback_model
+                        and fallback):
                     print(f"[brain] {model} rejected ({e.code}); trying fallback", file=sys.stderr)
                     continue
                 raise BrainOffline(f"HTTP {e.code} from {model}") from e
@@ -62,9 +64,9 @@ class Brain:
                     json.JSONDecodeError, ValueError) as e:
                 raise BrainOffline(str(e)) from e
 
-    def chat(self, messages):
+    def chat(self, messages, fallback=True):
         parts = []
-        for delta in self.chat_stream(messages):
+        for delta in self.chat_stream(messages, fallback=fallback):
             parts.append(delta)
         return "".join(parts)
 

@@ -19,6 +19,7 @@ from .body import Body
 from .brain import Brain, BrainOffline, spoken_sentences
 from .config import load_config
 from .memory import Memory
+from .pet import Pet
 from .router import Router
 from . import search as websearch
 
@@ -181,6 +182,11 @@ class Spark:
         self.router = Router(cfg, self.body, self.brain, self.memory)
         self.router.llm_reply = self._llm_reply
         self.talk_trigger = threading.Event()
+        # pet life: greetings, praise, tricks, games, notes, moods
+        self.pet = Pet(cfg, self.body, self.brain, self.memory)
+        self.pet.router = self.router
+        self.pet.talk_trigger = self.talk_trigger
+        self.router.pet = self.pet
         self._motion_wake_pending = threading.Event()  # name said during motion
         self.listening = False
         if self.body.hw:
@@ -205,6 +211,9 @@ class Spark:
             started = tstate["down"].pop(side, None)
             if started is None:
                 return
+            pet = getattr(self, "pet", None)
+            if pet is not None:
+                pet.saw_matt()
             if self.body.sleeping:
                 self.talk_trigger.set()
                 return
@@ -273,6 +282,11 @@ class Spark:
             # suppress the return. go_home owns the guarded edge escape.
             if self.body.sleeping:
                 self.body.wake_up()
+            now = time.monotonic()
+            if not stranded and now >= getattr(self, "_next_hungry_speech", 0):
+                self._next_hungry_speech = now + 600
+                self.body.mood_eyes("TIRED")
+                self.body.speak("My tummy's rumbling. Heading to my dock for a snack.")
             result = self.body.go_home()
             if stranded and result in ("busy", "power"):
                 # never attempted: retry soon, not in ten minutes
@@ -283,9 +297,11 @@ class Spark:
                 if now >= getattr(self, "_next_low_battery_speech", 0):
                     self._next_low_battery_speech = now + 600
                     if result == "unknown":
-                        self.body.speak(f"My battery is at {pct} percent. Please carry me to my dock to charge.")
+                        self.body.speak(f"I'm starving, my battery's at {pct} percent. "
+                                        "Please carry me to my dock for a snack.")
                     else:
-                        self.body.speak("I couldn't reach my charging contacts. Please help me onto the dock.")
+                        self.body.speak("I'm hungry, but I couldn't reach my charging contacts. "
+                                        "Please help me onto the dock.")
         except Exception as e:
             log("spark", f"battery check failed: {e}")
 
@@ -329,6 +345,7 @@ class Spark:
             _, next_flourish, next_wander = _reset_idle()
             next_battery = time.time() + idle_cfg.get("battery_check_s", 240)
             idle_action = {"act": None}
+            pet = getattr(self, "pet", None)
 
             def _idle_or_tap():
                 if self.talk_trigger.is_set():
@@ -344,6 +361,9 @@ class Spark:
                     return False
                 if self.body.take_charge_notice():
                     idle_action["act"] = "charge_notice"
+                    return True
+                if pet is not None and pet.due(now):
+                    idle_action["act"] = "pet"
                     return True
                 if (now >= next_wander and idle_cfg.get("roam_enabled", True)
                         and (not self.body.docked or self.body.dock_roam_ready())):
@@ -423,8 +443,16 @@ class Spark:
                         "battery_retry_s" if low else "battery_check_s", 60 if low else 10)
                     self._low_battery_check(idle_cfg)
                     continue
+                if idle_action["act"] == "pet":
+                    # she asked Matt something: his answer needs no name
+                    follow_pending = pet.idle_tick()
+                    idle_action["act"] = None
+                    continue
                 if idle_action["act"] == "flourish":
-                    self.body.idle_flourish()
+                    if pet is not None and pet.night():
+                        pet.night_flourish()
+                    else:
+                        self.body.idle_flourish()
                     t = time.time()
                     next_flourish = t + idle_cfg.get("flourish_s", 50)
                     idle_action["act"] = None
@@ -451,11 +479,13 @@ class Spark:
                                             before_chirp=lambda s: mic.mute(s + .25))
                 log("spark", "listening..." + (" (follow-up)" if in_followup else ""))
                 self.body.react_enabled = False
+                follow_window = follow_cfg.get("follow_up_window_s", 8)
                 try:
                     text, pcm = self._listen_command(
                         mic, recognizer, triggered_by_wake,
-                        timeout_s=(follow_cfg.get("follow_up_window_s", 8) if in_followup
-                                   else wake_cfg.get("wait_timeout_s", 6.0)),
+                        timeout_s=((pet.followup_window(follow_window) if pet is not None
+                                    else follow_window)
+                                   if in_followup else wake_cfg.get("wait_timeout_s", 6.0)),
                         followup=in_followup)
                 finally:
                     self.listening = False
@@ -481,6 +511,8 @@ class Spark:
                     self.body.eyes("idle")
                     if in_followup:
                         log("spark", "follow-up closed quietly")
+                        if pet is not None:
+                            pet.conversation_over()
                         continue
                     self._misses = getattr(self, "_misses", 0) + 1
                     log("spark", f"(nothing understood x{self._misses})")
@@ -493,6 +525,9 @@ class Spark:
                 if in_followup and _followup_done(text):
                     log("spark", f"follow-up closed: '{text}'")
                     self.body.eyes("idle")
+                    if pet is not None:
+                        pet.signoff(text)
+                        pet.conversation_over()
                     continue  # next pass requires her name or a tap
 
                 log("spark", f"heard: '{text}'")
@@ -778,6 +813,9 @@ class Spark:
             system = system + chr(10) + chr(10) + mood_note
         weather = self._weather_context(user_text)
         system += weather
+        pet = getattr(self, "pet", None)
+        if pet is not None:
+            system += pet.context()
         messages = self.memory.messages(system)
         # Memory only gets the user turn after a reply exists, so it must be
         # added here. Without it (since 41366f2) the brain saw her own last
@@ -909,6 +947,8 @@ class Spark:
             self.memory.add("user", user_text)
             self.memory.add("assistant", reply)
         self.body.eyes("idle")
+        if pet is not None:
+            pet.after_reply(reply)
 
     def _run_web_tool(self, fetch, render, filler, user_text, prior_context, web_hops,
                       join_s=12):
@@ -955,6 +995,9 @@ class Spark:
                 log("spark", f"ignored party echo: '{text[:40]}'")
                 return
         self.body.react_enabled = False  # sensor reactions off while conversing
+        pet = getattr(self, "pet", None)
+        if pet is not None:
+            pet.heard_turn()
         try:
             # 1) stock commands + web search — instant / tool paths
             history = getattr(self.memory, "history", None)

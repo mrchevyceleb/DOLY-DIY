@@ -404,7 +404,8 @@ class HomingTests(unittest.TestCase):
             spark._low_battery_check({"low_battery_pct": 10})
             spark._low_battery_check({"low_battery_pct": 10})
         self.assertEqual(spark.body.go_home.call_count, 2)
-        spark.body.speak.assert_called_once()
+        # 'hungry, heading home' then the failure: neither repeats
+        self.assertEqual(spark.body.speak.call_count, 2)
 
     def test_go_home_recovers_edge_before_search_and_fails_closed(self):
         b, _ = self.rig()

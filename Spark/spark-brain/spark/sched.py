@@ -84,7 +84,9 @@ class AlarmClock:
     def cancel(self, kind="all"):
         """Cancel matching items; returns how many."""
         with self._lock:
-            ids = [i for i, it in self._items.items() if kind in ("all", it["kind"])]
+            # an alarm's sunrise light ramp goes with it
+            ids = [i for i, it in self._items.items()
+                   if kind in ("all", it["kind"]) or (kind == "alarm" and it["kind"] == "sunrise")]
             for i in ids:
                 it = self._items.pop(i)
                 t = it.get("thread")
@@ -107,6 +109,8 @@ class AlarmClock:
             items = sorted(self._items.values(), key=lambda it: it["at"])
         out = []
         for it in items:
+            if it["kind"] == "sunrise":
+                continue   # part of its alarm, not a separate item
             left = max(0, int(it["at"] - time.time()))
             if it["kind"] == "alarm":
                 lt = time.localtime(it["at"])
