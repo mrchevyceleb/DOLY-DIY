@@ -476,7 +476,11 @@ def listen_for_wake(frames, recognizer, cfg, wake_words, tap_check=None,
         # a loud floor only made her deaf. Live misses: 'barkley' at 2715,
         # 'bark [unk]' at 2601 and 'bar' at 2943, all under the old 4000.
         family_head = head in _STRONG_NAME_FAMILY
-        quiet_family = ambiguous and family_head and peak < weak_min_peak
+        # Quiet speech the verifier heard WITHOUT her name never rides the
+        # family hint, even when Vosk's grammar said 'sparky' exactly: live
+        # 'sparky' -> 'More softly.' (1717) and 'spark' -> 'That's fine.' were
+        # background talk.
+        quiet_family = family_head and peak < weak_min_peak
         verify_floor = a.get("start_rms", 900)
         if (family_head and not (voiced_frames >= 5 and peak >= verify_floor)):
             print(f"[ear] name-like '{text}' not checked (peak={peak} "

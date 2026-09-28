@@ -268,6 +268,10 @@ class VoiceLatencyTests(unittest.TestCase):
             verify.return_value = transcript
             self.assertFalse(listen_for_wake(iter(quiet), rec, CFG, ["spark"],
                                              noise_floor=lambda: 1000, verify_wake=verify))
+        rec.finish.return_value = "sparky"
+        verify.return_value = "More softly."
+        self.assertFalse(listen_for_wake(iter(quiet), rec, CFG, ["spark"],
+                                         noise_floor=lambda: 1000, verify_wake=verify))
 
     def test_park_in_background_conversation_needs_actual_name_verification(self):
         rec = Mock()
