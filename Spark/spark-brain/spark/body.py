@@ -766,7 +766,14 @@ class Body:
                     self._power_fault = True
                     _log(f"power hold: shunt={self._charging.average} "
                          f"error={self._charging.error}")
-                    self.stop_everything()  # stop arms already in flight too
+                    if self.docked and not (crossing or self._leaving_home or self._homing):
+                        # Parked on the charger, a full battery's tapering
+                        # current flickers this many times a minute. The
+                        # wheels are held anyway; arms and animations may
+                        # finish (arms_held).
+                        self.drive_stop()
+                    else:
+                        self.stop_everything()  # stop arms already in flight too
                 self._power_fault = fault
                 return result
             except Exception as e:
@@ -915,7 +922,7 @@ class Body:
             if running or not self._dock_native_stopped:
                 _log(f"dock motor stop: native_running={running}")
                 self._dock_native_stopped = self.drive_stop()
-        if self.has.get("arm"):
+        if self.has.get("arm") and self.arms_held():   # arms may wave on a healthy charge
             for side in (self._arm.ArmSide.Left, self._arm.ArmSide.Right):
                 if self._arm.get_state(side) == self._arm.ArmState.Running:
                     _log(f"dock arm stop: {side}")
@@ -977,6 +984,17 @@ class Body:
         if not self.has.get("edge") or (len(gaps) >= 2 and not (escape_owner and recoverable_pair)):
             return True
         return self.docked
+
+    def arms_held(self):
+        """Arms, unlike wheels, may move on the dock: they never touch the
+        ground, so a wave can't walk her off the contacts, and a full
+        battery's flickering charge reading is no reason to freeze them."""
+        if self.sleeping or self._docking_entry is not None or self._leaving_home:
+            return True
+        if self.hw and self.docked:
+            pct = self.battery_pct()
+            return pct is None or pct <= 5
+        return self.actuators_held()
 
     def ensure_mobility(self):
         return not self.actuators_held()
@@ -1366,29 +1384,37 @@ class Body:
 
     # ------------------------------------------------------------------ arms
     def arm_angle(self, angle, speed=40, wait=True):
-        if self.actuators_held() or not self.has.get("arm"):
+        return self.arm_pose(angle, angle, speed=speed, wait=wait)
+
+    def arm_pose(self, left, right, speed=40, wait=True):
+        """Each arm to its own angle (20 = resting down, 170 = straight up)."""
+        if self.arms_held() or not self.has.get("arm"):
             return False
+        A = self._arm.ArmSide
+        moves = ([(A.Both, left)] if left == right else [(A.Left, left), (A.Right, right)])
         try:
             with self._power_lock:
-                if self.actuators_held():
+                if self.arms_held():
                     return False
-                rc = self._arm.set_angle(self._next_id(), self._arm.ArmSide.Both,
-                                         speed=speed, angle=angle, with_brake=False)
-            if rc < 0:
-                return False
+                for side, angle in moves:
+                    rc = self._arm.set_angle(self._next_id(), side, speed=speed,
+                                             angle=int(angle), with_brake=False)
+                    if rc < 0:
+                        return False
             if wait:
                 deadline = time.time() + 4
                 while time.time() < deadline:
-                    if self._arm.get_state(self._arm.ArmSide.Both) == self._arm.ArmState.Completed:
-                        return True
-                    if self._arm.get_state(self._arm.ArmSide.Both) == self._arm.ArmState.Error:
+                    states = [self._arm.get_state(s) for s in (A.Left, A.Right)]
+                    if self._arm.ArmState.Error in states:
                         return False
+                    if all(s == self._arm.ArmState.Completed for s in states):
+                        return True
                     time.sleep(0.05)
                 _log("arm movement did not complete within four seconds")
                 return False
             return True
         except Exception as e:
-            _log(f"arm_angle failed: {e}")
+            _log(f"arm_pose failed: {e}")
             return False
 
     def arms_up(self):
@@ -1405,7 +1431,7 @@ class Body:
 
     def _hand_gesture(self, name, ready, angle):
         """Wait for a fresh bump after the arm and ready sound have settled."""
-        if self.actuators_held():
+        if self.arms_held():
             return False
         self._interaction_stop.clear()
         self._interaction_armed = False
@@ -1425,7 +1451,7 @@ class Body:
             _log(f"{name}: waiting for contact")
             deadline = time.monotonic() + 5
             while time.monotonic() < deadline:
-                if self._interaction_stop.is_set() or self.actuators_held():
+                if self._interaction_stop.is_set() or self.arms_held():
                     return False
                 if self._interaction_contact.wait(0.02):
                     self._interaction_armed = False
@@ -2335,11 +2361,13 @@ class Body:
         import random
         try:
             self.mood_eyes(random.choice(self._CURIOS))
-            if random.random() < 0.3:
+            if random.random() < 0.2:
+                # a stretch, a one-armed reach, or a little shrug
                 ang = random.choice((110, 130, 150))
-                self.arm_angle(ang, speed=25, wait=False)
-                time.sleep(0.4)
-                self.arm_angle(30, speed=25, wait=False)
+                left, right = random.choice(((ang, ang), (ang, 20), (20, ang), (60, 60)))
+                self.arm_pose(left, right, speed=25, wait=False)
+                time.sleep(0.6)
+                self.arm_pose(20, 20, speed=25, wait=False)
         except Exception as e:
             _log(f"idle_flourish: {e}")
 

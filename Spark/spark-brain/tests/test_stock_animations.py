@@ -50,6 +50,9 @@ class Rig:
     def actuators_held(self):
         return self.held
 
+    def arms_held(self):
+        return getattr(self, "arms_hold", self.held)
+
     def arm(self, cmd_id, side, speed, angle, with_brake):
         assert type(speed) is int and type(angle) is int
         assert 1 <= speed <= 100 and 0 <= angle <= 200
@@ -186,7 +189,7 @@ class StockAnimationTests(unittest.TestCase):
             self.assertGreaterEqual([e[1] for e in rig.events if e[0] == "led"][0], 2)
             self.assertFalse(rig.anim.playing())
 
-    def test_dock_allows_show_but_never_arms_or_wheels(self):
+    def test_dock_allows_show_and_arms_but_never_wheels(self):
         with tempfile.TemporaryDirectory() as tmp:
             self.program(tmp, '''<block type="arm_set_angle"><field name="angle">140</field></block>
                 <block type="drive_distance"><field name="distance">100</field></block>
@@ -195,6 +198,10 @@ class StockAnimationTests(unittest.TestCase):
             rig = Rig(tmp, held=True)
             self.assertTrue(rig.play("test"))
             self.assertEqual({e[0] for e in rig.events}, {"eye", "sound"})
+            rig = Rig(tmp, held=True)
+            rig.arms_hold = False   # parked on the charger: arms may wave
+            self.assertTrue(rig.play("test"))
+            self.assertEqual({e[0] for e in rig.events}, {"arm", "eye", "sound"})
 
     def test_empty_errors_timeouts_and_cancel_are_not_success(self):
         with tempfile.TemporaryDirectory() as tmp:

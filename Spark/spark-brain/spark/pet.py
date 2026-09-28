@@ -65,6 +65,10 @@ _PRAISE_RE = re.compile(
     r")(?:\s+" + _NAME + r")?$")
 _LOVE_RE = re.compile(r"\blove\b")
 _THANKS_RE = re.compile(r"\bthank|\bthanks\b")
+# Matt laughing at her: giggle back, don't make a speech about it
+_LAUGH_RE = re.compile(r"^(?:(?:ha|he|hah|heh)\s*){2,}!?$|^(?:haha+|hehe+|lol|lmao)$|"
+                       r"^(?:that'?s|you'?re|that\s+was)\s+(?:so\s+|really\s+|very\s+)?"
+                       r"(?:funny|hilarious)$")
 
 _YES_RE = re.compile(r"^(?:oh\s+|um+\s+)?(?:yes|yeah|yep|yup|sure|ok|okay|please|absolutely|"
                      r"definitely|of\s+course|let'?s\s+(?:do\s+it|go|play)|go\s+for\s+it|do\s+it|"
@@ -105,6 +109,8 @@ _TRICKS = [
     ("dizzy", r"\bdizzy\b", "get dizzy"),
     ("scared", r"\b(?:(?:be|act|get|look)\s+scared|scream|freak\s+out|panic)\b", "get scared"),
     ("sing", r"\b(?:sing|happy\s+birthday)\b", "sing"),
+    ("wave", r"\bwave\b", "wave"),
+    ("flap", r"\b(?:flap|fly|chicken\s+dance)\b", "flap my arms"),
 ]
 _ANIMALS = [
     ("dog", r"\b(?:bark|woof|dog|puppy)\b", "bark"), ("cat", r"\b(?:meow|purr|cat|kitty)\b", "meow"),
@@ -125,6 +131,8 @@ _DIRECT_RE = re.compile(
     r"play\s+dead|drop\s+dead|sneeze|bark|woof|meow|moo|oink|quack|roar|howl|laugh|giggle|cry|wink|"
     r"(?:be|look|act)\s+(?:shy|cool|scared|angry|grumpy)|get\s+dizzy|hands\s+up|arms\s+up|"
     r"stick\s+'?em\s+up|yawn|blow\s+(?:me\s+)?a\s+kiss|show\s+me\s+some\s+love|"
+    r"wave(?:\s+(?:hello|hi|at\s+me))?|flap(?:\s+your\s+arms)?|dance|spin|"
+    r"high\s*five|fist\s*bump|party|"
     r"do\s+a\s+trick|show\s+me\s+a\s+trick)(?:\s+(?:please|for\s+me))?$")
 
 _TRICK_LIST_RE = re.compile(r"\b(?:what|which)\s+tricks\b|\btricks\s+(?:do\s+you\s+know|have\s+i\s+taught)")
@@ -142,6 +150,25 @@ _PLAY_RE = re.compile(
     r"want\s+to|do\s+you\s+want\s+to|you\s+want\s+to|i\s+want\s+to|shall\s+we)\s+play\b\s*(?P<rest>.*)$")
 _PLAY_BARE_RE = re.compile(r"^play\s+(?P<rest>.+)$")
 _NOT_GAME_RE = re.compile(r"\b(?:music|song|songs|video|movie|playlist|spotify|radio|dead)\b")
+# 'trivia', 'star wars trivia', 'a quiz about dogs', 'quiz me on the 80s'
+_TRIVIA_RE = re.compile(
+    r"^(?:(?:a|some|the|a\s+game\s+of|a\s+little)\s+)?(?:(?P<pre>[\w'&]+(?:\s+[\w'&]+){0,3})\s+)?"
+    r"(?:trivia|quiz|jeopardy)(?:\s+(?:game|questions?|time))?"
+    r"(?:\s+(?:about|on|of|with|from|for)\s+(?P<post>.+?))?$")
+_QUIZ_ME_RE = re.compile(
+    r"^(?:can\s+you\s+|will\s+you\s+|please\s+)?(?:quiz\s+me|ask\s+me\s+(?:some\s+)?"
+    r"(?:trivia(?:\s+questions)?|questions|quiz\s+questions))"
+    r"(?:\s+(?:about|on|from)\s+(?P<cat>.+?))?(?:\s+please)?$")
+_NOT_TOPIC = {"i", "you", "we", "it", "is", "was", "love", "hate", "like", "that", "this",
+              "no", "not", "stop", "end", "quit", "more", "enough", "done", "do", "does",
+              "did", "your", "play", "playing", "want", "wanna", "good", "bad", "great"}
+# mid-game: 'switch to movies', 'change the category to dogs', 'ask me about space'
+_CATEGORY_RE = re.compile(
+    r"^(?:(?:let'?s|can\s+we|could\s+we|now)\s+)?(?:switch(?:\s+the\s+category)?\s+to|"
+    r"change\s+(?:the\s+)?(?:category|topic|subject)\s+to|new\s+(?:category|topic)|"
+    r"(?:category|topic)|ask\s+me\s+about)\s+(?P<cat>.+?)(?:\s+(?:questions|trivia|now|instead))*$"
+    r"|^(?:let'?s\s+)?do\s+(?P<cat2>.+?)\s+(?:questions|trivia)(?:\s+(?:now|instead))?$")
+_ASKING_GAMES = ("trivia", "riddles", "would you rather")
 _CHAT_GAMES = [
     (r"\b(?:trivia|quiz|jeopardy)\b", "trivia"),
     (r"\b(?:20|twenty)\s+questions\b", "twenty questions"),
@@ -333,14 +360,34 @@ class Pet:
             _log(f"anim {name} failed: {e}")
             return False
 
-    def _arms(self, *angles, speed=70):
+    def _arms(self, *poses, speed=70):
+        """Arm poses in order: one angle for both arms, or (left, right).
+        20 is resting down, 170 straight up. Arms move on the dock too."""
         b = self.body
-        if b.actuators_held() or not b.has.get("arm"):
+        if not b.has.get("arm") or b.arms_held():
             return False
-        for a in angles:
-            if not b.arm_angle(a, speed=speed):
+        for p in poses:
+            left, right = p if isinstance(p, tuple) else (p, p)
+            if not b.arm_pose(left, right, speed=speed):
                 return False
         return True
+
+    def _can_drive(self):
+        b = self.body
+        return bool(b.has.get("drive") and not b.docked and not b.actuators_held())
+
+    def _wiggle(self, deg=12, times=2):
+        """A happy wiggle: on her tracks when she's off the dock (in place,
+        edge-guarded), with her arms while she's parked on it."""
+        if self._can_drive():
+            for _ in range(times):
+                if self.body.turn_guarded(deg) != "ok" or self.body.turn_guarded(-deg) != "ok":
+                    break
+            return True
+        return self._arms((130, 40), (40, 130), (130, 40), (40, 130), 20, speed=100)
+
+    def _wave(self):
+        self._arms((160, 20), (115, 20), (160, 20), (115, 20), (160, 20), 20, speed=100)
 
     def _ask_brain(self, system, user, timeout=8.0):
         """One short resident-model call, bounded; None on any failure.
@@ -519,7 +566,9 @@ class Pet:
         self._sound(stock("happy"), wait=True)
         if self._tapped():
             return False
-        self._arms(120, 40, 120, 20, speed=80)
+        self._wave()
+        if self._can_drive():
+            self._wiggle(10, 1)
         self.pulse_lights()
         line, self._welcome = self._welcome or random.choice(_GREETINGS), None
         if self._tapped():
@@ -614,6 +663,8 @@ class Pet:
         self.game = None
 
     def followup_window(self, default):
+        if self.game and self.game.get("name") in _ASKING_GAMES:
+            return max(default, 30)   # thinking time for a trivia answer
         return max(default, 20) if self.game else default
 
     def handle(self, text, raw):
@@ -672,10 +723,19 @@ class Pet:
 
         if self.game:
             self.game["at"] = now
-            if _GAME_END_RE.search(low):
+            if _GAME_END_RE.search(low) or (self.game.get("name") in _ASKING_GAMES
+                                           and re.fullmatch(r"(?:ok(?:ay)?\s+)?(?:stop|that'?s\s+enough|"
+                                                            r"enough|we'?re\s+done)", low)):
                 if self.game["kind"] == "rps":
                     return self._rps_end()
                 self.game["ending"] = True
+                return "brain"
+            m = _CATEGORY_RE.match(low) if self.game.get("name") == "trivia" else None
+            cat = m and (m.group("cat") or m.group("cat2"))
+            if cat and len(cat.split()) <= 5:
+                self.game["topic"] = cat
+                self.game["switched"] = True
+                _log(f"trivia category: {self.game['topic']}")
                 return "brain"
 
         # taught tricks answer their cue, and only the whole cue
@@ -711,6 +771,20 @@ class Pet:
             self.body.speak("Okay. My notes about you are wiped clean.")
             return True
 
+        if _LAUGH_RE.match(low):
+            return self.giggle()
+
+        # a bare game name is an invitation: 'peekaboo!', 'star wars trivia'
+        if len(low.split()) <= 7:
+            m = _QUIZ_ME_RE.match(low)
+            if m:
+                return self._trivia(m.group("cat"))
+            if (_TRIVIA_RE.match(low) or _PEEK_RE.fullmatch(low) or _CHASE_RE.fullmatch(low)
+                    or re.fullmatch(r"(?:rock\s+paper\s+scissors?|roshambo)(?:\s+shoot)?", low)):
+                started = self._start_game(low, any_game=False)
+                if started:
+                    return started
+
         m = _PLAY_RE.match(low) or _PLAY_BARE_RE.match(low)
         if m:
             started = self._start_game(m.group("rest").strip(), any_game=bool(_PLAY_RE.match(low)))
@@ -719,9 +793,10 @@ class Pet:
 
         if _DIRECT_RE.match(low):
             if re.search(r"\btrick\b", low):
-                pool = list(self.tricks.values()) or [{"do": t} for t in
-                                                      ("play_dead", "sneeze", "laugh", "love", "cool")]
-                self._perform(random.choice(pool))
+                own = [{"do": t} for t in ("wave", "dance", "flap", "arms_up", "party", "play_dead",
+                                           "sneeze", "love", "cool", "spin")]
+                taught = list(self.tricks.values())
+                self._perform(random.choice(taught if taught and random.random() < 0.5 else own))
             else:
                 trick = classify_trick(low)
                 if trick:
@@ -780,16 +855,27 @@ class Pet:
         if _LOVE_RE.search(low):
             self._eyes("HEARTS")
             self._sound(stock("admire"))
+            self._arms(100, speed=40)          # a hug
             self._anim("love_1")
+            self._arms(20, speed=40)
         elif _THANKS_RE.search(low):
             self._eyes("HAPPY")
-            self._sound(stock(random.choice(("agree", "happy"))), wait=True)
+            self._sound(stock(random.choice(("agree", "happy"))))
+            self._arms(70, 20, speed=90)       # a happy little bob
         else:
             self._eyes(random.choice(("HAPPY", "SPARKLING", "OVERJOYED")))
             self._sound(stock(random.choice(("happy", "admire"))))
-            self._arms(110, 40, 110, 20, speed=80)
+            self._wiggle()
             self._anim(random.choice(("compliment_2", "compliment_3", "compliment_4")))
         _log(f"praise: '{low}'")
+
+    def giggle(self):
+        """Matt laughed: laugh with him, no speech."""
+        self._eyes(random.choice(("OVERJOYED", "DELIGHTED", "HAPPY")))
+        self._sound(stock("laugh"))
+        self._arms(60, 20, 60, 20, speed=100)
+        _log("giggle")
+        return True
 
     def signoff(self, text):
         """A sign-off ('no thanks', 'thanks') closed the follow-up window:
@@ -859,18 +945,29 @@ class Pet:
         if tid == "play_dead":
             self._eyes("SHOCKED")
             self._sound(stock("die"))
-            self._arms(10, speed=90)
+            self._arms(170, speed=100)         # clutch...
+            self._arms(10, speed=60)           # ...and flop
             self._eyes("DESTROYED")
             time.sleep(3.0)
             self._eyes("BLINK_BIG")
             time.sleep(0.6)
             self._eyes("HAPPY")
             self._sound(stock("laugh"))
+            self._arms(150, 20, speed=90)      # ta-da, alive!
         elif tid == "spin":
-            result = b.turn_guarded(360)
+            result = b.turn_guarded(360) if self._can_drive() else "parked"
             if result != "ok":
                 self._eyes("DIZZY_L")      # parked or near an edge: the eyes spin
                 self._sound(stock("laugh"))
+                self._arms((170, 20), (20, 170), (170, 20), (20, 170), 20, speed=100)
+        elif tid == "wave":
+            self._eyes("HAPPY")
+            self._sound(stock("happy"))
+            self._wave()
+        elif tid == "flap":
+            self._eyes("EXCITED")
+            self._sound(f"{ANIMAL}/bird.wav")
+            self._arms(170, 60, 170, 60, 170, 60, 170, 20, speed=100)
         elif tid == "dance":
             if not b.dance():
                 self._eyes("EXCITED")
@@ -890,17 +987,22 @@ class Pet:
                 self._arms(20, speed=50)
         elif tid == "sneeze":
             self._eyes("SNEEZE")
-            self._sound(stock("sneeze"), wait=True)
+            self._sound(stock("sneeze"))
+            self._arms(80, 20, speed=100)      # achoo jolt
         elif tid == "laugh":
             self._eyes("OVERJOYED")
-            self._sound(stock("laugh"), wait=True)
+            self._sound(stock("laugh"))
+            self._arms(60, 20, 60, 20, 60, 20, speed=100)
         elif tid == "cry":
+            self._arms(160, speed=50)          # hands over her eyes
             if not self._anim("cry_1"):
                 self._eyes("DEJECTED")
                 self._sound(stock("cry"), wait=True)
+            self._arms(20, speed=40)
         elif tid == "angry":
             self._eyes("FURIOUS")
-            self._sound(stock("angry"), wait=True)
+            self._sound(stock("angry"))
+            self._arms(100, 20, 100, 20, speed=100)   # stomp stomp
         elif tid == "sleep":
             self._eyes("SLEEPY")
             self._sound(stock("yawn"), wait=True)
@@ -910,27 +1012,41 @@ class Pet:
         elif tid == "love":
             self._eyes("HEARTS")
             self._sound(stock("admire"))
+            self._arms(100, speed=40)
             self._anim("love_1")
+            self._arms(20, speed=40)
         elif tid == "party":
             self._sound(stock("happy"))
             b.arms_party()
             self.pulse_lights()
         elif tid == "shy":
             self._eyes("SHY")
-            self._sound(stock("admire"), wait=True)
+            self._sound(stock("admire"))
+            self._arms(140, speed=40)          # peeking out from behind her arms
+            time.sleep(1.2)
+            self._arms(20, speed=40)
         elif tid == "wink":
             self._eyes("BLINK_L")
         elif tid == "cool":
             self._eyes("SUNGLASS")
+            self._arms((20, 150), speed=60)    # one arm up, too cool
+            time.sleep(1.5)
+            self._arms(20, speed=50)
         elif tid == "dizzy":
             self._eyes("DIZZY_L")
             self._sound(stock("laugh"), wait=True)
         elif tid == "scared":
             self._eyes("FRIGHTENED")
-            self._sound(stock("shock"), wait=True)
+            self._sound(stock("shock"))
+            self._arms(170, speed=100)
+            time.sleep(1.0)
+            self._arms(20, speed=40)
         elif tid == "sing":
             self._eyes("HAPPY")
             self._sound(f"{MUSIC}/birthday.wav")
+            for _ in range(4):                 # sway along
+                self._arms((140, 60), (60, 140), speed=45)
+            self._arms(20, speed=45)
         elif tid == "say" and arg:
             self._eyes("HAPPY")
             b.speak(arg)
@@ -949,6 +1065,12 @@ class Pet:
             return self._peekaboo()
         if _CHASE_RE.search(rest):
             return self._chase()
+        m = _TRIVIA_RE.match(rest)
+        if m:
+            pre = m.group("pre") or ""
+            if set(pre.split()) & _NOT_TOPIC:
+                return False   # 'i love trivia' is chat, not a game start
+            return self._trivia(m.group("post") or pre)
         for pat, name in _CHAT_GAMES:
             if re.search(pat, rest):
                 return self._chat_game(name)
@@ -964,11 +1086,19 @@ class Pet:
             return False
         return self._chat_game(rest)
 
-    def _chat_game(self, name):
-        self.game = {"kind": "chat", "name": name, "at": time.time()}
+    def _chat_game(self, name, topic=None):
+        self.game = {"kind": "chat", "name": name, "at": time.time(), "topic": topic}
         self._eyes("EXCITED")
-        _log(f"game on: {name}")
+        self._arms(150, 20, speed=90)
+        _log(f"game on: {name}" + (f" ({topic})" if topic else ""))
         return "brain"   # the brain hosts it, with the game note in context
+
+    def _trivia(self, topic=None):
+        topic = (topic or "").strip(" ,.!?") or None
+        if topic and (topic in {"anything", "everything", "whatever", "random", "random stuff",
+                                "general", "general knowledge", "stuff", "any"}):
+            topic = None
+        return self._chat_game("trivia", topic)
 
     def _rps_start(self):
         self.game = {"kind": "rps", "at": time.time(), "me": 0, "you": 0}
@@ -980,30 +1110,40 @@ class Pet:
         if self.game:
             self.game["at"] = time.time()
         self._eyes("FOCUS")
-        self.body.speak(("Okay! " if intro else "") + "Rock, paper, scissors, shoot! What did you throw?")
+        if intro:
+            self.body.speak("Okay! Rock, paper, scissors...")
+        self._arms(100, 20, 100, 20, 100, 20, speed=100)   # pump, pump, pump...
+        self.body.speak(("Shoot! " if intro else "Rock, paper, scissors, shoot! ") + "What did you throw?")
         return True
 
     def _rps_reveal(self, mine, theirs):
         g = self.game or {"kind": "rps", "me": 0, "you": 0}
         self.game = g
         g["at"] = time.time()
-        self._arms({"rock": 20, "paper": 170, "scissors": 100}[mine], speed=90)
+        # her throw, in arms: rock a fist forward, paper open wide, scissors a V
+        self._arms({"rock": 70, "paper": 170, "scissors": (170, 90)}[mine], speed=100)
+        time.sleep(0.6)
         result = rps_result(mine, theirs)
         if result == "me":
             g["me"] += 1
             self._eyes("SUNGLASS")
-            self._sound(stock("laugh"), wait=True)
+            self._sound(stock("laugh"))
+            self._arms(170, 120, 170, speed=100)
+            if self._can_drive():
+                self._wiggle(15, 1)
             line = f"I threw {mine}! {_HOW[mine]}. I win!"
             if g["me"] >= 2 and g["me"] > g["you"]:
                 self.pulse_lights()
         elif result == "you":
             g["you"] += 1
+            self._arms(10, speed=30)           # droop
             if not self._anim("doly_lost_1"):
                 self._eyes("DEJECTED")
             line = f"I threw {mine}. {_HOW[theirs]}. You win!"
         else:
             self._eyes("PUZZLED")
-            self._sound(f"{SFX}/hmmm.wav", wait=True)
+            self._sound(f"{SFX}/hmmm.wav")
+            self._arms((150, 20), (120, 20), (150, 20), speed=70)   # scratching her head
             line = f"I threw {mine} too! A tie."
         score = (f" {g['me']} to {g['you']}, me." if g["me"] > g["you"] else
                  f" {g['you']} to {g['me']}, you." if g["you"] > g["me"] else
@@ -1054,14 +1194,19 @@ class Pet:
                 if covered_at is None:
                     covered_at = now
                     self._eyes("SLEEP")
+                    self._arms(165, speed=100)     # she hides behind her arms too
             elif covered_at is not None and (d is None or d > 120):
                 if now - covered_at >= 0.4:
                     rounds += 1
                     last = now
+                    self._arms(20, speed=100)      # ...boo!
                     self._eyes(random.choice(("OVERJOYED", "EXCITED", "DELIGHTED")))
                     self._sound(stock("laugh"), wait=True)
+                else:
+                    self._arms(20, speed=100)
                 covered_at = None
             time.sleep(0.05)
+        self._arms(20, speed=60)
         self._eyes("HAPPY")
         b.speak("That was fun!" if rounds else "Aw, no peekaboo? Maybe later.")
         return True
@@ -1085,7 +1230,8 @@ class Pet:
                 catches += 1
                 last = now
                 self._eyes("OVERJOYED")
-                self._sound(stock("laugh"), wait=True)
+                self._sound(stock("laugh"))
+                self._arms(170, 20, speed=100)     # got it!
                 facing = None
                 time.sleep(0.8)
             else:
@@ -1099,12 +1245,14 @@ class Pet:
                     if side != facing:
                         facing = side
                         self._eyes("LOOK_LEFT" if side == "left" else "LOOK_RIGHT")
+                        self._arms((140, 20) if side == "left" else (20, 140), speed=100)
                     if can_turn and now >= next_turn:
                         next_turn = now + 1.5
                         _log(f"chase: turning {side} (near={near})")
                         if b.turn_guarded(-20 if side == "left" else 20) != "ok":
                             can_turn = False
             time.sleep(0.05)
+        self._arms(20, speed=60)
         self._eyes("HAPPY")
         b.speak(f"Got you {catches} times! That was fun." if catches else "Phew! You're too fast for me.")
         return True
@@ -1194,9 +1342,21 @@ class Pet:
                     + "; ".join(f"{n['text']} ({n.get('day', '')})" for n in notes))
         g = self.game
         if g and g["kind"] == "chat":
+            topic = g.get("topic")
             if g.get("ending"):
                 out += (f"\nGAME: Matt is ending your game of {g['name']}. Give the final score "
                         "if there was one and a short, warm sign-off.")
+            elif g["name"] == "trivia":
+                switched, g["switched"] = g.get("switched"), False
+                out += ("\nGAME ON: you're hosting trivia for Matt"
+                        + (f", category: {topic}" if topic else ", mixed categories") + ". "
+                        + (f"He just switched the category to {topic}: say so in a few words and "
+                           "ask your first question in it. " if switched else "")
+                        + "Every turn: if he just answered, say right or wrong in a few words (give "
+                          "the real answer when wrong) and the score, then ALWAYS ask the next "
+                          "question. Never end a turn without a question: the game keeps going "
+                          "until Matt says stop. One question at a time, never repeat one, mix "
+                          "easy and hard. He can change the category any time.")
             else:
                 out += (f"\nGAME ON: you're playing {g['name']} with Matt. Host it like a playful "
                         "friend: one question or turn at a time, then wait for his answer. React to "
@@ -1210,6 +1370,19 @@ class Pet:
                     "with a quick, happy welcome back before answering.)")
         return out
 
+    def turn_rule(self):
+        """The per-turn reply rule while a question game is on: the default
+        'answer only what was asked' stopped trivia after one question."""
+        g = self.game
+        if g and g["kind"] == "chat" and not g.get("ending") and g["name"] in _ASKING_GAMES:
+            return (" Game turn: react to his answer in a few words, then ask your next "
+                    "question. The reply must end with that question. At most 45 words.")
+        return None
+
+    def wants_next(self, reply):
+        """A question game turn ended without the next question."""
+        return bool(self.turn_rule() and reply and "?" not in reply[-60:])
+
     def after_reply(self, reply):
         if reply:
             self._turns += 1   # a stored exchange: worth a look for notes
@@ -1221,7 +1394,11 @@ class Pet:
             self.game = None
             return
         head = (reply or "")[:80].lower()
-        if re.search(r"\b(?:correct|that's right|you got it|nailed it|yes!|bingo)\b", head):
+        if re.search(r"^(?:yes|yep|right|correct|bingo)\b|\b(?:correct|that'?s\s+right|"
+                     r"you'?re\s+right|you\s+got\s+it|nailed\s+it)\b", head) \
+                and not re.search(r"\bnot\s+(?:quite\s+)?(?:right|correct)\b", head):
             self._eyes("OVERJOYED")
+            self._arms(170, 20, speed=100)     # cheer
         elif re.search(r"\b(?:not quite|nope|wrong|close,? but|sorry,)\b", head):
             self._eyes("PUZZLED")
+            self._arms((20, 120), 20, speed=60)

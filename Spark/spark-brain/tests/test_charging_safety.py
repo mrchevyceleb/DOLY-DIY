@@ -62,10 +62,16 @@ class ChargingSafetyTests(unittest.TestCase):
         self.assertTrue(b.docked)
         self.assertFalse(b.drive_rotate(12))
         self.assertFalse(b.drive_distance(40))
-        self.assertFalse(b.arm_angle(130))
-        AnimPlayer(b, {})._arm_to(0, 130, 25, False)
         b._drive.go_distance.assert_not_called()
         b._drive.go_rotate.assert_not_called()
+        # arms never touch the ground: they may wave on the charger...
+        b._arm.set_angle.return_value = 0
+        self.assertTrue(b.arm_angle(130, wait=False))
+        # ...but not on a near-empty battery
+        b.battery_pct = lambda: 4
+        b._arm.set_angle.reset_mock()
+        self.assertFalse(b.arm_angle(130, wait=False))
+        AnimPlayer(b, {})._arm_to(0, 130, 25, False)
         b._arm.set_angle.assert_not_called()
 
     def test_zero_battery_cannot_undock_even_on_voice_request(self):
@@ -116,9 +122,12 @@ class ChargingSafetyTests(unittest.TestCase):
         b._drive.abort.assert_called_once()
         self.assertEqual([c.args for c in b._drive.free_drive.call_args_list],
                          [(0, False, True), (0, True, True)])
-        self.assertEqual(b._arm.abort.call_count, 2)
+        b._arm.abort.assert_not_called()   # arms may wave on a healthy charge
         b._drive.go_distance.assert_not_called()
         b._arm.set_angle.assert_not_called()
+        b.battery_pct = lambda: 4
+        b.refresh_power()
+        self.assertEqual(b._arm.abort.call_count, 2)
 
     def test_native_abort_failure_still_attempts_to_zero_both_wheels(self):
         b = self.body(pct=80)

@@ -25,6 +25,7 @@ from . import search as websearch
 
 OFFLINE_LINE = "My big brain is offline right now, but I can still take commands."
 WEB_SEARCH_FILLER = "Let me look that up."
+_NEXT_QUESTION = "(Go on, your next question.)"
 WEB_READ_FILLER = "Let me read that."
 
 
@@ -379,7 +380,7 @@ class Spark:
             def _stretch():
                 time.sleep(8)
                 try:
-                    if self.body.sleeping or self.body.actuators_held():
+                    if self.body.sleeping or self.body.arms_held():
                         return
                     self.body.mood_eyes("LOOK_AHEAD")
                     self.body.arm_angle(130, speed=50)
@@ -848,10 +849,13 @@ class Spark:
                             + "news, prices, scores), your whole reply must be one "
                             "line: SEARCH: <search terms>. If Matt gave a web "
                             "address, reply READ: <url>. Otherwise just answer Matt."))
+        game_rule = pet.turn_rule() if pet is not None else None
         messages[-1]["content"] += (
             "\n\n[Spoken reply: be warm and respectful; no insults, blame, threats, or sarcasm. "
-            + ("Up to six concise sentences." if detailed else "One or two short sentences, at most 35 words.")
-            + " Answer only what was asked. Never claim an action happened unless live state confirms it.]"
+            + (game_rule or (("Up to six concise sentences." if detailed else
+                              "One or two short sentences, at most 35 words.")
+                             + " Answer only what was asked."))
+            + " Never claim an action happened unless live state confirms it.]"
             + " Reply in English only, whatever language the user text seems to be."
             + web_offer)
         reply_parts = []
@@ -949,6 +953,10 @@ class Spark:
         self.body.eyes("idle")
         if pet is not None:
             pet.after_reply(reply)
+            if pet.wants_next(reply) and user_text != _NEXT_QUESTION:
+                # a trivia turn ended without the next question: ask for it
+                log("spark", "game turn had no next question: asking for one")
+                self._generate_reply(_NEXT_QUESTION, None, 0)
 
     def _run_web_tool(self, fetch, render, filler, user_text, prior_context, web_hops,
                       join_s=12):
