@@ -71,7 +71,8 @@ def _plausible_speech(text, peak):
 # The whisper verification accepts that garble only when a command
 # follows it (someone talking TO her) - a bare garble stays rejected,
 # so TV 'bar' chatter still cannot wake her.
-_WAKE_GARBLE_RE = re.compile(r"^\s*(?:okay\s+|ok\s+)?(?:bark|barks|sparky?)[,!.]?\s+\S", re.I)
+_WAKE_GARBLE_RE = re.compile(
+    r"^\s*(?:okay\s+|ok\s+|hey\s+)?(?:bark|barks|sparky?|sparks|park|bart|barkley)[,!.]?\s+\S", re.I)
 
 # Only complete, short sign-offs close a follow-up. A request such as
 # "thanks, can you set a timer?" must still reach the command router.
@@ -515,12 +516,16 @@ class Spark:
     def _listen_command(self, mic, recognizer, wake=None, timeout_s=6.0, followup=False):
         from .ear import CommandAudio, record_utterance, strip_wake_prefix
 
+        said = ""
         if wake and wake.command:
-            return wake.command, b""
-        if wake and not wake.prefix_pcm:
-            leftover = strip_wake_prefix(wake.text, wake.text)
-            if leftover:
-                return leftover, b""
+            said = wake.command
+        elif wake and not wake.prefix_pcm:
+            said = strip_wake_prefix(wake.text, wake.text)
+        if said:
+            # The verified clip ends at the wake endpoint, often mid-sentence
+            # ('Park. What's'); the rest was queued in the mic during the check.
+            rest, _ = self._listen_command(mic, recognizer, None, timeout_s=.6)
+            return f"{said} {rest}".strip(), b""
         deadline = time.monotonic() + timeout_s
         # Remote timeout plus local fallback can occupy ~42s. Preserve speech
         # received during that work; this costs under 2 MB at the default rate.

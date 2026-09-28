@@ -197,8 +197,17 @@ class VoiceLatencyTests(unittest.TestCase):
         self.assertEqual(text, "Stop.")
         self.assertIsNone(capture.call_args.kwargs["on_frame"])
         rec.feed.assert_not_called()
-        text, _ = spark._listen_command(Mock(), Mock(), WakeResult("spark stop"))
+        with patch("spark.ear.record_utterance", return_value=b""):
+            text, _ = spark._listen_command(Mock(), Mock(), WakeResult("spark stop"))
         self.assertEqual(text, "stop")
+        # The verified clip was cut mid-sentence ('Park. What's'): the rest
+        # queued in the mic during the check completes the command.
+        spark.whisper.transcribe_pcm.side_effect = None
+        spark.whisper.transcribe_pcm.return_value = "the weather today?"
+        with patch("spark.ear.record_utterance", return_value=pcm(3000)*30):
+            text, _ = spark._listen_command(Mock(noise_floor=500), Mock(),
+                                            WakeResult("Park. What's", command="What's"))
+        self.assertEqual(text, "What's the weather today?")
 
     def test_paused_okay_does_not_discard_followup_request(self):
         spark = Spark.__new__(Spark)
