@@ -380,9 +380,11 @@ def _near_wake(token, heads):
 
 # Strong name-family tokens: speech that Vosk's constrained wake grammar
 # decodes to these sounds like her name being said, not common words.
+# Not 'stark': it is how Vosk hears 'start', and every stark wake in the logs
+# was background talk ('Okay, start the battery on fire.'). A stark segment
+# still wakes her when the verifier hears her name.
 _STRONG_NAME_FAMILY = {"spark", "sparky", "spar", "spork", "spock", "spec",
-                       "speck", "stark", "starks", "bark", "barks", "barkley",
-                       "bart"}
+                       "speck", "bark", "barks", "barkley", "bart"}
 # How the verifier (Parakeet) renders a spoken 'Spark' when it drops the soft
 # 's': 'Park, what's the weather today?' (peak 2842), 'Bark, ...' (3887).
 _VERIFIER_NAMES = {"park", "bark", "barks", "bart", "barkley", "sparks"}
@@ -536,7 +538,7 @@ def listen_for_wake(frames, recognizer, cfg, wake_words, tap_check=None,
                     # stripping the first word turned it into 'today.'
                     # Exact aliases only: fuzzy matching would strip a real
                     # command word ('start ...') as if it were her name.
-                    named = v_head.removesuffix("'s") in _STRONG_NAME_FAMILY
+                    named = v_head.removesuffix("'s") in _STRONG_NAME_FAMILY | {"stark", "starks"}
                     return WakeResult(verified, command="" if named else verified,
                                       clip_pcm=clip)
             # A rejected earlier segment must not suppress a name in the
