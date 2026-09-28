@@ -156,6 +156,8 @@ _RPS_RE = re.compile(r"\brock\b.*\b(?:paper|scissors?)\b|\bpaper\b.*\bscissors?\
 _PEEK_RE = re.compile(r"\bpeek\s*a\s*boo\b|\bpeekaboo\b|\bpeak\s*a\s*boo\b")
 _CHASE_RE = re.compile(r"\bchase\b|\b(?:catch|follow)\s+my\s+hand\b|\bhand\s+game\b")
 _THROW_RE = re.compile(r"\b(rock|rocks|stone|paper|scissors|scissor|sissors)\b")
+_HESITATE_RE = re.compile(r"^(?:what|huh|um+|uh+|hmm+|wait|hold\s+on|pardon|sorry|"
+                          r"say\s+(?:that|it)\s+again|what\s+was\s+that|one\s+sec(?:ond)?)$")
 _BEATS = {"rock": "scissors", "paper": "rock", "scissors": "paper"}
 _HOW = {"rock": "Rock crushes scissors", "paper": "Paper covers rock", "scissors": "Scissors cut paper"}
 
@@ -266,6 +268,9 @@ class Pet:
         self._turns = 0       # user turns since the last note extraction
         self._extract_timer = None
         self._notes_lock = threading.Lock()
+        self._back_after = None   # seconds away, for the next reply's welcome
+        self._brain_lock = threading.Lock()
+        self._welcome = None      # line prepared while Matt is away
 
     # ------------------------------------------------------------ storage
     def _load(self, name, default):
@@ -338,7 +343,12 @@ class Pet:
         return True
 
     def _ask_brain(self, system, user, timeout=8.0):
-        """One short resident-model call, bounded; None on any failure."""
+        """One short resident-model call, bounded; None on any failure.
+        Only one at a time: the server is shared, so a slow one is skipped
+        past rather than stacked up."""
+        if not self._brain_lock.acquire(blocking=False):
+            _log("brain ask skipped: another is still running")
+            return None
         box = {}
 
         def run():
@@ -347,6 +357,8 @@ class Pet:
                                               {"role": "user", "content": user}], fallback=False)
             except Exception as e:
                 box["err"] = e
+            finally:
+                self._brain_lock.release()
         t = threading.Thread(target=run, daemon=True)
         t.start()
         t.join(timeout)
@@ -381,13 +393,16 @@ class Pet:
         now = time.time()
         if now - self.last_seen > AWAY_S:
             self.session_start = now
+        if self.away_since and now - self.away_since >= AWAY_S:
+            # the camera saw him gone, and he spoke (or touched her) before
+            # it saw him come back: her next reply carries the welcome
+            self._back_after = (now, now - self.away_since)
         self.last_interaction = self.last_seen = now
         self.away_since = None
         self._next_look = now + QUIET_BEFORE_LOOK_S
 
     def heard_turn(self):
         self.saw_matt()
-        self._turns += 1
 
     def _look(self):
         """One short camera check: True/False person, None when it can't tell."""
@@ -433,6 +448,8 @@ class Pet:
                     and now >= self._next_look:
                 seen = self._look()
                 self._next_look = now + (LOOK_EVERY_S if seen is not None else 10 * 60)
+                if self._tapped():
+                    return False   # Matt wants her: the look must not delay him
                 if seen:
                     away = now - self.away_since if self.away_since else 0
                     if now - self.last_seen > AWAY_S:
@@ -443,6 +460,7 @@ class Pet:
                         return self.greet(away)
                 elif seen is False and self.away_since is None:
                     self.away_since = now
+                    self._prepare_welcome()
             if quiet < 120 or b.speaking_recently():
                 return False   # never talk over the tail of a conversation
             around = now - self.last_interaction < 30 * 60 or now - self.last_seen < 10 * 60
@@ -499,29 +517,40 @@ class Pet:
         self._eyes("EXCITED")
         self.body._led_flash("Yellow")
         self._sound(stock("happy"), wait=True)
+        if self._tapped():
+            return False
         self._arms(120, 40, 120, 20, speed=80)
         self.pulse_lights()
-        line = self._welcome_line(away_s)
+        line, self._welcome = self._welcome or random.choice(_GREETINGS), None
+        if self._tapped():
+            return False   # he tapped to talk: his turn, not her speech
         self._eyes("HAPPY")
         self.body._bump_mood(1)
         self._remark("(Matt came back into the room.)", line)
         return line.rstrip().endswith("?")
 
-    def _welcome_line(self, away_s):
-        notes = [n for n in self.notes if time.time() - n.get("t", 0) < 3 * 86400]
-        if notes and random.random() < 0.6:
-            listing = "\n".join(f"- {n['text']}" for n in notes[-6:])
+    def _prepare_welcome(self):
+        """Matt just left: write the welcome-back line now, in the
+        background, so greeting him never waits on the brain."""
+        self._welcome = None
+        with self._notes_lock:
+            notes = [n for n in self.notes if time.time() - n.get("t", 0) < 3 * 86400]
+        if not notes or random.random() >= 0.6 or self.brain is None:
+            return
+        listing = "\n".join(f"- {n['text']}" for n in notes[-6:])
+
+        def run():
             out = self._ask_brain(
                 "You are Spark, Matt's affectionate little desk robot. Write ONE short, warm "
                 "welcome-back line to Matt, under 16 words, spoken aloud (no emoji, no quotes). "
                 "If one of these notes is a recent plan or event, ask how it went; otherwise "
                 "just welcome him back.\nNotes:\n" + listing,
-                f"Matt just came back after about {int(away_s // 60)} minutes away.", timeout=6)
+                "Matt just came back into the room.", timeout=20)
             if out:
                 out = out.strip().strip('"').splitlines()[0].strip()
                 if 3 <= len(out.split()) <= 24 and not out.lower().startswith(("search:", "read:")):
-                    return out
-        return random.choice(_GREETINGS)
+                    self._welcome = out
+        threading.Thread(target=run, daemon=True).start()
 
     def _bedtime_offer(self, now):
         self._next_notice = now + NOTICE_GAP_S
@@ -610,14 +639,15 @@ class Pet:
                 m = _THROW_RE.search(low)
                 if m:
                     return self._rps_reveal(p["pick"], _throw(m.group(1)))
-                if (self.game and self.game["kind"] == "rps" and len(low.split()) <= 3
-                        and not _GAME_END_RE.search(low) and not _NO_RE.match(low)):
+                if self.game and self.game["kind"] == "rps" and _HESITATE_RE.match(low):
                     self.pending = p
                     self.pending["at"] = now
                     self.body.speak("Rock, paper, or scissors?")
                     return True
                 if self.game and self.game["kind"] == "rps":
-                    return self._rps_end() if (_GAME_END_RE.search(low) or _NO_RE.match(low)) else False
+                    if _GAME_END_RE.search(low) or _NO_RE.match(low):
+                        return self._rps_end()
+                    self.game = None   # he moved on: no stranded half-game
             elif kind in ("rps_again", "play_offer", "stretch", "bedtime"):
                 if kind == "play_offer":
                     started = self._start_game(low, any_game=False)
@@ -631,6 +661,8 @@ class Pet:
                     # 'rock!' straight away: play the round she'd have asked for
                     return self._rps_reveal(random.choice(("rock", "paper", "scissors")),
                                             _throw(_THROW_RE.search(low).group(1)))
+                if kind == "rps_again" and self.game and self.game["kind"] == "rps":
+                    self.game = None   # he moved on: no stranded half-game
             elif kind == "which_game":
                 started = self._start_game(low, any_game=False)
                 if started:
@@ -1172,9 +1204,15 @@ class Pet:
                         "score, then go straight to the next turn. Under 40 words per turn.")
         if self.night():
             out += "\n(It's late at night: you're a little drowsy, though still happy to help.)"
+        back, self._back_after = self._back_after, None
+        if back and time.time() - back[0] < 120:
+            out += (f"\n(Matt just got back after about {int(back[1] // 60)} minutes away: open "
+                    "with a quick, happy welcome back before answering.)")
         return out
 
     def after_reply(self, reply):
+        if reply:
+            self._turns += 1   # a stored exchange: worth a look for notes
         g = self.game
         if not g or g["kind"] != "chat":
             return

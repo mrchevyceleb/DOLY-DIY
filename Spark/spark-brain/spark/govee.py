@@ -70,6 +70,7 @@ class GoveeLights:
         self._devices = []
         self._last_scan = 0.0
         self._lan_miss_at = 0.0
+        self._pulse_lock = threading.Lock()
         self._load_cache()
 
     # ------------------------------------------------------------- cache
@@ -320,6 +321,7 @@ class GoveeLights:
         return [d for d in devs if label in d["name"].lower()]
 
     def _apply(self, command, data, label="all"):
+        self._user_cmd_at = time.time()   # a pulse must not undo this
         with self._lock:
             devs = self._targets(label)
             if not devs:
@@ -388,7 +390,16 @@ class GoveeLights:
         what they were showing. Lamps that are off stay off."""
         if not (self.enabled and self.api_key):
             return False
+        if not self._pulse_lock.acquire(blocking=False):
+            return False   # one pulse at a time: a second would restore pink
+        try:
+            return self._pulse(rgb, hold_s)
+        finally:
+            self._pulse_lock.release()
+
+    def _pulse(self, rgb, hold_s):
         devs = [d for d in self._targets("all") if d.get("cloud") or not d.get("ip")]
+        started = time.time()
 
         def one(dev):
             s = self._cloud_state(dev)
@@ -397,8 +408,12 @@ class GoveeLights:
             kelvin, color = s.get("colorTemperatureK"), s.get("colorRgb")
             if not kelvin and not isinstance(color, int):
                 return   # can't restore what we can't read: leave it alone
+            if getattr(self, "_user_cmd_at", 0) >= started:
+                return   # Matt changed the lights meanwhile: his wins
             self._cmd(dev, "color", rgb)
             time.sleep(hold_s)
+            if getattr(self, "_user_cmd_at", 0) >= started:
+                return
             if kelvin:
                 self._cmd(dev, "temp", kelvin)
             else:
@@ -407,7 +422,7 @@ class GoveeLights:
         for t in threads:
             t.start()
         for t in threads:
-            t.join(timeout=12)
+            t.join(timeout=25)   # 3 calls x 6 s timeout + hold: the lock outlives them
         return bool(devs)
 
     def status(self, label="all"):
