@@ -69,6 +69,7 @@ class GoveeLights:
         self._sock = None
         self._devices = []
         self._last_scan = 0.0
+        self._lan_miss_at = 0.0
         self._load_cache()
 
     # ------------------------------------------------------------- cache
@@ -143,6 +144,10 @@ class GoveeLights:
         with self._lock:
             if not force and self._devices and time.time() - self._last_scan < 300:
                 return self._devices
+            # The H6006 lamps never answer LAN scans: without this, every
+            # command waited out the 3 s broadcast before using the cloud.
+            if not force and time.time() - self._lan_miss_at < 1800:
+                return self._devices
             s = self._udp()
             if s is None:
                 return self._devices
@@ -178,6 +183,8 @@ class GoveeLights:
                         "caps": set(d.get("supportCmds", [])
                                     or ["turn", "brightness", "colorwc"]),
                     }
+            if not found:
+                self._lan_miss_at = time.time()
             if found:
                 self._devices = list(found.values())
                 self._last_scan = time.time()
@@ -313,10 +320,18 @@ class GoveeLights:
             devs = self._targets(label)
             if not devs:
                 return ("none", "I can't find your Govee lights right now.")
-            sent = 0
-            for dev in devs:
-                if self._cmd(dev, command, data) == "ok":
-                    sent += 1
+            # both lamps at once: sequential cloud calls lagged one behind
+            results = [None] * len(devs)
+
+            def _run(i, dev):
+                results[i] = self._cmd(dev, command, data)
+            threads = [threading.Thread(target=_run, args=(i, d), daemon=True)
+                       for i, d in enumerate(devs)]
+            for t in threads:
+                t.start()
+            for t in threads:
+                t.join(timeout=8)
+            sent = sum(1 for r in results if r == "ok")
             if sent == 0:
                 return ("error", "I couldn't reach your lights just then.")
             return ("ok", "")

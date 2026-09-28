@@ -344,8 +344,12 @@ class Router:
                 pass
         if re.search(r"\bdim\b", low):
             return g.brightness(30)
-        if re.search(r"\bbrighten\b|\bfull\b", low):
-            return g.brightness(100 if re.search(r"\bfull\b", low) else 75)
+        # Matt's shortcut: 'bright lights' is both lamps at full
+        if (re.search(r"\bbright\b|\bfull\b", low)
+                and not re.match(r"\s*(?:how|what|why|are|is)\b", low)):
+            return g.brightness(100)
+        if re.search(r"\bbrighten\b", low):
+            return g.brightness(75)
         # white temperatures
         if re.search(r"\bwarm\s*white\b|\bwarmer\b", low):
             return g.color_temp(3200)
