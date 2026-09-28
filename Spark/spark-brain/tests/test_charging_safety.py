@@ -42,6 +42,19 @@ class ChargingSafetyTests(unittest.TestCase):
         b._edge_gaps = lambda: gaps if gaps is not None else ["Back_Left", "Back_Right"]
         return b
 
+    def test_failed_exit_is_stranded_not_home_and_go_home_retraces(self):
+        b = self.body(charging=False, pct=80, gaps=[])
+        b.cfg["homing"] = {"enabled": True}
+        b.docked, b._stranded_mm = True, 20
+        self.assertTrue(b.stranded())
+        self.assertFalse(b.is_on_dock())  # was "already" home while stranded
+        b._retrace_departure = Mock(return_value=True)
+        self.assertEqual(b.go_home(), "arrived")
+        b._charging.sample.return_value = b._charging.charging = True
+        b.refresh_power()
+        self.assertEqual(b._stranded_mm, 0)
+        self.assertTrue(b.is_on_dock())
+
     def test_charging_probe_and_all_actuator_paths_stay_still(self):
         b = self.body(pct=50)
         b.dock_probe()

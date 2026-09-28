@@ -64,25 +64,6 @@ class HomingTests(unittest.TestCase):
             self.assertEqual(result, "aligned" if yaws == [2, -2] else "alignment")
             b.drive_guarded.assert_not_called()
 
-    def test_transient_rear_gap_cancels_entry_after_gpio_clears(self):
-        from spark.dock_entry import DockEntry
-        b, _ = self.rig()
-        edge = Mock()
-        edge.init.return_value = edge.enable_control.return_value = 0
-        b.has["edge"] = True
-        b._charging = Mock(charging=False)
-        b._charging.healthy.return_value = True
-        b._imu_yaw, b._imu_updated_at = 0, 100
-        with patch.dict(sys.modules, {"doly_edge": edge}), \
-             patch("spark.dock_entry.time.monotonic", return_value=100):
-            b._init_edge()
-            b._docking_entry = DockEntry(b, 220)
-            b._docking_entry.travelled = 160
-            # GPIO poll is already clear when the queued event arrives.
-            edge.on_gap_detect.call_args.args[0]("Direction.Back_Left")
-            self.assertEqual(b._docking_entry.check(), "edge")
-            b.drive_stop.assert_called()
-
     def test_confirmed_visible_dock_required_before_translation(self):
         b, h = self.rig()
         camera = Mock()
@@ -210,26 +191,50 @@ class HomingTests(unittest.TestCase):
         self.assertEqual(h.approach(camera), ("edge", None))
         b.drive_guarded.assert_called_once()
 
-    def test_edge_stop_does_not_authorize_more_reverse_steps(self):
-        b, h = self.rig()
-        h.charge_verified = Mock(return_value=False)
-        with patch("spark.dock_entry.DockEntry") as entry:
-            entry.return_value.run.return_value = "edge"
-            self.assertEqual(h.reverse_entry(self.target()), "edge")
-            entry.assert_called_once_with(b, 240, None, allow_front_after=160)
-            entry.return_value.run.assert_called_once()
-        self.assertIsNone(b._docking_entry)
-
-    def test_controller_completion_is_not_arrival(self):
+    def test_only_charge_is_arrival_and_a_miss_pulls_out_for_a_fresh_approach(self):
         b, h = self.rig()
         h.charge_verified = Mock(return_value=False)
         with patch("spark.dock_entry.DockEntry") as entry:
             entry.return_value.run.return_value = "no_contact"
+            entry.return_value.pull_out.return_value = "ok"
             self.assertEqual(h.reverse_entry(self.target()), "no_contact")
-            entry.return_value.run.return_value = "contact"
-            self.assertEqual(h.reverse_entry(self.target()), "contact")
+            entry.assert_called_once_with(b, 240, None)
+            entry.return_value.pull_out.return_value = "edge"
+            self.assertEqual(h.reverse_entry(self.target()), "edge")
+            entry.return_value.pull_out.reset_mock()
+            entry.return_value.run.return_value = "cancelled"
+            self.assertEqual(h.reverse_entry(self.target()), "cancelled")
+            entry.return_value.pull_out.assert_not_called()
             h.charge_verified.return_value = True
             self.assertEqual(h.reverse_entry(self.target()), "arrived")
+        self.assertIsNone(b._docking_entry)
+
+    def test_entry_treats_rear_pair_void_as_the_ramp_like_stock(self):
+        from spark.dock_entry import DockEntry
+        b, _ = self.rig()
+        b.has.update(edge=True, drive=True)
+        b._charging = Mock(charging=False)
+        b._charging.healthy.return_value = True
+        b._charging.contact.return_value = False
+        b._imu_yaw, b._imu_updated_at = 0, 100
+        b._drive = Mock()
+        b._drive.go_distance.return_value = 0
+        b._drive.get_state.side_effect = [b._drive.DriveState.Running,
+                                          b._drive.DriveState.Completed]
+        b._edge_gaps.return_value = ["Back_Left", "Back_Right", "Front_Left"]
+        with patch("spark.dock_entry.time.monotonic", return_value=100),              patch("spark.dock_entry.time.sleep"):
+            entry = DockEntry(b, 220)
+            self.assertFalse(entry.trailing_gap("All"))  # before the ramp: pickup/cliff
+            for direction in ("Back_Left", "Back", "Front_Right", "Left"):
+                self.assertTrue(entry.trailing_gap(direction))
+            self.assertEqual(entry._drive(220, 20), "done")  # the void never stops it
+            self.assertTrue(entry.ramp)
+            self.assertTrue(entry.trailing_gap("All"))
+            entry.pulling_out = True  # forward: the front pair leads again
+            self.assertFalse(entry.trailing_gap("Front_Left"))
+            self.assertTrue(entry.trailing_gap("Back_Right"))
+            b._imu_yaw = 20
+            self.assertEqual(entry.check(), "alignment")
 
     def test_return_allowed_at_ten_but_stop_edge_and_empty_battery_win(self):
         b, h = self.rig()
@@ -272,28 +277,12 @@ class HomingTests(unittest.TestCase):
             with patch("spark.body.time.monotonic", return_value=100.1):
                 self.assertEqual(b.approach_proximity(), "sensor" if bad[2] else "obstacle")
 
-    def test_entry_never_waives_leading_gaps_or_early_ramp_gaps(self):
-        from spark.dock_entry import DockEntry
-        for gap, travelled, expected in (("Front_Left", 0, "edge"),
-                                          ("Front_Left", 160, None),
-                                          ("Back_Left", 160, "edge"),
-                                          ("All", 160, "edge")):
-            b, _ = self.rig()
-            b.has["edge"] = True
-            b._charging = Mock(charging=False)
-            b._charging.healthy.return_value = True
-            b._imu_yaw, b._imu_updated_at = 0, 100
-            b._edge_gaps.return_value = [gap]
-            with patch("spark.dock_entry.time.monotonic", return_value=100):
-                entry = DockEntry(b, 220)
-                entry.travelled = travelled
-                self.assertEqual(entry.check(), expected)
-
     def test_ten_percent_triggers_return_and_eleven_allows_roaming(self):
         from spark.__main__ import Spark
         spark = Spark.__new__(Spark)
         spark.body = Mock()
         spark.body.is_on_dock.return_value = False
+        spark.body.stranded.return_value = False
         spark.body.actuators_held.return_value = False
         spark.body._return_margin_pct.return_value = 0
         spark.body.go_home.return_value = "arrived"
@@ -318,6 +307,7 @@ class HomingTests(unittest.TestCase):
         spark = Spark.__new__(Spark)
         spark.body = Mock()
         spark.body.is_on_dock.return_value = False
+        spark.body.stranded.return_value = False
         spark.body.actuators_held.return_value = False
         spark.body._return_margin_pct.return_value = 6
         spark.body.go_home.return_value = "arrived"
@@ -407,6 +397,7 @@ class HomingTests(unittest.TestCase):
         spark.body.battery_pct.return_value = 12
         spark.body._return_margin_pct.return_value = 2
         spark.body.is_on_dock.return_value = False
+        spark.body.stranded.return_value = False
         spark.body.actuators_held.return_value = True
         spark.body.go_home.return_value = "edge"
         with patch("spark.__main__.time.monotonic", return_value=100):
@@ -453,34 +444,6 @@ class HomingTests(unittest.TestCase):
         self.assertEqual(h.approach(camera), ("lost", None))
         h.turn_to.assert_called_once_with(15)
         b.drive_guarded.assert_not_called()
-
-    def test_entry_only_corrects_single_rear_corner(self):
-        from spark.dock_entry import DockEntry
-        b, _ = self.rig()
-        b._charging = Mock(charging=False)
-        b._charging.healthy.return_value = True
-        b._imu_yaw, b._imu_updated_at = 0, 100
-        b._edge_gaps.side_effect = [["Back_Right"], [], [], []]
-        b._docking_entry = None
-        b._wait_drive_idle = Mock(return_value=True)
-        def rotated(*args, **kwargs):
-            b._imu_yaw = -4
-            return True
-        b.drive_rotate = Mock(side_effect=rotated)
-        with patch("spark.dock_entry.time.monotonic", return_value=100):
-            entry = DockEntry(b, 220)
-            b._docking_entry = entry
-            entry.travelled = 80
-            entry.reason = "edge"
-            self.assertTrue(entry._correct())
-        self.assertEqual(entry.travelled, 50)
-        self.assertEqual(entry.corrections, 1)
-        self.assertIs(b._docking_entry, entry)
-        self.assertEqual(b.drive_rotate.call_args.args[0], 4)
-        b._edge_gaps.side_effect = None
-        b._edge_gaps.return_value = ["Back_Left", "Back_Right"]
-        entry.reason = "edge"
-        self.assertFalse(entry._correct())
 
     def test_roaming_does_not_translate_without_reacquiring_home(self):
         from spark.roaming import Roaming

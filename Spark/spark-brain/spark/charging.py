@@ -101,6 +101,14 @@ class ChargingMonitor:
                     self._bus = None
                 return None
 
+    def contact(self):
+        """A fresh positive shunt sample: the first evidence of charger
+        contact, before the average proves charging. Never permits motion."""
+        with self._lock:
+            return (self.error is None and bool(self._samples)
+                    and self._samples[-1] > 0
+                    and time.monotonic() - self._last_read <= .6)
+
     def close(self):
         if not self._lock.acquire(blocking=False):
             return False

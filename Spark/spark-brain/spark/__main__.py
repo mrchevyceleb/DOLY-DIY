@@ -239,9 +239,16 @@ class Spark:
             threshold = idle_cfg.get("low_battery_pct", 10) + self.body._return_margin_pct()
             if self.body.is_on_dock():
                 return
-            if pct is None or pct > threshold:
+            # Stranded beside the dock by a failed exit: go back now, not at
+            # 10%. At most once per 10 minutes so a failure cannot thrash.
+            stranded = self.body.stranded()
+            if stranded:
+                if time.monotonic() < getattr(self, "_next_stranded_return", 0):
+                    return
+                self._next_stranded_return = time.monotonic() + 600
+            elif pct is None or pct > threshold:
                 return
-            log("spark", f"battery {pct}% — checking return to charger")
+            log("spark", f"battery {pct}% stranded={stranded} — checking return to charger")
             # A same-side gap is why she needs recovery, not a reason to
             # suppress the return. go_home owns the guarded edge escape.
             if self.body.sleeping:

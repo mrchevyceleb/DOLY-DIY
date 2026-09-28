@@ -1,8 +1,8 @@
 {
   "brain": {
     "lm_studio_url": "http://192.168.50.204:1234",
-    "model": "openai/gpt-oss-120b",
-    "fallback_model": "qwen/qwen3.6-35b-a3b",
+    "model": "qwen/qwen3.6-35b-a3b",
+    "fallback_model": "qwen/qwen3.5-9b",
     "max_tokens": 512,
     "temperature": 0.8,
     "reasoning_effort": "low",
@@ -91,7 +91,7 @@
   },
   "homing": {
     "enabled": true,
-    "attempts": 3
+    "attempts": 4
   },
   "moods": true,
   "conversation": {

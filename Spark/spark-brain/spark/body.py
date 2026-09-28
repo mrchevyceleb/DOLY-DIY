@@ -77,12 +77,18 @@ class Body:
         self._hazard_airborne = False  # an all-void event followed the latch
         self._escaping = False      # _escape_edge drives bypass the hazard gate
         self.docked = False
+        # >0: a failed exit left her this far (upper bound) off the contacts
+        # while the parked latch still holds — stranded, not home.
+        self._stranded_mm = 0
         self._dock_hold_path = None
         if hw and cfg.get("state_dir"):
             from pathlib import Path
             self._dock_hold_path = Path(cfg["state_dir"]) / "dock-hold"
             try:
-                self.docked = self._dock_hold_path.read_text().strip() == "held"
+                words = self._dock_hold_path.read_text().split()
+                self.docked = bool(words) and words[0] == "held"
+                if self.docked and len(words) > 1 and words[1].isdigit():
+                    self._stranded_mm = int(words[1])
             except FileNotFoundError:
                 pass
             except OSError as exc:
@@ -734,9 +740,11 @@ class Body:
         with self._power_lock:
             try:
                 result = self._refresh_power()
-                fault = result is None and not (
-                    self._leaving_home and self._departure is not None
-                    and self._charging.healthy())
+                # Contact onset reads mixed current (None) by design: a
+                # bounded exit or dock entry must cross it, not freeze on it.
+                crossing = (self._leaving_home and self._departure is not None
+                            or self._docking_entry is not None)
+                fault = result is None and not (crossing and self._charging.healthy())
                 if fault and not self._power_fault:
                     self._power_fault = True
                     _log(f"power hold: shunt={self._charging.average} "
@@ -764,6 +772,9 @@ class Body:
             gaps = self._edge_gaps()
             if charging is True:
                 self._dock_charge_seen_at = now
+                if self._stranded_mm:
+                    self._stranded_mm = 0  # back on the contacts
+                    self._save_dock_hold()
                 if self.docked:
                     # Confirmed-docked charging = electrical proof of where
                     # the dock is; dock-face recovery trusts it for 30 min.
@@ -821,6 +832,7 @@ class Body:
                         self._dock_clear_since = now
                     elif now - self._dock_clear_since >= 5:
                         self.docked = False
+                        self._stranded_mm = 0
                         self._save_dock_hold()
                         self._pose = None
                         self._dock_clear_since = None
@@ -870,11 +882,12 @@ class Body:
         """Check the native controller as well as blocking future requests."""
         departing = (self._leaving_home and self._departure is not None
                      and self._departure.check() is None)
+        retracing = self._docking_entry is not None and self._docking_entry.reason is None
         if self._leaving_home and not departing:
             self._approach_stop.set()
             self._leaving_home = False
             self._dock_native_stopped = False
-        if self.has.get("drive") and not departing:
+        if self.has.get("drive") and not departing and not retracing:
             running = self._drive.get_state() == self._drive.DriveState.Running
             if running or not self._dock_native_stopped:
                 _log(f"dock motor stop: native_running={running}")
@@ -904,7 +917,8 @@ class Body:
         if self._dock_hold_path is not None:
             try:
                 temporary = self._dock_hold_path.with_suffix(".tmp")
-                temporary.write_text("held" if self.docked else "clear")
+                temporary.write_text(("held" + (f" {self._stranded_mm}" if self._stranded_mm else ""))
+                                     if self.docked else "clear")
                 temporary.replace(self._dock_hold_path)
             except OSError as exc:
                 _log(f"dock hold persistence failed: {exc}")
@@ -1708,7 +1722,62 @@ class Body:
     def _undock(self):
         """Explicit departure; ordinary reactions never call this method.
 
-        The stock front gap profile gets one measured 20mm forward exit
+        A failed exit that lost contact retraces its own straight path
+        back onto the dock instead of leaving her stranded beside it.
+        """
+        if self._depart():
+            return True
+        if (self._stranded_mm and self.docked
+                and self.last_departure_result not in ("cancelled", "power")):
+            self._retrace_departure()
+        return False
+
+    def _retrace_departure(self):
+        """Back down the exact line a failed exit drove out along, using
+        the stock entry (rear voids on that path are the dock ramp). Only
+        electrical contact counts as arrival."""
+        from .dock_entry import DockEntry
+        from .homing import Homing
+        mm = self._stranded_mm
+        if (not mm or self.sleeping or self._docking_entry is not None
+                or not self.has.get("drive") or not self.has.get("edge")):
+            return False
+        pct = self.battery_pct()
+        if pct is None or pct <= 2 or not self._charging.healthy():
+            return False
+        _log(f"retrace: reversing up to {mm + 30}mm back onto the dock")
+        self._approach_stop.clear()
+        stop = self.motion_stop_factory(False) if self.motion_stop_factory else (lambda: False)
+        entry = DockEntry(self, mm + 30, stop)
+        self._docking_entry = entry
+        try:
+            result = entry.run()
+            seated = (Homing(self, stop).charge_verified() if result in ("contact", "no_contact")
+                      else self.refresh_power() is True)
+        finally:
+            self._docking_entry = None
+            self.drive_stop()
+        _log(f"retrace: result={result} seated={seated}")
+        if not seated:
+            self._pose = None  # entry travel is never credited to the frame
+            return False
+        with self._hazard_lock:
+            # Electrical proof she is back on this dock supersedes the
+            # latch the failed exit set on this same path.
+            self._edge_hazard = None
+            self._hazard_clear_at = None
+            self._hazard_airborne = False
+            self._hazard_gen += 1
+        self._pose = [0.0, 0.0, 0.0]
+        return True
+
+    def stranded(self):
+        """Parked latch held, but a failed exit left her off the contacts."""
+        return (self.docked and self._stranded_mm > 0 and self._charging is not None
+                and self._charging.charging is not True)
+
+    def _depart(self):
+        """The stock front gap profile gets one measured 20mm forward exit
         only with recent electrical proof of charging. No repeated probes.
         """
         from .departure import Departure
@@ -1785,6 +1854,10 @@ class Body:
                 self._dock_native_stopped = False
                 self.last_departure_result = result
                 self.refresh_power()
+                if (result != "ok" and self.docked and departure.issued_mm
+                        and self._charging.charging is not True):
+                    self._stranded_mm = departure.issued_mm
+                    self._save_dock_hold()
                 if front_probe and result != "ok" and self._edge_gaps():
                     gaps = self._edge_gaps()
                     front = any(g.startswith("Front") for g in gaps)
@@ -2052,6 +2125,19 @@ class Body:
         if pct is None or pct <= 3:
             return "power"
         self._approach_stop.clear()  # fresh explicit return, including edge recovery
+        if self.stranded():
+            # A failed exit left her beside the dock on a known straight
+            # line: retrace it first (stock push). Failing that, this
+            # explicit return releases the parked latch for the camera path.
+            if self._retrace_departure():
+                return "arrived"
+            with self._power_lock:
+                self.docked = False
+                self._stranded_mm = 0
+                self._save_dock_hold()
+                self._dock_clear_since = self._dock_pickup_at = None
+            _log("go_home: stranded off the contacts — parked latch released for the return")
+            self._approach_stop.clear()
         gaps = set(self._edge_gaps())
         # The seated front-pair profile is also a possible real cliff. The
         # 25mm reverse probe is safe in either case; only electrical contact
@@ -2097,8 +2183,10 @@ class Body:
             pct = self.battery_pct()
             if pct is not None and pct <= 3:
                 return "power"
+            # no_contact: the entry already pulled 100mm off the ramp, so a
+            # fresh approach is the stock stage-16 retry.
             recoverable = {"limit", "lost", "not_found", "alignment",
-                           "too_close", "turn_unverified", "timeout"}
+                           "too_close", "turn_unverified", "timeout", "no_contact"}
             final = "sensor"
             for attempt in range(1, attempts + 1):
                 result = Homing(self, stop).run()
@@ -2220,7 +2308,7 @@ class Body:
 
     def is_on_dock(self):
         self.refresh_power()
-        return self.docked
+        return self.docked and not self.stranded()
 
     def _return_margin_pct(self):
         """Battery reserve for the trip home from the anchored roam distance.

@@ -1,8 +1,9 @@
 """Camera-guided dock approach with a bounded, gyro-checked reverse entry.
 
-Approach and turns use ordinary motor interlocks. The bounded final reverse
-allows trailing front gaps on the ramp; rear gaps always stop. Charging must
-remain confirmed with stopped motors.
+Approach and turns use ordinary motor interlocks. The final reverse follows
+the stock firmware (see dock_entry): the rear pair voiding inside the
+observed corridor is the ramp. Charging must remain confirmed with stopped
+motors.
 """
 import math
 import statistics
@@ -459,14 +460,20 @@ class Homing:
             return reason
         visual_distance = math.ceil(observation.camera_z_mm)
         # Floor calibration: visual-distance travel left the contacts 20mm
-        # short. The single bounded trim established sustained charging.
-        entry = DockEntry(b, visual_distance+20, self.stop,
-                          allow_front_after=max(0, visual_distance-60))
+        # short; the stock push beyond it is bounded by DockEntry.PUSH_MM.
+        entry = DockEntry(b, visual_distance+20, self.stop)
         b._docking_entry = entry
         try:
             result = entry.run()
-            _log(f"entry travelled={entry.travelled}mm result={result}")
-            return "arrived" if self.charge_verified() else result
+            _log(f"entry result={result} ramp={entry.ramp}")
+            if self.charge_verified():
+                return "arrived"
+            if result in ("cancelled", "power"):
+                b._pose = None  # entry travel was never credited
+                return result
+            # Stock stage 16: off the ramp, then a fresh approach.
+            pulled = entry.pull_out()
+            return "no_contact" if pulled == "ok" else pulled
         finally:
             b._docking_entry = None
 

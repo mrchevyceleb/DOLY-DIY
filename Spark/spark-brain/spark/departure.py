@@ -25,6 +25,7 @@ class Departure:
         self.deadline = time.monotonic() + 10
         self.reason = None
         self.moved = False  # a commanded step completed this departure
+        self.issued_mm = 0  # upper bound on travel, for a straight retrace
         # Motion rocks the sensors: a single dirty poll is flutter, not a
         # cliff. A violation must persist this long before it is real.
         self.transient_ms = transient_ms
@@ -127,6 +128,7 @@ class Departure:
             accepted = b._drive.go_distance(b._next_id(), 20, 25, self.forward, True)
             if accepted is False or (accepted is not None and accepted < 0):
                 return "not_started"
+            self.issued_mm += 20
         started = time.monotonic()
         running = False
         completed = False
