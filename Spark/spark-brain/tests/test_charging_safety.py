@@ -89,7 +89,7 @@ class ChargingSafetyTests(unittest.TestCase):
         b = self.body(pct=50, gaps=gaps)
         b.refresh_power()
         b._charging.sample.return_value = False
-        b._charging.average = -40
+        b._charging.average = -750  # live idle draw off the charger
         with patch("spark.body.time.monotonic", return_value=100):
             b.refresh_power()
         self.assertTrue(b.docked)
@@ -406,6 +406,14 @@ class ChargingSafetyTests(unittest.TestCase):
                 result = m.sample()
         self.assertEqual(m.average, 24)
         self.assertIsNone(result)
+        # A full cell's dither on the dock is not lost contact.
+        m._read = Mock(side_effect=[(-30, 4.2)] * 8 + [(-750, 4.0)] * 8)
+        results = []
+        for i in range(16):
+            with patch("spark.charging.time.monotonic", return_value=12 + i * .3):
+                results.append(m.sample())
+        self.assertNotIn(False, results[:8])
+        self.assertIs(results[-1], False)
         m.close()
 
     def test_gap_arriving_after_preflight_prevents_dispatch(self):

@@ -10,6 +10,8 @@ import threading
 import time
 import wave
 
+from .charging import DISCHARGE_COUNTS
+
 TTS_WAV = f"/tmp/spark_tts_{os.getuid()}.wav"  # per-UID: service (root) and
 # human test sessions (doly) must not fight over one sticky-bit /tmp file
 TTS_RAW = f"/tmp/spark_tts_raw_{os.getuid()}.wav"  # synth output before FX
@@ -839,7 +841,7 @@ class Body:
                     self._dock_pickup_at = None  # reseated on powered dock
             elif self.docked and not self._leaving_home:
                 clear = (charging is False and self._charging.average is not None
-                         and self._charging.average < -5
+                         and self._charging.average < DISCHARGE_COUNTS
                          and self._dock_pickup_at is not None
                          and self.has.get("edge") and not gaps)
                 if clear:
@@ -881,9 +883,12 @@ class Body:
                     self._charge_notice_pending = True
                     self._charge_notice_sent = True
                     _log("charger contact lost: sustained discharge; motors remain parked")
-            elif charging is True or not self.docked:
+            else:
+                # Mixed or tapering evidence breaks the run: two brief dips
+                # 15s apart are not sustained discharge.
                 self._dock_discharge_since = None
-                self._charge_notice_pending = self._charge_notice_sent = False
+                if charging is True or not self.docked:
+                    self._charge_notice_pending = self._charge_notice_sent = False
             if now >= getattr(self, "_next_power_log", 0):
                 self._next_power_log = now + 30
                 _log(f"power: battery={self.battery_pct()}% charging={charging} "

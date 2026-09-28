@@ -8,6 +8,11 @@ from collections import deque
 import threading
 import time
 
+# Live shunt counts: off the charger she draws -650 to -1500; a FULL cell on
+# the dock tapers to zero and dithers -35..+25 as speech and eyes load it.
+# Reading that dither as discharge told Matt "not charging" while docked.
+DISCHARGE_COUNTS = -150
+
 
 class ChargingMonitor:
     def __init__(self):
@@ -87,7 +92,8 @@ class ChargingMonitor:
                         # Hold on the first possible contact; old discharge
                         # samples cannot authorize motion during charge onset.
                         self.charging = True if self.average > 5 else None
-                    elif self.average < -5 and all(x < -5 for x in list(self._samples)[-5:]):
+                    elif (self.average < DISCHARGE_COUNTS and all(
+                            x < DISCHARGE_COUNTS for x in list(self._samples)[-5:])):
                         self.charging = False
                     else:
                         self.charging = None  # mixed/tapering evidence holds motion
