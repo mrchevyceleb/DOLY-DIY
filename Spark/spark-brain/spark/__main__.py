@@ -478,6 +478,10 @@ class Spark:
                                    or strip_wake_prefix(w.text, w.text))
                     self.body.wake_reaction(audible=not talking,
                                             before_chirp=lambda s: mic.mute(s + .25))
+                elif not in_followup:
+                    # a tap: the same soft 'I'm listening' chirp as her name
+                    self.body.wake_reaction(before_chirp=lambda s: mic.mute(s + .25))
+                tap_turn = not in_followup and not triggered_by_wake
                 log("spark", "listening..." + (" (follow-up)" if in_followup else ""))
                 self.body.react_enabled = False
                 follow_window = follow_cfg.get("follow_up_window_s", 8)
@@ -514,6 +518,13 @@ class Spark:
                         log("spark", "follow-up closed quietly")
                         if pet is not None:
                             pet.conversation_over()
+                        continue
+                    if tap_turn:
+                        # a tap and no words: it was a pat, not a question
+                        log("spark", "tap with no words: a pat")
+                        self.body.mood_eyes("HAPPY")
+                        self.body._bump_mood(1)
+                        self.body.queue_anim("petting1")
                         continue
                     self._misses = getattr(self, "_misses", 0) + 1
                     log("spark", f"(nothing understood x{self._misses})")

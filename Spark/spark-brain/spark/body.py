@@ -737,10 +737,10 @@ class Body:
                         pass
 
     def pet_pulse(self):
-        """Instant 'I felt that' reaction: sfx chirp + LED flash + happy eyes."""
-        sfx = self.cfg.get("sounds", {}).get("pet_sfx")
-        if sfx:
-            self.play_sfx(sfx)
+        """Instant 'I felt that' reaction: LED flash + listening eyes. The
+        voice loop plays the wake chirp with the mic muted; the old game
+        'collect' sound here was unmuted, read as an alarm, and the mic
+        took it for Matt's command."""
         self._led_flash("Cyan")
         self.eyes("listening")
 
