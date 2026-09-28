@@ -93,7 +93,7 @@ class Body:
         # >0: a failed exit left her this far (upper bound) off the contacts
         # while the parked latch still holds — stranded, not home.
         self._stranded_mm = 0
-        self._dock_hold_path = None
+        self._dock_hold_path = self._exit_backoff_path = None
         if hw and cfg.get("state_dir"):
             from pathlib import Path
             self._dock_hold_path = Path(cfg["state_dir"]) / "dock-hold"
@@ -107,6 +107,16 @@ class Body:
             except OSError as exc:
                 self.docked = True
                 _log(f"dock hold state unreadable: {exc}; holding motors")
+            # The exit back-off survives restarts: each deploy used to send
+            # her straight at the same edge again.
+            self._exit_backoff_path = Path(cfg["state_dir"]) / "exit-backoff"
+            try:
+                fails, until = self._exit_backoff_path.read_text().split()
+                self._exit_edge_fails = max(0, int(fails))
+                self._next_auto_departure = time.monotonic() + max(
+                    0.0, min(6 * 3600, float(until) - time.time()))
+            except (OSError, ValueError):
+                pass
         self.sleeping = False
         self._dock_discharge_since = None
         self._charge_notice_pending = False
@@ -953,6 +963,15 @@ class Body:
                 temporary.replace(self._dock_hold_path)
             except OSError as exc:
                 _log(f"dock hold persistence failed: {exc}")
+
+    def _save_exit_backoff(self):
+        if self._exit_backoff_path is not None:
+            try:
+                left = max(0.0, self._next_auto_departure - time.monotonic())
+                self._exit_backoff_path.write_text(
+                    f"{self._exit_edge_fails} {time.time() + left:.0f}")
+            except OSError as exc:
+                _log(f"exit back-off persistence failed: {exc}")
 
     def take_charge_notice(self):
         """One spoken notice per loss of contact, delivered on the main thread."""
@@ -1904,6 +1923,7 @@ class Body:
                         60, self.cfg.get("idle", {}).get("roam_cooldown_s", 1800))
                     self._roam_distance_bound = 200  # dock body footprint plus measured exit
                     self._exit_edge_fails = 0
+                    self._save_exit_backoff()
                     return True
                 result = departure.reason or ("unverified" if result == "ok" else result)
                 if result == "edge":
@@ -1913,6 +1933,7 @@ class Body:
                     self._exit_edge_fails += 1
                     wait = min(6 * 3600, 1800 * 2 ** (self._exit_edge_fails - 1))
                     self._next_auto_departure = time.monotonic() + wait
+                    self._save_exit_backoff()
                     _log(f"dock exit met an edge ({self._exit_edge_fails}x in a row): "
                          f"next automatic try in {wait // 60} min")
                 return False
