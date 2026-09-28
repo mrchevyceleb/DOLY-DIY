@@ -377,7 +377,7 @@ class VoiceLatencyTests(unittest.TestCase):
             return kwargs["verify_wake"](pcm(3000)*20)
         with patch("spark.ear.listen_for_wake", side_effect=check):
             self.assertEqual(spark._wait_for_wake(mic, Mock(), ["spark"]), "Spark.")
-            self.assertEqual(mic.retain.call_args.args, (3,))
+            self.assertEqual(mic.retain.call_args.args, (4,))
             spark.whisper.transcribe_wake_pcm.side_effect = TimeoutError("offline")
             self.assertEqual(spark._wait_for_wake(mic, Mock(), ["spark"]), "")
             self.assertEqual(mic.retain.call_args.args, (1,))

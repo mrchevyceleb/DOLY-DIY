@@ -19,6 +19,16 @@ def _log(msg):
     print(f"[body] {msg}", file=sys.stderr)
 
 
+def _wav_seconds(path, fallback=.3, cap=1.0):
+    try:
+        import wave
+        with wave.open(path, "rb") as w:
+            seconds = w.getnframes() / w.getframerate()
+    except Exception:
+        return fallback
+    return min(cap, seconds) if seconds > 0 else fallback
+
+
 class Body:
     def __init__(self, cfg, hw=True):
         """hw=False → software-only mode (no SDK init, never stops the doly
@@ -660,15 +670,18 @@ class Body:
         except Exception:
             return 2.0
 
-    def wake_reaction(self, audible=True):
+    def wake_reaction(self, audible=True, before_chirp=None):
         """'Hey Spark' acknowledged: stock wake chirp + WAKE_WORD eyes + cyan.
+        before_chirp(seconds) runs just before playback starts (mic mute).
 
         defer=False: this runs on the main thread (right after the wake
         listener returns), so direct playback is GIL-safe — the deferred
         queue wouldn't flush until next turn and the chirp would be silent.
         """
         chirp = self.cfg.get("wake", {}).get("chirp")
-        if chirp and audible:
+        if chirp and audible and self.has.get("sound"):
+            if before_chirp:
+                before_chirp(_wav_seconds(chirp))
             self.play_sfx(chirp, defer=False)
         self.mood_eyes("WAKE_WORD")
         self._led_flash("Cyan")

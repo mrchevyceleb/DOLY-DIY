@@ -418,7 +418,10 @@ class Spark:
                 if triggered_by_wake:
                     # An early wake can overlap the command: eyes acknowledge
                     # immediately without putting a chirp over the user's words.
-                    self.body.wake_reaction(audible=not triggered_by_wake.prefix_pcm)
+                    # Muted from before playback through output latency and
+                    # room tail: her own chirp must never become the command.
+                    self.body.wake_reaction(audible=not triggered_by_wake.prefix_pcm,
+                                            before_chirp=lambda s: mic.mute(s + .25))
                 log("spark", "listening..." + (" (follow-up)" if in_followup else ""))
                 self.body.react_enabled = False
                 try:
@@ -598,7 +601,7 @@ class Spark:
         def verify_wake(pcm):
             # Preserve a command spoken during the bounded server check.
             # Keep the larger buffer after success until _listen_command takes it.
-            mic.retain(3)
+            mic.retain(4)  # covers the 2.5s wake-check timeout plus handoff
             text = ""
             try:
                 text = self.whisper.transcribe_wake_pcm(pcm)

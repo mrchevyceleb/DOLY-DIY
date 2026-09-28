@@ -40,6 +40,7 @@ class MicStream:
         self._learn_noise = True
         self._closed = False
         self._error = None
+        self._mute = (0.0, 0.0)  # capture window of our own playback
 
     def __enter__(self):
         self.proc = subprocess.Popen(
@@ -114,6 +115,14 @@ class MicStream:
         with self._ready:
             self._learn_noise = enabled
 
+    def mute(self, seconds):
+        """Blank audio captured during our own playback from now on. The
+        speaker sits inches from the mic: the wake chirp recorded as the
+        command ('Oh.') and its endpoint closed before the user spoke."""
+        with self._ready:
+            now = time.monotonic()
+            self._mute = (now, now + seconds)
+
     def retain(self, seconds):
         """Preserve command starts while a name-only segment is transcribed."""
         with self._ready:
@@ -133,7 +142,11 @@ class MicStream:
             now = time.monotonic()
             while len(self._queue) > 1 and now - self._queue[0][0] > self._retention_s:
                 self._queue.popleft()
-            return self._queue.popleft()[1]
+            stamp, chunk = self._queue.popleft()
+            # stamp = end of the chunk's capture: blank any overlap.
+            if self._mute[0] <= stamp <= self._mute[1] + self.FRAME_MS/1000:
+                return bytes(len(chunk))
+            return chunk
 
     def frames(self):
         while True:
