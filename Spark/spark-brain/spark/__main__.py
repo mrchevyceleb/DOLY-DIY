@@ -907,7 +907,7 @@ class Spark:
         # her name or an explicit stop reaches the pipeline.
         if getattr(self.router, "_celebration", None) is not None:
             low = text.lower()
-            if not re.search(r"(stop|spark|sparky|bark|barks)", low):
+            if not re.search(r"\b(stop|spark|sparky|bark|barks)\b", low):
                 log("spark", f"ignored party echo: '{text[:40]}'")
                 return
         self.body.react_enabled = False  # sensor reactions off while conversing
