@@ -5,7 +5,7 @@
     "fallback_model": "qwen/qwen3.5-9b",
     "max_tokens": 512,
     "temperature": 0.8,
-    "reasoning_effort": "low",
+    "reasoning_effort": "none",
     "history_turns": 12,
     "request_timeout_s": 120
   },

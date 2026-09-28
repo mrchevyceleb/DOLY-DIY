@@ -208,6 +208,9 @@ class VoiceLatencyTests(unittest.TestCase):
             text, _ = spark._listen_command(Mock(noise_floor=500), Mock(),
                                             WakeResult("Park. What's", command="What's"))
         self.assertEqual(text, "What's the weather today?")
+        with patch("spark.ear.record_utterance", side_effect=AssertionError):
+            text, _ = spark._listen_command(Mock(), Mock(), WakeResult("Spark, stop."))
+        self.assertEqual(text, "stop.")
 
     def test_paused_okay_does_not_discard_followup_request(self):
         spark = Spark.__new__(Spark)

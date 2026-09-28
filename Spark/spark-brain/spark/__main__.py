@@ -524,6 +524,10 @@ class Spark:
         if said:
             # The verified clip ends at the wake endpoint, often mid-sentence
             # ('Park. What's'); the rest was queued in the mic during the check.
+            # The verifier punctuates a finished sentence ('Spark, stop.'), and
+            # those must not absorb background talk.
+            if said.rstrip().endswith((".", "?", "!")):
+                return said, b""
             rest, _ = self._listen_command(mic, recognizer, None, timeout_s=.6)
             return f"{said} {rest}".strip(), b""
         deadline = time.monotonic() + timeout_s
@@ -761,6 +765,10 @@ class Spark:
                         join_s=_clamp(wcfg.get("page_timeout_s", 6), 6, 2, 15) + 4)
                 return
             if not first:
+                # Qwen 3.6 ignores reasoning_effort 'low' and can spend the
+                # whole token budget thinking: she then went silently mute.
+                log("spark", f"brain gave no spoken reply "
+                             f"({time.perf_counter()-started:.2f}s)")
                 self.body.eyes("idle")
                 return
 
