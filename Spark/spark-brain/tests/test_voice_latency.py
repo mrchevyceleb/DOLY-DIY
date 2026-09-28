@@ -237,12 +237,14 @@ class VoiceLatencyTests(unittest.TestCase):
         result = listen_for_wake(iter(frames), rec, CFG, ["spark"],
                                  noise_floor=lambda: 1000, verify_wake=verify)
         self.assertEqual(result.text, "Spark.")
-        # A quiet lookalike cannot even request the remote verifier.
+        # A speaking-level lookalike is checked (live misses at ~2600), but
+        # only the verifier hearing her actual name may wake her.
         verify.reset_mock()
+        verify.return_value = "The dog's bark."
         self.assertFalse(listen_for_wake(iter([room]*5 + [pcm(2000)]*15 + [room]*40),
                                          rec, CFG, ["spark"], noise_floor=lambda: 1000,
                                          verify_wake=verify))
-        verify.assert_not_called()
+        verify.assert_called_once()
 
     def test_park_in_background_conversation_needs_actual_name_verification(self):
         rec = Mock()

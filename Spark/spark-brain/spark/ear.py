@@ -468,7 +468,16 @@ def listen_for_wake(frames, recognizer, cfg, wake_words, tap_check=None,
             last_family_final_at = time.monotonic()
         ambiguous = bool(head and not has_wake_name(text, wake_words)
                          and (head in _WEAK or _near_wake(head, _HEADS)))
-        verify_floor = weak_min_peak if ambiguous else a.get("start_rms", 900)
+        # Her garbled name ('bark', 'barkley') is checked at speaking level;
+        # only common words ('bar', 'park', 'mark') keep the loud floor.
+        # Live misses: 'barkley' at 2715 and 'bark [unk]' at 2601 vs 4000.
+        family_head = head in _STRONG_NAME_FAMILY
+        quiet_family = ambiguous and family_head and peak < weak_min_peak
+        verify_floor = (weak_min_peak if ambiguous and not family_head
+                        else a.get("start_rms", 900))
+        if (family_head and not (voiced_frames >= 5 and peak >= verify_floor)):
+            print(f"[ear] name-like '{text}' not checked (peak={peak} "
+                  f"speech={voiced_frames*20}ms)", file=sys.stderr, flush=True)
         if (verify_wake and voiced_frames >= 5 and peak >= verify_floor
                 and time.monotonic() >= next_verify):
             next_verify = time.monotonic() + 1
@@ -498,14 +507,18 @@ def listen_for_wake(frames, recognizer, cfg, wake_words, tap_check=None,
                 family_hint = (head in _STRONG_NAME_FAMILY
                                or (last_family_final_at > 0
                                    and time.monotonic() - last_family_final_at < 2.5))
-                if (allow_weak and family_hint
+                # A quiet name-like segment needs the verifier to hear her
+                # actual name (above); only loud ones or a later command
+                # segment may ride the looser family hint.
+                if (allow_weak and family_hint and not quiet_family
                         and len(meaningful(v_tokens)) >= 2
                         and peak >= a.get("start_rms", 900)):
                     # Name in the previous segment ('barkley', then
                     # 'Weather today.'): nothing here is her name, so
                     # stripping the first word turned it into 'today.'
-                    lead = v_head.removesuffix("'s")
-                    named = lead in _STRONG_NAME_FAMILY or _near_wake(lead, _HEADS)
+                    # Exact aliases only: fuzzy matching would strip a real
+                    # command word ('start ...') as if it were her name.
+                    named = v_head.removesuffix("'s") in _STRONG_NAME_FAMILY
                     return WakeResult(verified, command="" if named else verified)
             # A rejected earlier segment must not suppress a name in the
             # next completed segment inside the same one-second interval.
