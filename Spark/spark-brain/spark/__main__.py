@@ -294,10 +294,16 @@ class Spark:
                 self._next_stranded_return = time.monotonic() + 60
             if result not in ("arrived", "already", "cancelled", "busy"):
                 log("spark", f"low-battery return failed: {result}")
+                if self.body.is_on_dock():
+                    return  # the contacts came up after all
                 now = time.monotonic()
                 if now >= getattr(self, "_next_low_battery_speech", 0):
                     self._next_low_battery_speech = now + 600
-                    if result == "unknown":
+                    if pct is not None and pct > threshold:
+                        # stranded by a failed exit, not hungry
+                        self.body.speak("I couldn't quite get back onto my dock. "
+                                        "Can you give me a little nudge?")
+                    elif result == "unknown":
                         self.body.speak(f"I'm starving, my battery's at {pct} percent. "
                                         "Please carry me to my dock for a snack.")
                     else:

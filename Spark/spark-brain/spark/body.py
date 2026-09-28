@@ -1811,8 +1811,11 @@ class Body:
         self._docking_entry = entry
         try:
             result = entry.run()
+            # Contact before any move is still contact: at full charge the
+            # charging reading flickers, so one instant read is not proof.
             seated = (Homing(self, stop).charge_verified()
-                      if entry.moved and result not in ("cancelled", "power")
+                      if (entry.moved or result == "contact")
+                      and result not in ("cancelled", "power")
                       else self.refresh_power() is True)
         finally:
             self._docking_entry = None
