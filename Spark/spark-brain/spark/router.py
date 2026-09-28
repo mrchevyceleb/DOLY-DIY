@@ -404,7 +404,8 @@ class Router:
             # Another day ('weather tomorrow', 'this weekend') goes to the
             # brain, which gets the daily forecast; this report is today's.
             if re.search(r"\b(tomorrow|tonight|week|weekend|monday|tuesday|wednesday|"
-                         r"thursday|friday|saturday|sunday)\b", text, re.I):
+                         r"thursday|friday|saturday|sunday|morning|afternoon|"
+                         r"evening|later)\b", text, re.I):
                 return False
             report = self._weather()
             b.speak(report or "I can't reach the weather service right now.")

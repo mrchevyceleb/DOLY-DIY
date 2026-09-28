@@ -81,8 +81,13 @@ _WAKE_GARBLE_RE = re.compile(
 _WEATHER_RE = re.compile(r"\b(weather|forecast|rain\w*|snow\w*|temperature|degrees|"
                          r"umbrella|jacket|coat|sunny|cloudy|storm\w*|windy|humid)\b", re.I)
 # 'hot'/'cold' alone isn't weather ('my laptop is running hot')
-_TEMP_RE = re.compile(r"\b(hot|cold|warm|chilly)\b.*\b(out|outside|today|tomorrow|"
-                      r"tonight|week|weekend)\b", re.I)
+_TEMP_RE = re.compile(r"\b(hot|cold|warm|chilly)\b", re.I)
+_OUTSIDE_RE = re.compile(r"\b(out|outside|today|tomorrow|tonight|week|weekend)\b", re.I)
+
+
+def _is_weather(text):
+    return bool(_WEATHER_RE.search(text)
+                or (_TEMP_RE.search(text) and _OUTSIDE_RE.search(text)))
 _WHEN_RE = re.compile(r"\b(tomorrow|tonight|today|week|weekend|monday|tuesday|"
                       r"wednesday|thursday|friday|saturday|sunday)\b", re.I)
 _INSTRUCTION_ECHO_RE = re.compile(
@@ -668,13 +673,13 @@ class Spark:
 
     def _weather_context(self, user_text):
         """Real forecast for a weather question or its follow-up, or ''."""
-        asks = bool(_WEATHER_RE.search(user_text) or _TEMP_RE.search(user_text))
+        asks = _is_weather(user_text)
         if not asks and _WHEN_RE.search(user_text):
             try:
                 recent = list(self.memory.history)[-2:]
             except (AttributeError, TypeError):
                 recent = []
-            asks = any(_WEATHER_RE.search(t.get("content") or "") for t in recent)
+            asks = any(_is_weather(t.get("content") or "") for t in recent)
         if not asks:
             return ""
         forecast = getattr(getattr(self, "router", None), "weather_forecast", lambda: None)()
