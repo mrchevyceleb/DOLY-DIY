@@ -88,8 +88,8 @@ _OUTSIDE_RE = re.compile(r"\b(out|outside|today|tomorrow|tonight|week|weekend)\b
 def _is_weather(text):
     return bool(_WEATHER_RE.search(text)
                 or (_TEMP_RE.search(text) and _OUTSIDE_RE.search(text)))
-_WHEN_RE = re.compile(r"\b(tomorrow|tonight|today|week|weekend|monday|tuesday|"
-                      r"wednesday|thursday|friday|saturday|sunday)\b", re.I)
+
+
 _INSTRUCTION_ECHO_RE = re.compile(
     r"\b(spoken reply|(search|query) is needed|web tool|short reply)\b", re.I)
 
@@ -589,6 +589,15 @@ class Spark:
                 if time.monotonic() < deadline:
                     continue
                 return "", b""
+            if (command and getattr(getattr(self, "whisper", None), "last_source", None) == "server"
+                    and not text.rstrip().endswith((".", "?", "!"))
+                    and not re.search(r"\bstop\W*$", command, re.I)):
+                # A 460 ms pause endpoints mid-sentence ('What about the' ...
+                # 'weekend'). Parakeet punctuates finished sentences, so an
+                # unpunctuated one takes the rest queued in the mic.
+                rest, rest_pcm = self._listen_command(mic, recognizer, None, timeout_s=1.0)
+                if rest:
+                    return f"{command} {rest}", pcm + rest_pcm
             if command or not text or time.monotonic() >= deadline:
                 return command, pcm
             # Early recognition may endpoint on just "Spark". Keep listening
@@ -674,7 +683,9 @@ class Spark:
     def _weather_context(self, user_text):
         """Real forecast for a weather question or its follow-up, or ''."""
         asks = _is_weather(user_text)
-        if not asks and _WHEN_RE.search(user_text):
+        if not asks:
+            # any reply right after a weather exchange ('what about Saturday?',
+            # 'and the day after?') keeps the forecast in hand
             try:
                 recent = list(self.memory.history)[-2:]
             except (AttributeError, TypeError):
