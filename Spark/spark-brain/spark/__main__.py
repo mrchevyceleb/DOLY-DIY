@@ -515,6 +515,8 @@ class Spark:
     def _listen_command(self, mic, recognizer, wake=None, timeout_s=6.0, followup=False):
         from .ear import CommandAudio, record_utterance, strip_wake_prefix
 
+        if wake and wake.command:
+            return wake.command, b""
         if wake and not wake.prefix_pcm:
             leftover = strip_wake_prefix(wake.text, wake.text)
             if leftover:

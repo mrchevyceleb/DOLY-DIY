@@ -323,6 +323,7 @@ def record_utterance(mic, cfg, on_frame=None, should_stop=None, wait_timeout_s=N
 class WakeResult:
     text: str
     prefix_pcm: bytes = b""
+    command: str = ""  # verified speech that is all command (name heard earlier)
 
 
 def strip_wake_prefix(text, wake_text=""):
@@ -500,7 +501,12 @@ def listen_for_wake(frames, recognizer, cfg, wake_words, tap_check=None,
                 if (allow_weak and family_hint
                         and len(meaningful(v_tokens)) >= 2
                         and peak >= a.get("start_rms", 900)):
-                    return WakeResult(verified)
+                    # Name in the previous segment ('barkley', then
+                    # 'Weather today.'): nothing here is her name, so
+                    # stripping the first word turned it into 'today.'
+                    lead = v_head.removesuffix("'s")
+                    named = lead in _STRONG_NAME_FAMILY or _near_wake(lead, _HEADS)
+                    return WakeResult(verified, command="" if named else verified)
             # A rejected earlier segment must not suppress a name in the
             # next completed segment inside the same one-second interval.
             next_verify = 0.0
