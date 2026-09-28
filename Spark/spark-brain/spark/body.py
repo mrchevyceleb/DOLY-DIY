@@ -902,7 +902,7 @@ class Body:
                 # Only when she still reads as seated. Lifted onto a surface
                 # her floor sensors can't see (the black mat), the latch
                 # never clears and she asked Matt to reseat her every time.
-                seated = set(gaps) == {"Front_Left", "Front_Right"} and self._dock_pickup_at is None
+                seated = set(gaps) == {"Front_Left", "Front_Right"}
                 if (now - self._dock_discharge_since >= 15 and seated
                         and not self._charge_notice_sent):
                     self._charge_notice_pending = True
