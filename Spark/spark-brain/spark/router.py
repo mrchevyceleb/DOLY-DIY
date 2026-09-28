@@ -536,6 +536,7 @@ class Router:
                 b.speak("I can't read my battery right now.")
             else:
                 state = (" I'm charging." if charging is True else
+                         " I'm not on my charger." if b.docked and not b.reads_seated() else
                          " I'm parked, but not charging. Please reseat me." if b.docked and charging is False else
                          " My charging reading is uncertain." if charging is None else "")
                 b.speak(f"I'm at about {pct} percent." + state)
@@ -550,8 +551,17 @@ class Router:
         result = b.go_home()
         if result == "already":
             charging = b.refresh_power()
-            b.speak("I'm already charging." if charging is True else
-                    "I'm parked, but charging isn't confirmed. Please check my dock contact.")
+            if charging is True:
+                b.speak("I'm already charging.")
+            elif not b.reads_seated():
+                # set down somewhere her floor sensors can't see (the black
+                # mat): the dock latch never cleared, and she can't drive
+                b.speak("I can't see the floor under me here, so I can't drive. "
+                        "Can you carry me to my dock?")
+            elif charging is None:
+                b.speak("I'm home on my dock.")  # a full cell tapers to no current
+            else:
+                b.speak("I'm on my dock, but I'm not charging. Is it plugged in?")
         elif result == "arrived":
             b.speak("Home sweet home. Charging up!")
         elif result == "unknown":

@@ -902,7 +902,7 @@ class Body:
                 # Only when she still reads as seated. Lifted onto a surface
                 # her floor sensors can't see (the black mat), the latch
                 # never clears and she asked Matt to reseat her every time.
-                seated = set(gaps) == {"Front_Left", "Front_Right"}
+                seated = self.reads_seated(gaps)
                 if (now - self._dock_discharge_since >= 15 and seated
                         and not self._charge_notice_sent):
                     self._charge_notice_pending = True
@@ -1858,6 +1858,11 @@ class Body:
             self._hazard_gen += 1
         self._pose = [0.0, 0.0, 0.0]
         return True
+
+    def reads_seated(self, gaps=None):
+        """Her floor sensors show the seated dock profile (the front pair).
+        Lifted onto the black mat she reads all four instead."""
+        return set(self._edge_gaps() if gaps is None else gaps) == {"Front_Left", "Front_Right"}
 
     def stranded(self):
         """Parked latch held, but a failed exit left her off the contacts."""

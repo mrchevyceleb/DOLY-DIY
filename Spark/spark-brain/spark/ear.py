@@ -387,7 +387,7 @@ _STRONG_NAME_FAMILY = {"spark", "sparky", "spar", "spork", "spock", "spec",
                        "speck", "bark", "barks", "barkley", "bart"}
 # How the verifier (Parakeet) renders a spoken 'Spark' when it drops the soft
 # 's': 'Park, what's the weather today?' (peak 2842), 'Bark, ...' (3887).
-_VERIFIER_NAMES = {"park", "bark", "barks", "bart", "barkley", "sparks"}
+_VERIFIER_NAMES = {"park", "bark", "barks", "bart", "barkley", "sparks", "fark", "farks"}
 
 
 def has_wake_name(text, wake_words):
@@ -507,7 +507,11 @@ def listen_for_wake(frames, recognizer, cfg, wake_words, tap_check=None,
                 # vocative comma is what separates this from 'Park the car'.
                 named = re.search(rf"\b{re.escape(v_head)}\b\s*[,.!?:;-]+\s*(\w.*)",
                                   verified, re.I) if v_head else None
-                if (allow_weak and family_head and named
+                # Vosk's weak 'park' counts too when the verifier heard a
+                # vocative name ('park [unk]' -> 'Fark, go home.' at 9415):
+                # every such pair in the logs was Matt talking to her.
+                if (allow_weak and named
+                        and (family_head or (head in _WEAK and peak >= weak_min_peak))
                         and v_head.removesuffix("'s") in _VERIFIER_NAMES):
                     return WakeResult(verified, command=named.group(1).strip(),
                                       clip_pcm=clip)
