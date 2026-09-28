@@ -51,6 +51,9 @@ _SEARCH_INTENT = re.compile(
 _GOVEE_RE = re.compile(r"\b(?:govee|lights?)\b", re.IGNORECASE)
 _HERS_LIGHTS_RE = re.compile(r"\byour\s+(?:lights?|leds?)\b", re.IGNORECASE)
 _GOVEE_OFF_RE = re.compile(r"\b(?:turn\s+off|switch\s+off|shut\s+off|lights?\s+off|kill|blackout)\b", re.I)
+# Matt's Alexa/Govee shortcut: 'shut it down' means room lights off
+_GOVEE_SHUTDOWN_RE = re.compile(r"^(?:ok(?:ay)?\s+|please\s+)?shut\s+(?:it|everything|it\s+all)"
+                                r"\s+down(?:\s+please)?[.!]*$", re.I)
 _GOVEE_ON_RE = re.compile(r"\b(?:turn\s+on|switch\s+on|lights?\s+on|put\s+on|fire\s+up)\b", re.I)
 
 # alarms / timers / reminders — absolute and relative scheduling
@@ -236,6 +239,9 @@ class Router:
 
         # Govee room lights: instant local control, checked before her own LEDs
         low = text.lower()
+        if self.govee and self.govee.enabled and _GOVEE_SHUTDOWN_RE.match(low.strip()):
+            self.body.speak(self.govee.turn(False))
+            return True
         if (self.govee and self.govee.enabled and _GOVEE_RE.search(low)
                 and not _HERS_LIGHTS_RE.search(low) and "eye" not in low):
             reply = self._govee_lights(text)
