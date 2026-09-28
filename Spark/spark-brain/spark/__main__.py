@@ -76,6 +76,13 @@ _WAKE_GARBLE_RE = re.compile(
 
 # The model sometimes answers with its own reply instructions instead of a
 # reply ('If no query is needed, respond with short reply.').
+# Weather questions, and 'and tomorrow?' right after one, get Open-Meteo's
+# forecast: a web search for 'and tomorrow?' returned no numbers (1138).
+_WEATHER_RE = re.compile(r"\b(weather|forecast|rain\w*|snow\w*|temperature|degrees|"
+                         r"hot|cold|warm|chilly|umbrella|jacket|coat|sunny|cloudy|"
+                         r"storm\w*|windy|humid)\b", re.I)
+_WHEN_RE = re.compile(r"\b(tomorrow|tonight|today|week|weekend|monday|tuesday|"
+                      r"wednesday|thursday|friday|saturday|sunday)\b", re.I)
 _INSTRUCTION_ECHO_RE = re.compile(
     r"\b(spoken reply|(search|query) is needed|web tool|short reply)\b", re.I)
 
@@ -657,6 +664,23 @@ class Spark:
                 "no invented motives, causes, or events; treat null as unknown. "
                 "For a movement problem, give one short factual sentence, warmly on Matt's side.")
 
+    def _weather_context(self, user_text):
+        """Real forecast for a weather question or its follow-up, or ''."""
+        asks = bool(_WEATHER_RE.search(user_text))
+        if not asks and _WHEN_RE.search(user_text):
+            try:
+                recent = list(self.memory.history)[-2:]
+            except (AttributeError, TypeError):
+                recent = []
+            asks = any(_WEATHER_RE.search(t.get("content") or "") for t in recent)
+        if not asks:
+            return ""
+        forecast = getattr(getattr(self, "router", None), "weather_forecast", lambda: None)()
+        if not isinstance(forecast, str) or not forecast:
+            return ""
+        return ("\nWEATHER FORECAST for Matt's home (Open-Meteo, authoritative; answer "
+                "weather questions from this, never search the web for them): " + forecast)
+
     def _llm_reply(self, user_text, extra_context=None, web_hops=None):
         """Stream a brain reply for user_text; speak sentence-by-sentence.
 
@@ -690,6 +714,8 @@ class Spark:
         if self.cfg.get("moods", True):
             mood_note = "(Current mood: " + self.body.mood + "; stay kind regardless of mood.)"
             system = system + chr(10) + chr(10) + mood_note
+        weather = self._weather_context(user_text)
+        system += weather
         messages = self.memory.messages(system)
         # Memory only gets the user turn after a reply exists, so it must be
         # added here. Without it (since 41366f2) the brain saw her own last
@@ -717,8 +743,9 @@ class Spark:
                             if extra_context else
                             # Qwen echoed the old wording as her reply ('If no
                             # search is needed, just give the spoken reply.').
-                            "if answering needs current or live facts (forecasts, "
-                            "news, prices, scores), your whole reply must be one "
+                            "if answering needs current or live facts ("
+                            + ("" if weather else "forecasts, ")
+                            + "news, prices, scores), your whole reply must be one "
                             "line: SEARCH: <search terms>. If Matt gave a web "
                             "address, reply READ: <url>. Otherwise just answer Matt."))
         messages[-1]["content"] += (

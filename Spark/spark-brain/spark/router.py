@@ -401,6 +401,11 @@ class Router:
             return True
 
         if action == "weather":
+            # Another day ('weather tomorrow', 'this weekend') goes to the
+            # brain, which gets the daily forecast; this report is today's.
+            if re.search(r"\b(tomorrow|tonight|week|weekend|monday|tuesday|wednesday|"
+                         r"thursday|friday|saturday|sunday)\b", text, re.I):
+                return False
             report = self._weather()
             b.speak(report or "I can't reach the weather service right now.")
             return True
@@ -818,29 +823,75 @@ class Router:
         self.body.eyes("idle")
 
     # --------------------------------------------------------------- weather
+    def _forecast_data(self):
+        """Open-Meteo now + 7 daily forecasts, cached ten minutes so a
+        follow-up (and each web hop) doesn't refetch."""
+        cached = getattr(self, "_wx_cache", None)
+        if cached and time.time() - cached[0] < 600:
+            return cached[1]
+        loc = self.cfg["location"]
+        lat, lon = loc.get("lat"), loc.get("lon")
+        if lat is None or lon is None:
+            geo = json.loads(urllib.request.urlopen(
+                "http://ip-api.com/json/", timeout=4).read())
+            lat, lon = geo["lat"], geo["lon"]
+        url = (f"https://api.open-meteo.com/v1/forecast?"
+               f"latitude={lat}&longitude={lon}&temperature_unit=fahrenheit"
+               f"&wind_speed_unit=mph&current=temperature_2m,"
+               f"apparent_temperature,weather_code,wind_speed_10m"
+               f"&daily=weather_code,temperature_2m_max,temperature_2m_min,"
+               f"precipitation_probability_max&timezone=auto&forecast_days=7")
+        data = json.loads(urllib.request.urlopen(url, timeout=5).read())
+        self._wx_cache = (time.time(), data)
+        return data
+
     def _weather(self):
         try:
-            loc = self.cfg["location"]
-            lat, lon = loc.get("lat"), loc.get("lon")
-            if lat is None or lon is None:
-                geo = json.loads(urllib.request.urlopen(
-                    "http://ip-api.com/json/", timeout=4).read())
-                lat, lon = geo["lat"], geo["lon"]
-            url = (f"https://api.open-meteo.com/v1/forecast?"
-                   f"latitude={lat}&longitude={lon}&temperature_unit=fahrenheit"
-                   f"&wind_speed_unit=mph&current=temperature_2m,"
-                   f"apparent_temperature,weather_code,wind_speed_10m")
-            data = json.loads(urllib.request.urlopen(url, timeout=5).read())["current"]
-            desc = self._wmo(data.get("weather_code"))
-            return (f"Right now it's {int(data['temperature_2m'])} degrees, "
-                    f"feels like {int(data['apparent_temperature'])}. {desc}.")
+            data = self._forecast_data()
+            now = data["current"]
+            desc = self._wmo(now.get("weather_code"))
+            report = (f"Right now it's {int(now['temperature_2m'])} degrees, "
+                      f"feels like {int(now['apparent_temperature'])}. {desc}.")
         except Exception as e:
             _log(f"weather failed: {e}")
+            return None
+        try:
+            # 'is it going to rain' routes here: current alone can't answer it
+            day = data["daily"]
+            report += f" High of {round(day['temperature_2m_max'][0])} today"
+            rain = day["precipitation_probability_max"][0]
+            report += f", {rain} percent chance of rain." if rain is not None else "."
+        except (KeyError, IndexError, TypeError, ValueError):
+            pass
+        return report
+
+    def weather_forecast(self):
+        """Daily forecast lines for the brain, or None when unreachable."""
+        try:
+            d = self._forecast_data()["daily"]
+            lines = []
+            for i, day in enumerate(d["time"]):
+                name = ("Today" if i == 0 else "Tomorrow" if i == 1
+                        else datetime.date.fromisoformat(day).strftime("%A"))
+                rain = d["precipitation_probability_max"][i]
+                lines.append(f"{name} ({day}): {self._wmo(d['weather_code'][i])}, "
+                             f"high {round(d['temperature_2m_max'][i])}F, "
+                             f"low {round(d['temperature_2m_min'][i])}F"
+                             + (f", {rain}% chance of rain" if rain is not None else ""))
+            return "; ".join(lines)
+        except Exception as e:
+            _log(f"forecast failed: {e}")
             return None
 
     @staticmethod
     def _wmo(code):
         mapping = {0: "Clear skies", 1: "Mostly clear", 2: "Partly cloudy", 3: "Overcast",
-                   45: "Foggy", 51: "Light drizzle", 61: "Light rain", 63: "Rain",
-                   65: "Heavy rain", 71: "Snow", 80: "Rain showers", 95: "Thunderstorms"}
+                   45: "Foggy", 48: "Foggy", 51: "Light drizzle", 53: "Drizzle",
+                   55: "Heavy drizzle", 56: "Freezing drizzle", 57: "Freezing drizzle",
+                   61: "Light rain", 63: "Rain", 65: "Heavy rain", 66: "Freezing rain",
+                   67: "Freezing rain", 71: "Light snow", 73: "Snow", 75: "Heavy snow",
+                   77: "Snow grains", 80: "Rain showers", 81: "Rain showers",
+                   82: "Heavy rain showers", 85: "Snow showers", 86: "Heavy snow showers",
+                   95: "Thunderstorms", 96: "Thunderstorms with hail",
+                   99: "Thunderstorms with hail"}
         return mapping.get(code, f"Weather code {code}")
