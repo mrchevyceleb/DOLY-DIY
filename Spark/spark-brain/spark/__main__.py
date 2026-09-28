@@ -691,6 +691,10 @@ class Spark:
             mood_note = "(Current mood: " + self.body.mood + "; stay kind regardless of mood.)"
             system = system + chr(10) + chr(10) + mood_note
         messages = self.memory.messages(system)
+        # Memory only gets the user turn after a reply exists, so it must be
+        # added here. Without it (since 41366f2) the brain saw her own last
+        # reply as an unfinished turn: empty replies and echoed instructions.
+        messages.append({"role": "user", "content": user_text})
         if extra_context:
             # Template-safe injection: strict chat templates (qwen etc.) break on
             # interleaved system/user roles mid-conversation, so tool data rides

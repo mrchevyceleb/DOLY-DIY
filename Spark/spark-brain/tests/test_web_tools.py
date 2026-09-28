@@ -129,7 +129,9 @@ class ToolLoopTests(unittest.TestCase):
         spark.body.speak_stream.side_effect = lambda gen: list(gen)  # consume like the real pipeline
         spark._body_context = lambda: ""
         spark.memory = Mock()
-        spark.memory.messages.return_value = [{"role": "user", "content": "q"}]
+        spark.memory.messages.side_effect = lambda system: [
+            {"role": "system", "content": system},
+            {"role": "assistant", "content": "Earlier reply."}]
         spark.brain = Mock()
         spark.brain_online = True
         return spark
@@ -145,6 +147,10 @@ class ToolLoopTests(unittest.TestCase):
                                          "url": "https://x"}]) as ws:
             spark._llm_reply("who won the game?")
             ws.assert_called_once()
+        # the brain is asked THIS turn, not handed its own last reply
+        asked = spark.brain.chat_stream.call_args_list[0][0][0][-1]
+        self.assertEqual(asked["role"], "user")
+        self.assertTrue(asked["content"].startswith("who won the game?"))
         # user recorded once, tool line never spoken, final reply remembered
         self.assertEqual(spark.memory.add.call_count, 2)
         self.assertEqual(spark.memory.add.call_args_list[0][0], ("user", "who won the game?"))
