@@ -25,7 +25,7 @@ from . import search as websearch
 
 OFFLINE_LINE = "My big brain is offline right now, but I can still take commands."
 WEB_SEARCH_FILLER = "Let me look that up."
-_NEXT_QUESTION = "(Go on, your next question.)"
+_NEXT_QUESTION = "(No answer to judge here: just ask your next question.)"
 WEB_READ_FILLER = "Let me read that."
 
 
@@ -849,7 +849,7 @@ class Spark:
                             + "news, prices, scores), your whole reply must be one "
                             "line: SEARCH: <search terms>. If Matt gave a web "
                             "address, reply READ: <url>. Otherwise just answer Matt."))
-        game_rule = pet.turn_rule() if pet is not None else None
+        game_rule = pet.turn_rule(nudge=user_text == _NEXT_QUESTION) if pet is not None else None
         messages[-1]["content"] += (
             "\n\n[Spoken reply: be warm and respectful; no insults, blame, threats, or sarcasm. "
             + (game_rule or (("Up to six concise sentences." if detailed else

@@ -77,6 +77,7 @@ class Body:
         self._full_charge_since = None
         self._dock_auto_attempted = False
         self._next_auto_departure = 0.0
+        self._exit_edge_fails = 0   # automatic exits that met an 'edge' in a row
         self.last_departure_result = None
         self.last_reseat_result = None
         self._dock_charge_seen_at = None
@@ -1404,7 +1405,7 @@ class Body:
             if wait:
                 deadline = time.time() + 4
                 while time.time() < deadline:
-                    states = [self._arm.get_state(s) for s in (A.Left, A.Right)]
+                    states = [self._arm.get_state(side) for side, _ in moves]
                     if self._arm.ArmState.Error in states:
                         return False
                     if all(s == self._arm.ArmState.Completed for s in states):
@@ -1899,8 +1900,18 @@ class Body:
                     self._next_auto_departure = time.monotonic() + max(
                         60, self.cfg.get("idle", {}).get("roam_cooldown_s", 1800))
                     self._roam_distance_bound = 200  # dock body footprint plus measured exit
+                    self._exit_edge_fails = 0
                     return True
                 result = departure.reason or ("unverified" if result == "ok" else result)
+                if result == "edge":
+                    # A dark mat in front of the dock reads as a cliff every
+                    # time; the retrace re-docks her and re-arms the per-visit
+                    # try, so she was retrying every few minutes all day.
+                    self._exit_edge_fails += 1
+                    wait = min(6 * 3600, 1800 * 2 ** (self._exit_edge_fails - 1))
+                    self._next_auto_departure = time.monotonic() + wait
+                    _log(f"dock exit met an edge ({self._exit_edge_fails}x in a row): "
+                         f"next automatic try in {wait // 60} min")
                 return False
         except Exception as exc:
             result = "error"

@@ -131,7 +131,7 @@ _DIRECT_RE = re.compile(
     r"play\s+dead|drop\s+dead|sneeze|bark|woof|meow|moo|oink|quack|roar|howl|laugh|giggle|cry|wink|"
     r"(?:be|look|act)\s+(?:shy|cool|scared|angry|grumpy)|get\s+dizzy|hands\s+up|arms\s+up|"
     r"stick\s+'?em\s+up|yawn|blow\s+(?:me\s+)?a\s+kiss|show\s+me\s+some\s+love|"
-    r"wave(?:\s+(?:hello|hi|at\s+me))?|flap(?:\s+your\s+arms)?|dance|spin|"
+    r"wave(?:\s+(?:hello|hi|at\s+me))?|flap(?:\s+your\s+arms)?|fly|chicken\s+dance|dance|spin|"
     r"high\s*five|fist\s*bump|party|"
     r"do\s+a\s+trick|show\s+me\s+a\s+trick)(?:\s+(?:please|for\s+me))?$")
 
@@ -1370,18 +1370,20 @@ class Pet:
                     "with a quick, happy welcome back before answering.)")
         return out
 
-    def turn_rule(self):
+    def turn_rule(self, nudge=False):
         """The per-turn reply rule while a question game is on: the default
         'answer only what was asked' stopped trivia after one question."""
         g = self.game
-        if g and g["kind"] == "chat" and not g.get("ending") and g["name"] in _ASKING_GAMES:
-            return (" Game turn: react to his answer in a few words, then ask your next "
-                    "question. The reply must end with that question. At most 45 words.")
-        return None
+        if not (g and g["kind"] == "chat" and not g.get("ending") and g["name"] in _ASKING_GAMES):
+            return None
+        if nudge:   # her own prompt for the missing question: nothing to judge
+            return " Game turn: don't judge or score anything, just ask your next question. At most 30 words."
+        return (" Game turn: react to his answer in a few words, then ask your next "
+                "question. The reply must end with that question. At most 45 words.")
 
     def wants_next(self, reply):
         """A question game turn ended without the next question."""
-        return bool(self.turn_rule() and reply and "?" not in reply[-60:])
+        return bool(self.turn_rule() and reply and "?" not in reply)
 
     def after_reply(self, reply):
         if reply:
