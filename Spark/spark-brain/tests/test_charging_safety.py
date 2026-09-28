@@ -462,7 +462,7 @@ class ChargingSafetyTests(unittest.TestCase):
         b._drive.go_rotate.assert_not_called()
 
     def test_discharge_while_parked_alerts_once_without_releasing_motors(self):
-        b = self.body(pct=50)
+        b = self.body(pct=50, gaps=["Front_Left", "Front_Right"])  # the seated profile
         b.refresh_power()
         b._charging.sample.return_value = False
         b._charging.average = -40
