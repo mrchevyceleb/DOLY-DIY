@@ -148,6 +148,10 @@ class GoveeLights:
             # command waited out the 3 s broadcast before using the cloud.
             if not force and time.time() - self._lan_miss_at < 1800:
                 return self._devices
+            # Known devices are all cloud-only (after a restart too): a LAN
+            # scan can't help them. 'Find my lights' still forces one.
+            if not force and self._devices and not any(d.get("ip") for d in self._devices):
+                return self._devices
             s = self._udp()
             if s is None:
                 return self._devices
@@ -368,6 +372,8 @@ class GoveeLights:
         return "Warmer light." if kelvin < 4000 else "Cooler light."
 
     def status(self, label="all"):
+        if self.enabled:
+            self.scan(force=True)   # discovery request: look for new LAN lights
         devs = self.devices()
         if not devs:
             return "I can't find your Govee lights right now."
