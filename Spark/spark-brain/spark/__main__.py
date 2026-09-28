@@ -254,6 +254,9 @@ class Spark:
             if self.body.sleeping:
                 self.body.wake_up()
             result = self.body.go_home()
+            if stranded and result in ("busy", "power"):
+                # never attempted: retry soon, not in ten minutes
+                self._next_stranded_return = time.monotonic() + 60
             if result not in ("arrived", "already", "cancelled", "busy"):
                 log("spark", f"low-battery return failed: {result}")
                 now = time.monotonic()

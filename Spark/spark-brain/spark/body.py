@@ -772,7 +772,9 @@ class Body:
             gaps = self._edge_gaps()
             if charging is True:
                 self._dock_charge_seen_at = now
-                if self._stranded_mm:
+                # The 2s average lags lost contact; only a fresh positive
+                # sample proves she is back on the contacts.
+                if self._stranded_mm and self._charging.contact() is True:
                     self._stranded_mm = 0  # back on the contacts
                     self._save_dock_hold()
                 if self.docked:
@@ -882,7 +884,8 @@ class Body:
         """Check the native controller as well as blocking future requests."""
         departing = (self._leaving_home and self._departure is not None
                      and self._departure.check() is None)
-        retracing = self._docking_entry is not None and self._docking_entry.reason is None
+        entry = self._docking_entry
+        retracing = entry is not None and entry.reason is None and entry.driving
         if self._leaving_home and not departing:
             self._approach_stop.set()
             self._leaving_home = False
@@ -1739,12 +1742,21 @@ class Body:
         from .dock_entry import DockEntry
         from .homing import Homing
         mm = self._stranded_mm
-        if (not mm or self.sleeping or self._docking_entry is not None
+        # Not attempted -> a reason string: the stranded path stays remembered.
+        if self._docking_entry is not None:
+            return "busy"
+        if (not mm or self.sleeping
                 or not self.has.get("drive") or not self.has.get("edge")):
-            return False
+            return "cancelled"
         pct = self.battery_pct()
         if pct is None or pct <= 2 or not self._charging.healthy():
-            return False
+            return "power"
+        # The 2s current average lags a quick failed exit: let it settle so
+        # a stale True is not mistaken for contact.
+        settle = time.monotonic() + 2.5
+        while (self.refresh_power() is True and self._charging.contact() is not True
+               and time.monotonic() < settle):
+            time.sleep(.1)
         _log(f"retrace: reversing up to {mm + 30}mm back onto the dock")
         self._approach_stop.clear()
         stop = self.motion_stop_factory(False) if self.motion_stop_factory else (lambda: False)
@@ -1752,7 +1764,8 @@ class Body:
         self._docking_entry = entry
         try:
             result = entry.run()
-            seated = (Homing(self, stop).charge_verified() if result in ("contact", "no_contact")
+            seated = (Homing(self, stop).charge_verified()
+                      if entry.moved and result not in ("cancelled", "power")
                       else self.refresh_power() is True)
         finally:
             self._docking_entry = None
@@ -1760,7 +1773,8 @@ class Body:
         _log(f"retrace: result={result} seated={seated}")
         if not seated:
             self._pose = None  # entry travel is never credited to the frame
-            return False
+            # A stop or power fault is honored, never overridden by homing.
+            return result if result in ("cancelled", "power") else False
         with self._hazard_lock:
             # Electrical proof she is back on this dock supersedes the
             # latch the failed exit set on this same path.
@@ -1855,7 +1869,7 @@ class Body:
                 self.last_departure_result = result
                 self.refresh_power()
                 if (result != "ok" and self.docked and departure.issued_mm
-                        and self._charging.charging is not True):
+                        and self._charging.contact() is not True):
                     self._stranded_mm = departure.issued_mm
                     self._save_dock_hold()
                 if front_probe and result != "ok" and self._edge_gaps():
@@ -2129,8 +2143,11 @@ class Body:
             # A failed exit left her beside the dock on a known straight
             # line: retrace it first (stock push). Failing that, this
             # explicit return releases the parked latch for the camera path.
-            if self._retrace_departure():
+            retraced = self._retrace_departure()
+            if retraced is True:
                 return "arrived"
+            if retraced is not False:
+                return retraced  # not tried, stopped or power: latch and path kept
             with self._power_lock:
                 self.docked = False
                 self._stranded_mm = 0

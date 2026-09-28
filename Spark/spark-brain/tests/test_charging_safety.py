@@ -51,6 +51,7 @@ class ChargingSafetyTests(unittest.TestCase):
         b._retrace_departure = Mock(return_value=True)
         self.assertEqual(b.go_home(), "arrived")
         b._charging.sample.return_value = b._charging.charging = True
+        b._charging.contact.return_value = True  # fresh sample, not a lagging average
         b.refresh_power()
         self.assertEqual(b._stranded_mm, 0)
         self.assertTrue(b.is_on_dock())

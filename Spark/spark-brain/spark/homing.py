@@ -468,7 +468,10 @@ class Homing:
             _log(f"entry result={result} ramp={entry.ramp}")
             if self.charge_verified():
                 return "arrived"
-            if result in ("cancelled", "power"):
+            if not (result in ("no_contact", "contact")
+                    or (result == "stalled" and entry.ramp)):
+                # A stop, sensor, controller or alignment failure never
+                # earns the retreat: only a normal unseated attempt does.
                 b._pose = None  # entry travel was never credited
                 return result
             # Stock stage 16: off the ramp, then a fresh approach.
