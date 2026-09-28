@@ -346,7 +346,7 @@ class Router:
             return g.brightness(30)
         # Matt's shortcut: 'bright lights' is both lamps at full
         if (re.search(r"\bbright\b|\bfull\b", low)
-                and not re.match(r"\s*(?:how|what|why|are|is)\b", low)):
+                and not re.match(r"\s*(?:how|what|why|are|is|was|were|do|does|did)\b", low)):
             return g.brightness(100)
         if re.search(r"\bbrighten\b", low):
             return g.brightness(75)
