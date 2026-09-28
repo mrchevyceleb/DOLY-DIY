@@ -383,8 +383,8 @@ _STRONG_NAME_FAMILY = {"spark", "sparky", "spar", "spork", "spock", "spec",
                        "speck", "stark", "starks", "bark", "barks", "barkley",
                        "bart"}
 # How the verifier (Parakeet) renders a spoken 'Spark' when it drops the soft
-# 's': 'Park, what's the weather today?' (live, peak 2842).
-_VERIFIER_NAMES = {"park", "bart", "barkley", "sparks"}
+# 's': 'Park, what's the weather today?' (peak 2842), 'Bark, ...' (3887).
+_VERIFIER_NAMES = {"park", "bark", "barks", "bart", "barkley", "sparks"}
 
 
 def has_wake_name(text, wake_words):

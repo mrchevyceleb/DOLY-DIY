@@ -264,7 +264,7 @@ class VoiceLatencyTests(unittest.TestCase):
         result = listen_for_wake(iter(quiet), rec, CFG, ["spark"],
                                  noise_floor=lambda: 1000, verify_wake=verify)
         self.assertEqual(result.command, "what's the weather today?")
-        for transcript in ("Park the car.", "Sparks had a timer.", "Hey Park."):
+        for transcript in ("Park the car.", "Sparks had a timer.", "Hey Park.", "The dog's bark, again."):
             verify.return_value = transcript
             self.assertFalse(listen_for_wake(iter(quiet), rec, CFG, ["spark"],
                                              noise_floor=lambda: 1000, verify_wake=verify))
