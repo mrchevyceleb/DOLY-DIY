@@ -566,8 +566,10 @@ class Spark:
             if not pcm:
                 return "", b""
             started = time.perf_counter()
+            from_server = False
             if getattr(self, "whisper", None) and len(pcm) >= 8000:
                 text = self.whisper.transcribe_pcm(pcm).strip()
+                from_server = bool(text) and getattr(self.whisper, "last_source", None) == "server"
                 if not text and getattr(self.whisper, "last_source", None) != "server":
                     if remote_asr:
                         recognizer.begin()
@@ -589,7 +591,7 @@ class Spark:
                 if time.monotonic() < deadline:
                     continue
                 return "", b""
-            if (command and getattr(getattr(self, "whisper", None), "last_source", None) == "server"
+            if (command and from_server
                     and not text.rstrip().endswith((".", "?", "!"))
                     and not re.search(r"\bstop\W*$", command, re.I)):
                 # A 460 ms pause endpoints mid-sentence ('What about the' ...
