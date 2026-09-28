@@ -538,6 +538,7 @@ class Router:
                 state = (" I'm charging." if charging is True else
                          " I'm not on my charger." if b.docked and not b.reads_seated() else
                          " I'm parked, but not charging. Please reseat me." if b.docked and charging is False else
+                         " I'm home on my dock." if b.docked and charging is None else
                          " My charging reading is uncertain." if charging is None else "")
                 b.speak(f"I'm at about {pct} percent." + state)
             return True
