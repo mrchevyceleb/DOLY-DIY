@@ -440,7 +440,14 @@ class Spark:
                     # immediately without putting a chirp over the user's words.
                     # Muted from before playback through output latency and
                     # room tail: her own chirp must never become the command.
-                    self.body.wake_reaction(audible=not triggered_by_wake.prefix_pcm,
+                    # The chirp only answers her name said alone. Mid-sentence
+                    # ('Spark, what are people ...') it talked over Matt, and
+                    # the mute that keeps it out of the mic erased his words.
+                    from .ear import strip_wake_prefix
+                    w = triggered_by_wake
+                    talking = bool(w.prefix_pcm or w.command
+                                   or strip_wake_prefix(w.text, w.text))
+                    self.body.wake_reaction(audible=not talking,
                                             before_chirp=lambda s: mic.mute(s + .25))
                 log("spark", "listening..." + (" (follow-up)" if in_followup else ""))
                 self.body.react_enabled = False
