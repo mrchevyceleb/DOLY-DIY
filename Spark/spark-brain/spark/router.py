@@ -840,7 +840,9 @@ class Router:
                f"&wind_speed_unit=mph&current=temperature_2m,"
                f"apparent_temperature,weather_code,wind_speed_10m"
                f"&daily=weather_code,temperature_2m_max,temperature_2m_min,"
-               f"precipitation_probability_max&timezone=auto&forecast_days=7")
+               f"precipitation_probability_max&timezone=auto&forecast_days=7"
+               f"&hourly=temperature_2m,weather_code,precipitation_probability"
+               f"&forecast_hours=24")
         data = json.loads(urllib.request.urlopen(url, timeout=5).read())
         self._wx_cache = (time.time(), data)
         return data
@@ -878,6 +880,18 @@ class Router:
                              f"high {round(d['temperature_2m_max'][i])}F, "
                              f"low {round(d['temperature_2m_min'][i])}F"
                              + (f", {rain}% chance of rain" if rain is not None else ""))
+            # 'tonight' / 'this afternoon' need hours, not daily totals
+            try:
+                h = self._forecast_data()["hourly"]
+                for i in range(0, len(h["time"]), 3):
+                    at = datetime.datetime.fromisoformat(h["time"][i])
+                    rain = h["precipitation_probability"][i]
+                    lines.append(f"{at:%A} {at:%I %p}".replace(" 0", " ")
+                                 + f": {round(h['temperature_2m'][i])}F, "
+                                 f"{self._wmo(h['weather_code'][i]).lower()}"
+                                 + (f", {rain}% chance of rain" if rain is not None else ""))
+            except (KeyError, IndexError, TypeError, ValueError):
+                pass
             return "; ".join(lines)
         except Exception as e:
             _log(f"forecast failed: {e}")

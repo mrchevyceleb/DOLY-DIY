@@ -79,8 +79,10 @@ _WAKE_GARBLE_RE = re.compile(
 # Weather questions, and 'and tomorrow?' right after one, get Open-Meteo's
 # forecast: a web search for 'and tomorrow?' returned no numbers (1138).
 _WEATHER_RE = re.compile(r"\b(weather|forecast|rain\w*|snow\w*|temperature|degrees|"
-                         r"hot|cold|warm|chilly|umbrella|jacket|coat|sunny|cloudy|"
-                         r"storm\w*|windy|humid)\b", re.I)
+                         r"umbrella|jacket|coat|sunny|cloudy|storm\w*|windy|humid)\b", re.I)
+# 'hot'/'cold' alone isn't weather ('my laptop is running hot')
+_TEMP_RE = re.compile(r"\b(hot|cold|warm|chilly)\b.*\b(out|outside|today|tomorrow|"
+                      r"tonight|week|weekend)\b", re.I)
 _WHEN_RE = re.compile(r"\b(tomorrow|tonight|today|week|weekend|monday|tuesday|"
                       r"wednesday|thursday|friday|saturday|sunday)\b", re.I)
 _INSTRUCTION_ECHO_RE = re.compile(
@@ -666,7 +668,7 @@ class Spark:
 
     def _weather_context(self, user_text):
         """Real forecast for a weather question or its follow-up, or ''."""
-        asks = bool(_WEATHER_RE.search(user_text))
+        asks = bool(_WEATHER_RE.search(user_text) or _TEMP_RE.search(user_text))
         if not asks and _WHEN_RE.search(user_text):
             try:
                 recent = list(self.memory.history)[-2:]
