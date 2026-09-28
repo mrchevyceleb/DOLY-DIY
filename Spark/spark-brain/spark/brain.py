@@ -44,16 +44,10 @@ class Brain:
         """
         for model in self._model_candidates():
             try:
-                produced = False
-                for delta in self._stream_once(model, messages, on_delta):
-                    produced = True
-                    yield delta
-                if not produced and model == self.model and self.fallback_model:
-                    # Qwen 3.6 intermittently finishes with no content at all
-                    # ('all week.' went unanswered); silence is the worst reply.
-                    print(f"[brain] {model} returned no content; trying fallback",
-                          file=sys.stderr)
-                    continue
+                # An empty reply is NOT a reason to fall back: the fallback
+                # isn't resident on Moria, and loading it took 15 GB (36s)
+                # beside a training run. The caller speaks a retry prompt.
+                yield from self._stream_once(model, messages, on_delta)
                 if model != self.model:
                     self.using_fallback = True
                 return
