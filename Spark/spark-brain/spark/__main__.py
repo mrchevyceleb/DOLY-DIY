@@ -603,7 +603,7 @@ class Spark:
         def verify_wake(pcm):
             # Preserve a command spoken during the bounded server check.
             # Keep the larger buffer after success until _listen_command takes it.
-            mic.retain(4)  # covers the 2.5s wake-check timeout plus handoff
+            mic.retain(5)  # covers the 3.5s wake-check timeout plus handoff
             text = ""
             try:
                 text = self.whisper.transcribe_wake_pcm(pcm)

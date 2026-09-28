@@ -245,6 +245,17 @@ class VoiceLatencyTests(unittest.TestCase):
                                          rec, CFG, ["spark"], noise_floor=lambda: 1000,
                                          verify_wake=verify))
         verify.assert_called_once()
+        # Parakeet drops the soft 's' ('Park, ...') on quiet speech; the
+        # vocative comma separates it from talk about a park.
+        verify.return_value = "Park, what's the weather today?"
+        quiet = [room]*5 + [pcm(2000)]*15 + [room]*40
+        result = listen_for_wake(iter(quiet), rec, CFG, ["spark"],
+                                 noise_floor=lambda: 1000, verify_wake=verify)
+        self.assertEqual(result.command, "what's the weather today?")
+        for transcript in ("Park the car.", "Sparks had a timer.", "Hey Park."):
+            verify.return_value = transcript
+            self.assertFalse(listen_for_wake(iter(quiet), rec, CFG, ["spark"],
+                                             noise_floor=lambda: 1000, verify_wake=verify))
 
     def test_park_in_background_conversation_needs_actual_name_verification(self):
         rec = Mock()
@@ -379,7 +390,7 @@ class VoiceLatencyTests(unittest.TestCase):
             return kwargs["verify_wake"](pcm(3000)*20)
         with patch("spark.ear.listen_for_wake", side_effect=check):
             self.assertEqual(spark._wait_for_wake(mic, Mock(), ["spark"]), "Spark.")
-            self.assertEqual(mic.retain.call_args.args, (4,))
+            self.assertEqual(mic.retain.call_args.args, (5,))
             spark.whisper.transcribe_wake_pcm.side_effect = TimeoutError("offline")
             self.assertEqual(spark._wait_for_wake(mic, Mock(), ["spark"]), "")
             self.assertEqual(mic.retain.call_args.args, (1,))

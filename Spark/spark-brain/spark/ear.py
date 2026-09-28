@@ -382,6 +382,9 @@ def _near_wake(token, heads):
 _STRONG_NAME_FAMILY = {"spark", "sparky", "spar", "spork", "spock", "spec",
                        "speck", "stark", "starks", "bark", "barks", "barkley",
                        "bart"}
+# How the verifier (Parakeet) renders a spoken 'Spark' when it drops the soft
+# 's': 'Park, what's the weather today?' (live, peak 2842).
+_VERIFIER_NAMES = {"park", "bart", "barkley", "sparks"}
 
 
 def has_wake_name(text, wake_words):
@@ -489,11 +492,19 @@ def listen_for_wake(frames, recognizer, cfg, wake_words, tap_check=None,
             if verified:
                 if has_wake_name(verified, wake_words):
                     return WakeResult(verified)
+                v_tokens = re.findall(r"[\w']+", verified.lower())
+                v_head = meaningful(v_tokens)
+                # Vosk heard her name family AND the verifier heard its own
+                # rendering of it said TO her ('Park, what's...'): the
+                # vocative comma is what separates this from 'Park the car'.
+                named = re.search(rf"\b{re.escape(v_head)}\b\s*[,.!?:;-]+\s*(\w.*)",
+                                  verified, re.I) if v_head else None
+                if (allow_weak and family_head and named
+                        and v_head.removesuffix("'s") in _VERIFIER_NAMES):
+                    return WakeResult(verified, command=named.group(1).strip())
                 # Parakeet's known 'Bart' garble remains usable only when
                 # Vosk independently heard a rarer near-name. Common 'bar',
                 # 'park', 'mark' and 'dark' may never authorize fuzzily.
-                v_tokens = re.findall(r"[\w']+", verified.lower())
-                v_head = meaningful(v_tokens)
                 if (allow_weak and head in {"bart", "barkley", "bark"}
                         and v_head in {"bart", "barkley"}
                         and peak >= a.get("wake_verify_fuzzy_rms", 4500)):

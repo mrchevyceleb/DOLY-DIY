@@ -128,9 +128,9 @@ class WhisperASR:
 
     def transcribe_wake_pcm(self, pcm):
         """Short server-only check; never start expensive local fallback at idle."""
-        # Parakeet runs 1.0-1.4s while Moria trains; 1.5s dropped real wakes.
-        # The mic retains 3s during the check, so waiting costs no speech.
-        return self._transcribe_http(pcm, self.cfg["audio"]["sample_rate"], timeout_s=2.5)
+        # Parakeet runs ~1.4s (p90 1.5s, spikes past 2.5s) while Moria trains;
+        # 1.5s and 2.5s both dropped checks. The mic retains 5s meanwhile.
+        return self._transcribe_http(pcm, self.cfg["audio"]["sample_rate"], timeout_s=3.5)
 
     def transcribe_pcm(self, pcm, sample_rate=16000):
         """Raw 16-bit mono PCM -> text. Moria first, local whisper fallback."""
