@@ -769,6 +769,7 @@ class Spark:
                 # whole token budget thinking: she then went silently mute.
                 log("spark", f"brain gave no spoken reply "
                              f"({time.perf_counter()-started:.2f}s)")
+                self.body.speak("Sorry, I lost that thought. Say it again?")
                 self.body.eyes("idle")
                 return
 
