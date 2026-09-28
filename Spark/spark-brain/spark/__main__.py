@@ -699,8 +699,9 @@ class Spark:
         if not isinstance(forecast, str) or not forecast:
             return ""
         return ("\nWEATHER FORECAST for Matt's home (Open-Meteo, authoritative; answer "
-                "weather questions from this, never search the web for them; a question "
-                "that names no day means today, whatever was asked before): " + forecast)
+                "home weather questions from this, never search the web for them; use the "
+                "web tool only for another city. A question that names no day means "
+                "today, whatever was asked before): " + forecast)
 
     def _llm_reply(self, user_text, extra_context=None, web_hops=None):
         """Stream a brain reply for user_text; speak sentence-by-sentence.
