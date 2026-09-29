@@ -433,6 +433,11 @@ _SENTENCE_NAME_RE = re.compile(rf"[.!?]\s+{_NAME}\b\s*(?:[,.!?:;-]+\s*(.*)|$)", 
 # '..., Spark?' closing a sentence. The comma marks it as said TO her; talk
 # ABOUT her ('have you guys met Spark?') has none.
 _TRAILING_NAME_RE = re.compile(rf"^(.*?\w)\s*,\s*{_NAME}\s*([.!?]*)\s*$", re.I | re.S)
+# 'This is my robot, Spark.' introduces her on a call; it is not a command.
+_DESCRIBES_HER = {"robot", "bot", "assistant", "friend", "buddy", "pet", "girl", "dog",
+                  "companion", "helper", "sidekick", "named", "called", "name", "meet"}
+_SENTENCE_END_RE = re.compile(r"(?<!\bDr\.)(?<!\bMr\.)(?<!\bMs\.)(?<!\bSt\.)(?<!\bMrs\.)"
+                              r"(?<=[.!?])\s+")
 
 
 def addressed_command(text):
@@ -443,7 +448,9 @@ def addressed_command(text):
     text = (text or "").strip()
     trailing = _TRAILING_NAME_RE.match(text)
     if trailing:
-        last = re.split(r"(?<=[.!?])\s+", trailing.group(1))[-1].strip()
+        last = _SENTENCE_END_RE.split(trailing.group(1))[-1].strip()
+        if last.lower().split()[-1] in _DESCRIBES_HER:
+            return None
         return f"{last}{(trailing.group(2) or '.')[:1]}"
     opening = _SENTENCE_NAME_RE.search(text)
     if opening:
