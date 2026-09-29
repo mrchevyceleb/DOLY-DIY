@@ -492,6 +492,10 @@ def listen_for_wake(frames, recognizer, cfg, wake_words, tap_check=None,
         named = re.search(rf"\b{re.escape(v_head)}\b\s*[,.!?:;-]+\s*(\w.*)", verified, re.I)
         return named.group(1).strip() if named else None
 
+    def real_talk(verified):
+        return len([w for w in re.findall(r"[\w']+", (verified or "").lower())
+                    if w not in {"ok", "okay", "hey", "um", "uh", "oh"}]) >= 2
+
     def confirm_exact(text, clip):
         """Vosk's grammar knows little besides her name, so it can force loud
         talk into an exact 'sparky' (live: 'sparky' -> 'Fucking background.').
@@ -508,9 +512,7 @@ def listen_for_wake(frames, recognizer, cfg, wake_words, tap_check=None,
         command = vocative(verified)
         if command:
             return WakeResult(verified, command=command, clip_pcm=clip)
-        words = [w for w in re.findall(r"[\w']+", verified.lower())
-                 if w not in {"ok", "okay", "hey", "um", "uh", "oh"}]
-        if len(words) >= 2:
+        if real_talk(verified):
             room.note()
             print(f"[ear] exact '{text}' vetoed: no name in '{verified}'",
                   file=sys.stderr, flush=True)
@@ -522,6 +524,8 @@ def listen_for_wake(frames, recognizer, cfg, wake_words, tap_check=None,
         nonlocal last_family_final_at
         tokens = text.lower().split()
         if _is_wake(tokens, peak, speech_ms=voiced_frames*20):
+            if partial_vetoed:
+                return None  # already verified and noted as room talk
             # Retain original audio: constrained KWS only knows the name;
             # command ASR must still hear "go home" in the same breath.
             return confirm_exact(text, b"".join(audio))
@@ -610,7 +614,8 @@ def listen_for_wake(frames, recognizer, cfg, wake_words, tap_check=None,
                     named = v_head.removesuffix("'s") in _STRONG_NAME_FAMILY | {"stark", "starks"}
                     return WakeResult(verified, command="" if named else verified,
                                       clip_pcm=clip)
-                room.note()  # real talk that was not for her
+                if real_talk(verified):
+                    room.note()  # real talk that was not for her
             # A rejected earlier segment must not suppress a name in the
             # next completed segment inside the same one-second interval.
             next_verify = 0.0

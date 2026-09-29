@@ -129,7 +129,7 @@ def _hushed(text):
     words = re.findall(r"[a-z]+", text.casefold())
     if words[:1] in (["okay"], ["ok"]):
         words = words[1:]
-    if words[:2] == ["hey", "spark"]:
+    if words[:2] in (["hey", "spark"], ["hey", "sparky"]):
         words = words[2:]
     elif words and words[0] in ("spark", "sparky"):
         words = words[1:]
