@@ -443,6 +443,18 @@ class VoiceLatencyTests(unittest.TestCase):
             self.assertEqual(spark._wait_for_wake(mic, Mock(), ["spark"]), "")
             self.assertEqual(mic.retain.call_args.args, (1,))
 
+    def test_name_said_to_her_mid_or_end_of_sentence_wakes_her(self):
+        from spark.ear import addressed_command
+        # Live on a call: both were dropped as room talk.
+        self.assertEqual(addressed_command("What's the weather today, Spark?"),
+                         "What's the weather today?")
+        self.assertEqual(addressed_command("He's going well. Spark, what's the weather?"),
+                         "what's the weather?")
+        self.assertEqual(addressed_command("aren't you? Spark."), "")
+        for about_her in ("You guys met have you guys met Spark?",
+                          "Um and New Spark came out fast.", "I love it. Spark is great."):
+            self.assertIsNone(addressed_command(about_her))
+
     def test_spectral_vad_ends_over_loud_noise_and_recovers_missing_wake_name(self):
         speech, fan = pcm(3000), pcm(2400)
         vad = Mock()

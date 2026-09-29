@@ -756,7 +756,7 @@ class Spark:
 
     def _wait_for_wake(self, mic, recognizer, wake_words, idle_check=None):
         """Block until wake word or tap. Always drains audio (keeps stream fresh)."""
-        from .ear import has_wake_name, listen_for_wake
+        from .ear import addressed_command, has_wake_name, listen_for_wake
         if self.talk_trigger.is_set():
             return False
 
@@ -789,7 +789,8 @@ class Spark:
             text = ""
             try:
                 text = self.whisper.transcribe_wake_pcm(pcm)
-                if has_wake_name(text, wake_words) or _WAKE_GARBLE_RE.match(text or ""):
+                if (has_wake_name(text, wake_words) or _WAKE_GARBLE_RE.match(text or "")
+                        or addressed_command(text) is not None):
                     return text
             except Exception as exc:
                 log("spark", f"wake check unavailable: {exc}")

@@ -427,6 +427,30 @@ def has_wake_name(text, wake_words):
         tokens[:len(name.split())] == name.lower().split() for name in wake_words if name.strip()))
 
 
+_NAME = r"(?:(?:hey|okay|ok)[,\s]+)?spark(?:y)?"
+# 'Spark, what's...' opening a later sentence, or 'Spark.' said on its own.
+_SENTENCE_NAME_RE = re.compile(rf"[.!?]\s+{_NAME}\b\s*(?:[,.!?:;-]+\s*(.*)|$)", re.I | re.S)
+# '..., Spark?' closing a sentence. The comma marks it as said TO her; talk
+# ABOUT her ('have you guys met Spark?') has none.
+_TRAILING_NAME_RE = re.compile(rf"^(.*?\w)\s*,\s*{_NAME}\s*([.!?]*)\s*$", re.I | re.S)
+
+
+def addressed_command(text):
+    """The command when her name is said TO her somewhere other than the
+    start; None when it is not. '' means the name alone: listen for more.
+    Live, on a call: 'What's the weather today, Spark?' and 'He's going
+    well. Spark, what's the weather today?' were both dropped as room talk."""
+    text = (text or "").strip()
+    trailing = _TRAILING_NAME_RE.match(text)
+    if trailing:
+        last = re.split(r"(?<=[.!?])\s+", trailing.group(1))[-1].strip()
+        return f"{last}{(trailing.group(2) or '.')[:1]}"
+    opening = _SENTENCE_NAME_RE.search(text)
+    if opening:
+        return (opening.group(1) or "").strip()
+    return None
+
+
 def listen_for_wake(frames, recognizer, cfg, wake_words, tap_check=None,
                     noise_floor=None, verify_wake=None, idle_check=None, allow_weak=True,
                     room=None):
@@ -492,6 +516,16 @@ def listen_for_wake(frames, recognizer, cfg, wake_words, tap_check=None,
         named = re.search(rf"\b{re.escape(v_head)}\b\s*[,.!?:;-]+\s*(\w.*)", verified, re.I)
         return named.group(1).strip() if named else None
 
+    def named_elsewhere(verified, clip):
+        """Her name said to her mid-sentence or at the end (see
+        addressed_command). Busy rooms included: it is her actual name."""
+        command = addressed_command(verified)
+        if command is None:
+            return None
+        if not command:
+            return WakeResult("Spark", clip_pcm=clip)  # name alone: listen on
+        return WakeResult(verified, command=command, clip_pcm=clip)
+
     def real_talk(verified):
         return len([w for w in re.findall(r"[\w']+", (verified or "").lower())
                     if w not in {"ok", "okay", "hey", "um", "uh", "oh"}]) >= 2
@@ -509,6 +543,9 @@ def listen_for_wake(frames, recognizer, cfg, wake_words, tap_check=None,
               file=sys.stderr, flush=True)
         if has_wake_name(verified, wake_words):
             return WakeResult(verified, clip_pcm=clip)
+        addressed = named_elsewhere(verified, clip)
+        if addressed:
+            return addressed
         command = vocative(verified)
         if command:
             return WakeResult(verified, command=command, clip_pcm=clip)
@@ -568,6 +605,9 @@ def listen_for_wake(frames, recognizer, cfg, wake_words, tap_check=None,
             if verified:
                 if has_wake_name(verified, wake_words):
                     return WakeResult(verified, clip_pcm=clip)
+                addressed = named_elsewhere(verified, clip)
+                if addressed:
+                    return addressed
                 v_tokens = re.findall(r"[\w']+", verified.lower())
                 v_head = meaningful(v_tokens)
                 # Vosk heard her name family AND the verifier heard its own
