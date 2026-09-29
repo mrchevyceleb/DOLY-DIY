@@ -282,6 +282,7 @@ class Pet:
         self._next_tick = now + 60
         self._next_look = now + QUIET_BEFORE_LOOK_S
         self._next_notice = now + 20 * 60
+        self.hushed_until = 0.0      # 'be quiet': no remarks until then
         self._next_bored = now + 2 * 3600
         self._next_night_yawn = 0.0
         self._stretch_at = 0.0
@@ -484,6 +485,8 @@ class Pet:
         try:
             if b.sleeping or getattr(self.router, "_celebration", None) is not None:
                 return False
+            if now < self.hushed_until:
+                return False
             self._expire(now)
             if self.game:
                 return False
@@ -656,6 +659,12 @@ class Pet:
             if idle > (3 * 60 if self.game["kind"] == "rps" else 10 * 60):
                 _log(f"game over (idle): {self.game.get('name', self.game['kind'])}")
                 self.game = None
+
+    def hush(self, minutes=30):
+        """'Be quiet': no greetings, notices or play offers for a while."""
+        self.hushed_until = time.time() + minutes * 60
+        self.pending = None
+        _log(f"hushed for {minutes} min")
 
     def cancel(self):
         """'Stop' ends games and open questions."""

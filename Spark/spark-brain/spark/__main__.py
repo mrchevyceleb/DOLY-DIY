@@ -116,6 +116,28 @@ def _followup_done(text):
     return " ".join(words) in _FOLLOWUP_SIGNOFFS
 
 
+# 'Be quiet.' reached the brain and got a chatty reply, then another window
+# (live, 20:58). Hush closes the turn silently and quiets her pet remarks.
+_HUSH_PHRASES = {
+    "be quiet", "quiet", "quiet down", "shush", "shh", "shhh", "hush",
+    "shut up", "stop talking", "not now", "that s enough", "enough",
+    "leave me alone", "be quiet please", "quiet please", "please be quiet",
+}
+
+
+def _hushed(text):
+    words = re.findall(r"[a-z]+", text.casefold())
+    if words[:1] in (["okay"], ["ok"]):
+        words = words[1:]
+    if words[:2] == ["hey", "spark"]:
+        words = words[2:]
+    elif words and words[0] in ("spark", "sparky"):
+        words = words[1:]
+    if words and words[-1] in ("spark", "sparky"):
+        words = words[:-1]
+    return " ".join(words) in _HUSH_PHRASES
+
+
 def _pcm_peak(pcm):
     """Peak absolute amplitude of 16-bit LE mono PCM (fast, no numpy)."""
     import array
@@ -317,7 +339,9 @@ class Spark:
         from .asr import Recognizer
         from .ear import MicStream
 
+        from .ear import room_talk
         recognizer = Recognizer(self.cfg)
+        self.room = room = room_talk(self.cfg)
         wake_cfg = self.cfg.get("wake", {})
         wake_enabled = wake_cfg.get("enabled", True)
         wake_words = wake_cfg.get("words", ["spark", "hey spark"])
@@ -399,6 +423,10 @@ class Spark:
 
             follow_cfg = self.cfg.get("conversation", {})
             follow_pending = False
+            # A busy room (a video, a call, guests) caps the follow-up chain:
+            # every answer opened a window that caught the next line of talk.
+            convo_busy = False
+            follow_turns = 0
 
             while True:
                 self.talk_trigger.clear()
@@ -451,8 +479,13 @@ class Spark:
                     self._low_battery_check(idle_cfg)
                     continue
                 if idle_action["act"] == "pet":
-                    # she asked Matt something: his answer needs no name
+                    # she asked Matt something: his answer needs no name,
+                    # unless the room is busy and anyone's talk would answer
                     follow_pending = pet.idle_tick()
+                    if follow_pending and room.busy():
+                        log("spark", "room busy: her question waits for her name")
+                        follow_pending = False
+                    convo_busy, follow_turns = room.busy(), 0
                     idle_action["act"] = None
                     continue
                 if idle_action["act"] == "flourish":
@@ -488,6 +521,8 @@ class Spark:
                     # a tap: the same soft 'I'm listening' chirp as her name
                     self.body.wake_reaction(before_chirp=lambda s: mic.mute(s + .25))
                 tap_turn = not in_followup and not triggered_by_wake
+                if not in_followup or motion_wake:
+                    convo_busy, follow_turns = room.busy(), 0
                 log("spark", "listening..." + (" (follow-up)" if in_followup else ""))
                 self.body.react_enabled = False
                 follow_window = follow_cfg.get("follow_up_window_s", 8)
@@ -540,6 +575,14 @@ class Spark:
                     continue
                 self._misses = 0
 
+                if _hushed(text):
+                    log("spark", f"hushed: '{text}'")
+                    self.body.eyes("idle")
+                    if pet is not None:
+                        pet.hush()
+                        pet.conversation_over()
+                    continue  # no reply, no window: her name or a tap only
+
                 if in_followup and _followup_done(text):
                     log("spark", f"follow-up closed: '{text}'")
                     self.body.eyes("idle")
@@ -557,6 +600,11 @@ class Spark:
                 follow_pending = (not self.body.sleeping
                                   and follow_cfg.get("follow_up_window_s", 8) > 0
                                   and follow_cfg.get("follow_ups", 2) > 0)
+                follow_turns += int(in_followup)
+                if (follow_pending and convo_busy and not getattr(pet, "game", None)
+                        and follow_turns >= follow_cfg.get("follow_ups", 2)):
+                    log("spark", f"room busy: {follow_turns} follow-ups, next needs her name")
+                    follow_pending = False
 
     def _motion_stop_listener(self, mic, recognizer, name_stops=True):
         """Recognize STOP and her NAME while approach/roam runs.
@@ -732,9 +780,11 @@ class Spark:
                 yield f
 
         # NOTE: queued sfx from sensor threads flush inside tap_frames() loop
-        def verify_wake(pcm):
+        def verify_wake(pcm, keep=False):
             # Preserve a command spoken during the bounded server check.
             # Keep the larger buffer after success until _listen_command takes it.
+            # keep: an exact local name that stands unless vetoed still needs
+            # the command queued behind it.
             mic.retain(5)  # covers the 3.5s wake-check timeout plus handoff
             text = ""
             try:
@@ -743,7 +793,8 @@ class Spark:
                     return text
             except Exception as exc:
                 log("spark", f"wake check unavailable: {exc}")
-            mic.retain(1)
+            if not keep:
+                mic.retain(1)
             return text
 
         verifier = (verify_wake if getattr(self, "whisper", None)
@@ -752,7 +803,8 @@ class Spark:
                                tap_check=lambda: self.talk_trigger.is_set(),
                                idle_check=idle_check,
                                allow_weak=not self.body.sleeping,
-                               noise_floor=lambda: mic.noise_floor, verify_wake=verifier)
+                               noise_floor=lambda: mic.noise_floor, verify_wake=verifier,
+                               room=getattr(self, "room", None))
 
     
 

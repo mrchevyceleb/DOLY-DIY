@@ -390,6 +390,33 @@ _STRONG_NAME_FAMILY = {"spark", "sparky", "spar", "spork", "spock", "spec",
 _VERIFIER_NAMES = {"park", "bark", "barks", "bart", "barkley", "sparks", "fark", "farks"}
 
 
+class RoomTalk:
+    """Speech the verifier heard without her name: a video, a call, people
+    talking to each other. While the room is busy only her actual name (or a
+    vocative 'Park,') wakes her, and her replies stop chaining on the talk.
+    Live: a YouTube review ('only loses on quality.') woke her via 'barkley'
+    after seven unaddressed segments in 30 s."""
+
+    def __init__(self, window_s=30.0, segments=3):
+        self.window_s, self.segments = window_s, segments
+        self._heard = deque(maxlen=32)
+
+    def note(self, now=None):
+        self._heard.append(time.monotonic() if now is None else now)
+
+    def count(self, now=None):
+        now = time.monotonic() if now is None else now
+        return sum(1 for t in self._heard if now - t <= self.window_s)
+
+    def busy(self, now=None):
+        return self.count(now) >= self.segments
+
+
+def room_talk(cfg):
+    a = cfg.get("audio", {})
+    return RoomTalk(a.get("room_busy_window_s", 30), a.get("room_busy_segments", 3))
+
+
 def has_wake_name(text, wake_words):
     tokens = re.findall(r"[\w']+", text.lower())
     if tokens and tokens[0] in {"okay", "ok"}:
@@ -401,7 +428,8 @@ def has_wake_name(text, wake_words):
 
 
 def listen_for_wake(frames, recognizer, cfg, wake_words, tap_check=None,
-                    noise_floor=None, verify_wake=None, idle_check=None, allow_weak=True):
+                    noise_floor=None, verify_wake=None, idle_check=None, allow_weak=True,
+                    room=None):
     """Listen for the wake word on ONE frame iterator.
 
     `frames` is a single iterator/generator of 20ms PCM frames (NOT a
@@ -449,9 +477,45 @@ def listen_for_wake(frames, recognizer, cfg, wake_words, tap_check=None,
     vad = _speech_detector(cfg)
     energy = deque(maxlen=5)
 
+    room = room or room_talk(cfg)
+
     def meaningful(tokens, articles=False):
         fillers = {"ok", "okay", "hey"} | ({"a", "the"} if articles else set())
         return next((word for word in tokens if word not in fillers), "")
+
+    def vocative(verified):
+        """The command after the verifier's own rendering of her name said TO
+        her ('Park, what's...'); the comma separates it from 'Park the car'."""
+        v_head = meaningful(re.findall(r"[\w']+", verified.lower()))
+        if not v_head or v_head.removesuffix("'s") not in _VERIFIER_NAMES:
+            return None
+        named = re.search(rf"\b{re.escape(v_head)}\b\s*[,.!?:;-]+\s*(\w.*)", verified, re.I)
+        return named.group(1).strip() if named else None
+
+    def confirm_exact(text, clip):
+        """Vosk's grammar knows little besides her name, so it can force loud
+        talk into an exact 'sparky' (live: 'sparky' -> 'Fucking background.').
+        The verifier vetoes the hit when it heard real words without her
+        name; when it is silent or unavailable the local hit stands."""
+        if not verify_wake:
+            return WakeResult(text, clip)
+        started = time.monotonic()
+        verified = verify_wake(clip, keep=True) or ""
+        print(f"[ear] exact check {time.monotonic()-started:.2f}s: '{text}' -> '{verified}'",
+              file=sys.stderr, flush=True)
+        if has_wake_name(verified, wake_words):
+            return WakeResult(verified, clip_pcm=clip)
+        command = vocative(verified)
+        if command:
+            return WakeResult(verified, command=command, clip_pcm=clip)
+        words = [w for w in re.findall(r"[\w']+", verified.lower())
+                 if w not in {"ok", "okay", "hey", "um", "uh", "oh"}]
+        if len(words) >= 2:
+            room.note()
+            print(f"[ear] exact '{text}' vetoed: no name in '{verified}'",
+                  file=sys.stderr, flush=True)
+            return None
+        return WakeResult(text, clip)
 
     def resolve(text):
         nonlocal next_verify
@@ -460,7 +524,7 @@ def listen_for_wake(frames, recognizer, cfg, wake_words, tap_check=None,
         if _is_wake(tokens, peak, speech_ms=voiced_frames*20):
             # Retain original audio: constrained KWS only knows the name;
             # command ASR must still hear "go home" in the same breath.
-            return WakeResult(text, b"".join(audio))
+            return confirm_exact(text, b"".join(audio))
         # Vosk sometimes drops Spark entirely ('or how much battery...').
         # Check real speech even when its local transcript is empty. Only
         # an explicit wake name from the original audio can authorize a turn.
@@ -503,18 +567,14 @@ def listen_for_wake(frames, recognizer, cfg, wake_words, tap_check=None,
                 v_tokens = re.findall(r"[\w']+", verified.lower())
                 v_head = meaningful(v_tokens)
                 # Vosk heard her name family AND the verifier heard its own
-                # rendering of it said TO her ('Park, what's...'): the
-                # vocative comma is what separates this from 'Park the car'.
-                named = re.search(rf"\b{re.escape(v_head)}\b\s*[,.!?:;-]+\s*(\w.*)",
-                                  verified, re.I) if v_head else None
+                # rendering of it said TO her ('Park, what's...').
                 # Vosk's weak 'park' counts too when the verifier heard a
                 # vocative name ('park [unk]' -> 'Fark, go home.' at 9415):
                 # every such pair in the logs was Matt talking to her.
-                if (allow_weak and named
-                        and (family_head or (head in _WEAK and peak >= weak_min_peak))
-                        and v_head.removesuffix("'s") in _VERIFIER_NAMES):
-                    return WakeResult(verified, command=named.group(1).strip(),
-                                      clip_pcm=clip)
+                command = vocative(verified)
+                if (allow_weak and command
+                        and (family_head or (head in _WEAK and peak >= weak_min_peak))):
+                    return WakeResult(verified, command=command, clip_pcm=clip)
                 # Parakeet's known 'Bart' garble remains usable only when
                 # Vosk independently heard a rarer near-name. Common 'bar',
                 # 'park', 'mark' and 'dark' may never authorize fuzzily.
@@ -533,8 +593,13 @@ def listen_for_wake(frames, recognizer, cfg, wake_words, tap_check=None,
                                    and time.monotonic() - last_family_final_at < 2.5))
                 # A quiet name-like segment needs the verifier to hear her
                 # actual name (above); only loud ones or a later command
-                # segment may ride the looser family hint.
-                if (allow_weak and family_hint and not quiet_family
+                # segment may ride the looser family hint. So does a busy
+                # room: a video or a call forces its talk into 'barkley'.
+                busy = room.busy()
+                if busy and family_hint:
+                    print(f"[ear] room busy ({room.count()} unaddressed): "
+                          f"'{verified}' needs her name", file=sys.stderr, flush=True)
+                if (allow_weak and family_hint and not quiet_family and not busy
                         and len(meaningful(v_tokens)) >= 2
                         and peak >= a.get("start_rms", 900)):
                     # Name in the previous segment ('barkley', then
@@ -545,6 +610,7 @@ def listen_for_wake(frames, recognizer, cfg, wake_words, tap_check=None,
                     named = v_head.removesuffix("'s") in _STRONG_NAME_FAMILY | {"stark", "starks"}
                     return WakeResult(verified, command="" if named else verified,
                                       clip_pcm=clip)
+                room.note()  # real talk that was not for her
             # A rejected earlier segment must not suppress a name in the
             # next completed segment inside the same one-second interval.
             next_verify = 0.0
@@ -563,6 +629,7 @@ def listen_for_wake(frames, recognizer, cfg, wake_words, tap_check=None,
         onset_rms = max(arm_rms, stop_rms * 1.1)
         partial_candidate = None
         partial_count = 0
+        partial_vetoed = False  # the verifier already heard this segment's talk
         frame_count = 0
         voiced_run = 0
         voiced_frames = 0
@@ -621,19 +688,23 @@ def listen_for_wake(frames, recognizer, cfg, wake_words, tap_check=None,
                 audio.clear()
                 partial_candidate = None
                 partial_count = 0
+                partial_vetoed = False
             frame_count += 1
             if not final and frame_count % 5 == 0:
                 partial = recognizer.partial().lower()
                 # Only strong names can wake early. Confusions still need a
                 # completed short utterance and the existing loudness gate.
-                if _is_wake(partial.split(), peak=peak, exact_only=True,
-                            speech_ms=voiced_frames*20):
+                if not partial_vetoed and _is_wake(partial.split(), peak=peak, exact_only=True,
+                                                   speech_ms=voiced_frames*20):
                     name = tuple(partial.split()[:2]) if partial.startswith("hey ") else partial.split()[0]
                     partial_count = partial_count + 1 if name == partial_candidate else 1
                     partial_candidate = name
                     if partial_count >= 3:
-                        print(f"[ear] WAKE via partial: '{partial}'", file=sys.stderr, flush=True)
-                        return WakeResult(partial, b"".join(audio))
+                        result = confirm_exact(partial, b"".join(audio))
+                        if result:
+                            print(f"[ear] WAKE via partial: '{partial}'", file=sys.stderr, flush=True)
+                            return result
+                        partial_vetoed = True
                 else:
                     partial_candidate = None
                     partial_count = 0

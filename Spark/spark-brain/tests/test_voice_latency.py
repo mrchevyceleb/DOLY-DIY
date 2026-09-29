@@ -354,6 +354,38 @@ class VoiceLatencyTests(unittest.TestCase):
         # the frame loop consults no per-frame clock, so it is not
         # unit-testable here without deeper surgery)
 
+    def test_background_talk_cannot_wake_via_exact_or_family_hit(self):
+        # 16:22 'sparky' -> 'Fucking background.' and, during a YouTube video,
+        # 'barkley' -> 'only loses on quality.' both started a turn.
+        from spark.ear import RoomTalk
+        speech, room = pcm(3500), pcm(1000)
+        frames = [room]*5 + [speech]*30 + [room]*40
+        rec = Mock()
+        rec.feed.return_value = None
+        rec.partial.return_value = ""
+        rec.finish.return_value = "sparky"
+        verify = Mock(return_value="Fucking background.")
+        self.assertFalse(listen_for_wake(iter(frames), rec, CFG, ["spark"],
+                                         noise_floor=lambda: 1000, verify_wake=verify))
+        verify.return_value = ""  # verifier silent: the exact hit stands
+        self.assertEqual(listen_for_wake(iter(frames), rec, CFG, ["spark"],
+                                         noise_floor=lambda: 1000, verify_wake=verify).text,
+                         "sparky")
+        rec.finish.return_value = "barkley"
+        verify.return_value = "only loses on quality."
+        busy = RoomTalk()
+        for _ in range(3):
+            busy.note()
+        self.assertFalse(listen_for_wake(iter(frames), rec, CFG, ["spark"], room=busy,
+                                         noise_floor=lambda: 1000, verify_wake=verify))
+        verify.return_value = "Spark, how tall is that?"
+        self.assertTrue(listen_for_wake(iter(frames), rec, CFG, ["spark"], room=busy,
+                                        noise_floor=lambda: 1000, verify_wake=verify))
+        from spark.__main__ import _hushed
+        for text in ("Be quiet.", "Spark, shut up!", "Shh.", "Okay, stop talking"):
+            self.assertTrue(_hushed(text), text)
+        self.assertFalse(_hushed("quiet the lights"))
+
     def test_loud_parakeet_bart_still_wakes(self):
         rec = Mock()
         rec.feed.return_value = None
