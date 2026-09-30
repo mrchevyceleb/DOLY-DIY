@@ -94,6 +94,8 @@ def _is_weather(text):
                 or (_TEMP_RE.search(text) and _OUTSIDE_RE.search(text)))
 
 
+# a question the wake endpoint may have cut short ('What are the best?')
+_CUT_QUESTION_RE = re.compile(r"(?:what|which|who|where|when|why|how)\b", re.I)
 _INSTRUCTION_ECHO_RE = re.compile(
     r"\b(spoken reply|(search|query) is needed|web tool|short reply)\b", re.I)
 
@@ -741,7 +743,11 @@ class Spark:
             # ('Park. What's'); the rest was queued in the mic during the check.
             # The verifier punctuates a finished sentence ('Spark, stop.'), and
             # those must not absorb background talk.
-            if said.rstrip().endswith((".", "?", "!")):
+            # A short wh-question is the exception: 'Spark, what are the best
+            # ... ?' came back as 'What are the best?' and she answered that.
+            # The check waits at most 0.6 s for more speech.
+            cut_question = bool(_CUT_QUESTION_RE.match(said.strip())) and len(said.split()) <= 6
+            if said.rstrip().endswith((".", "?", "!")) and not cut_question:
                 return said, b""
             whole = self._wake_continuation(mic, wake, said)
             if whole is not None:
