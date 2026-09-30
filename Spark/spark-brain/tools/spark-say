@@ -1,0 +1,42 @@
+#!/bin/sh
+# Have Spark say something out loud, from any machine on Matt's network.
+#
+#   spark-say "The backup finished."            plain news
+#   spark-say good "Training is done!"          happy eyes, green lights
+#   spark-say bad "The deploy failed."          worried eyes, red lights
+#   spark-say --urgent bad "Moria is down."     also gets through at night
+#   spark-say --run npm run build               runs it, then reports pass/fail
+#
+# Token: $SPARK_TOKEN or ~/.spark-token (copy of /opt/spark/state/announce-token).
+# Host:  $SPARK_HOST, default spark:8765 (her tailnet name).
+host="${SPARK_HOST:-spark:8765}"
+token="${SPARK_TOKEN:-$(cat "$HOME/.spark-token" 2>/dev/null)}"
+urgent=""
+mood="info"
+
+send() {
+    [ -n "$token" ] || { echo "spark-say: no token (set SPARK_TOKEN or ~/.spark-token)" >&2; return 1; }
+    printf '%s' "$2" | curl -fsS -m 8 -o /dev/null -X POST \
+        -H "Authorization: Bearer $token" -H "Content-Type: text/plain" \
+        --data-binary @- "http://$host/announce?mood=$1$urgent"
+}
+
+[ "$1" = "--urgent" ] && { urgent="&urgent=1"; shift; }
+
+if [ "$1" = "--run" ]; then
+    shift
+    [ $# -gt 0 ] || { echo "usage: spark-say --run <command...>" >&2; exit 2; }
+    label="${SPARK_LABEL:-$(basename "$1")}"
+    "$@"
+    code=$?
+    if [ "$code" -eq 0 ]; then
+        send good "$label finished." || echo "spark-say: could not reach Spark" >&2
+    else
+        send bad "$label failed." || echo "spark-say: could not reach Spark" >&2
+    fi
+    exit "$code"
+fi
+
+case "$1" in good|bad|info) mood="$1"; shift ;; esac
+[ $# -gt 0 ] || { echo "usage: spark-say [--urgent] [good|bad|info] <text>" >&2; exit 2; }
+send "$mood" "$*"

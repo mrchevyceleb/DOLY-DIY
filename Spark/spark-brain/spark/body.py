@@ -1338,6 +1338,11 @@ class Body:
         "speaking": ["HAPPY", "CHEERFUL", "EXCITED"],
         "idle": ["BLINK", "FINE", "BLINK_ONLY"],
         "sleepy": ["SLEEPY", "SLEEP", "DROWSY"],
+        # status display: fetching from outside, and the news she carries
+        "looking": ["DISCOVER", "FOCUS", "SCAN"],
+        "news": ["ATTENTION", "LOOK_AHEAD"],
+        "good": ["DELIGHTED", "CHEERFUL", "HAPPY"],
+        "bad": ["TROUBLED", "UNCOMFORTABLE", "ANXIOUS"],
     }
 
     _LED_MOODS = {  # (color, fade ms) — ambient moods per state
@@ -1346,6 +1351,10 @@ class Body:
         "speaking": ("Yellow", 500),
         "idle": ("Blue", 2000),
         "sleepy": ("Black", 1500),
+        "looking": ("Orange", 400),
+        "news": ("White", 500),
+        "good": ("Green", 500),
+        "bad": ("Red", 700),
     }
 
     def eyes(self, state):

@@ -211,10 +211,29 @@ All IMU shock reactions are eyes-only (pickups and bumps never beep).
 Tap a top touch pad during a performance to cancel it. The main speech loop
 resumes after playback; voice interruption during a routine is not implemented.
 
+## Her aide side
+
+- **Matt's day.** A turn about his calendar, tasks, mail or server ("what's on
+  my calendar", "what's on my plate", "any new email", "brief me", "is Moria
+  busy") fetches the live data from TARDIS (`world.url`, tailnet only, read-only)
+  and hands it to the brain as untrusted tool context. Ordinary chat fetches
+  nothing. `world.enabled: false` turns it off.
+- **Announcements.** `POST :8765/announce` with the bearer token in
+  `/opt/spark/state/announce-token` queues a line; she says it between turns.
+  `?mood=good|bad|info` picks her eyes and lights, `?urgent=1` gets through
+  while she is asleep, hushed or it is night. `tools/spark-say` wraps the call:
+  `spark-say good "Training is done"` or `spark-say --run npm run build`.
+- **Status display.** Eyes and LEDs show what she is doing: cyan listening,
+  purple thinking, orange fetching from outside, yellow speaking, green good
+  news, red bad news or brain offline.
+
 ## Files
 
 | file | role |
 |---|---|
+| `spark/world.py` | Matt's calendar, tasks, mail and server status from TARDIS |
+| `spark/inbox.py` | `/announce` listener and queue |
+| `tools/spark-say` | say a line through Spark from any machine on the network |
 | `prompt.md` | Spark personality v4 (source of truth) |
 | `config.json` | endpoints, model, VAD thresholds, voice + FX, roam/battery |
 | `spark/brain.py` | LM Studio streaming client + fallback model |

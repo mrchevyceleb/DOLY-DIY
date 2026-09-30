@@ -41,6 +41,15 @@ _DEFAULTS = {
         "celebrate_max_s": 600,  # hard cap so an unattended alarm can't dance forever
         "party_lights": True,    # cycle the Govee room lights too
     },
+    "world": {
+        "enabled": True,       # calendar / tasks / mail / server answers
+        "url": "https://moria.tail16eb08.ts.net",  # TARDIS, tailnet only
+        "timeout_s": 6,
+    },
+    "inbox": {
+        "enabled": True,       # POST /announce: she says it between turns
+        "port": 8765,
+    },
     "state_dir": "/opt/spark/state",
 }
 

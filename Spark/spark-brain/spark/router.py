@@ -891,7 +891,7 @@ class Router:
         """Search the web, then let the brain answer from the results."""
         query = _SEARCH_INTENT.sub(" ", raw_text)
         query = cmds.normalize(query) or cmds.normalize(raw_text)
-        self.body.eyes("thinking")
+        self.body.eyes("looking")
         self.body.speak("Let me look that up.")
         results = websearch.web_search(query, max_results=4)
         if not results:

@@ -18,9 +18,11 @@ import time
 from .body import Body
 from .brain import Brain, BrainOffline, spoken_sentences
 from .config import load_config
+from .inbox import Inbox
 from .memory import Memory
 from .pet import Pet
 from .router import Router
+from .world import TAG as _WORLD_TAG, World
 from . import search as websearch
 
 OFFLINE_LINE = "My big brain is offline right now, but I can still take commands."
@@ -210,6 +212,11 @@ class Spark:
         self.pet.router = self.router
         self.pet.talk_trigger = self.talk_trigger
         self.router.pet = self.pet
+        # her aide side: Matt's calendar, tasks and mail, and lines sent to her
+        self.world = World(cfg)
+        self.inbox = Inbox(cfg)
+        self._world_last = (0.0, None, 0)   # when, topics, turn number
+        self._turn_no = 0
         self._motion_wake_pending = threading.Event()  # name said during motion
         self.listening = False
         if self.body.hw:
@@ -273,6 +280,35 @@ class Spark:
             self.body._touch_cb = _cb
         except Exception:
             pass
+
+    # --------------------------------------------------------- announcements
+    def _quiet_hours(self):
+        """Asleep, overnight, hushed or mid-party: only urgent lines get through."""
+        pet = getattr(self, "pet", None)
+        return bool(self.body.sleeping
+                    or getattr(self.router, "_celebration", None) is not None
+                    or (pet is not None and (pet.night() or time.time() < pet.hushed_until)))
+
+    def _announce(self, item):
+        """Say one queued line; her eyes and lights carry the news first."""
+        if not item:
+            return
+        log("spark", f"announcing ({item['mood']}): {item['text'][:60]}")
+        if self.body.sleeping:
+            self.body.wake_up()
+        mood = item["mood"]
+        self.body.eyes(mood if mood in ("good", "bad") else "news")
+        if mood == "good":
+            self.body.arm_angle(120, speed=60)
+        text = item["text"]
+        if time.time() - item["at"] > 900:
+            text = "From earlier: " + text
+        self.body.speak(text)
+        if mood == "good":
+            self.body.arm_angle(20, speed=50, wait=False)
+        # 'what failed?' right afterwards needs to know what she just said
+        self.memory.add("assistant", text)
+        self.body.eyes("idle")
 
     # -------------------------------------------------------------- shutdown
     def dispose(self):
@@ -361,6 +397,9 @@ class Spark:
                 raise RuntimeError("microphone probe failed")
         log("spark", "microphone verified")
         sd_notify("READY=1")
+        inbox = getattr(self, "inbox", None)
+        if inbox is not None:
+            inbox.start()
 
         # Power telemetry runs continuously; boot must never turn a wheel.
         self.body.dock_probe()
@@ -387,6 +426,10 @@ class Spark:
                 # check wakes her only if she actually needs to go home.
                 if now >= next_battery:
                     idle_action["act"] = "battery"
+                    return True
+                if (inbox is not None and inbox.waiting
+                        and inbox.ready(quiet=self._quiet_hours())):
+                    idle_action["act"] = "announce"
                     return True
                 if self.body.sleeping:
                     return False
@@ -454,6 +497,11 @@ class Spark:
                         mic, recognizer, wake_words, idle_check=_idle_or_tap)
 
                 mic.learn_noise(False)  # preserve room baseline through speech/TTS
+
+                if idle_action["act"] == "announce":
+                    self._announce(inbox.pop(quiet=self._quiet_hours()))
+                    _, next_flourish, next_wander = _reset_idle()
+                    continue
 
                 if idle_action["act"] == "charge_notice":
                     self.body.speak("I'm parked, but I'm not charging. Please reseat me on my powered dock.")
@@ -867,6 +915,21 @@ class Spark:
         if web_hops is None:
             web_hops = (default_hops
                         if web_cfg.get("enabled", True) and extra_context is None else 0)
+        # Matt's own data: calendar, tasks, mail, server. It rides as tool
+        # context (mail subjects are untrusted) and replaces the web tool.
+        world = getattr(self, "world", None)
+        if extra_context is None and world is not None:
+            # only the very next turn can be a follow-up: a command or any
+            # other exchange in between ends the thread
+            turn = getattr(self, "_turn_no", 0)
+            at, last, last_turn = getattr(self, "_world_last", (0.0, None, 0))
+            carry = time.time() - at < 90 and turn - last_turn == 1
+            wanted = world.wanted(user_text, last if carry else None)
+            if wanted:
+                self.body.eyes("looking")
+                extra_context = world.context(wanted)
+                self._world_last = (time.time(), wanted, turn)
+                web_hops = 0
         # The user turn enters memory only once a reply exists (see
         # _generate_reply): an unanswered noise fragment must not become
         # a ghost the brain later "responds" to.
@@ -905,6 +968,8 @@ class Spark:
 
         detailed = bool(re.search(r"\b(explain|tell me about|in detail|step by step|"
                                   r"tell me a story|longer answer)\b", user_text, re.I))
+        # a day's agenda needs more room than small talk
+        world_turn = bool(extra_context and extra_context.startswith(_WORLD_TAG))
         web_offer = ""
         if web_hops > 0:
             web_offer = (" WEB TOOL available this turn: "
@@ -923,6 +988,7 @@ class Spark:
         messages[-1]["content"] += (
             "\n\n[Spoken reply: be warm and respectful; no insults, blame, threats, or sarcasm. "
             + (game_rule or (("Up to six concise sentences." if detailed else
+                              "Up to four short sentences, at most 70 words." if world_turn else
                               "One or two short sentences, at most 35 words.")
                              + " Answer only what was asked."))
             + " Never claim an action happened unless live state confirms it.]"
@@ -1047,6 +1113,7 @@ class Spark:
                 box["out"] = None
         t = threading.Thread(target=_bg, daemon=True)
         t.start()
+        self.body.eyes("looking")
         self.body.speak(filler)
         t.join(timeout=join_s)
         if t.is_alive():
@@ -1064,6 +1131,7 @@ class Spark:
 
     def converse(self, text):
         t0 = time.perf_counter()
+        self._turn_no = getattr(self, "_turn_no", 0) + 1
         # During a celebration her speaker floods her own mic: transcribed
         # fragments of her hype lines must never become user turns. Only
         # her name or an explicit stop reaches the pipeline.
@@ -1100,6 +1168,7 @@ class Spark:
                 self.brain_online = self.brain.healthy()
             if not self.brain_online:
                 log("spark", "brain offline — degrading")
+                self.body.eyes("bad")
                 self.memory.add("user", text)
                 self.body.speak(OFFLINE_LINE)
                 return
