@@ -109,7 +109,7 @@
     "sunrise": true
   },
   "pet": {
-    "greet": true,
+    "greet": false,
     "bored": true,
     "bedtime": true,
     "notices": true,
