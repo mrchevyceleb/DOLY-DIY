@@ -468,8 +468,8 @@ def listen_for_wake(frames, recognizer, cfg, wake_words, tap_check=None,
     generator every time; that bug hung the listener forever). Arms on
     sound onset, feeds Vosk a continuous stream, checks both partials
     and finalized text for the wake word, ends the session on room-relative
-    quiet. verify_wake can recover an omitted or garbled name using better ASR;
-    its transcript must contain the wake name before it can start a turn.
+    quiet. verify_wake can recover an omitted or garbled name using better ASR.
+    A short, loud name-only garble may open listening if that ASR is silent.
     Returns WakeResult on wake; False if tap_check fires.
     """
     a = cfg["audio"]
@@ -670,6 +670,23 @@ def listen_for_wake(frames, recognizer, cfg, wake_words, tap_check=None,
                                       clip_pcm=clip)
                 if real_talk(verified):
                     room.note()  # real talk that was not for her
+            elif (allow_weak and not partial_vetoed
+                  and any(name.strip().lower() in {"spark", "sparky", "hey spark", "hey sparky"}
+                          for name in wake_words)
+                  and head in {"bark", "barks", "barkley", "bart"}
+                  and [w for w in tokens if w not in {"ok", "okay", "hey"}] == [head]
+                  and peak >= max(weak_min_peak, a.get("wake_verify_fuzzy_rms", 4500))
+                  and 100 <= voiced_frames * 20 <= keyword_max_ms
+                  and len(clip) / (a["sample_rate"] * 2) <= keyword_max_ms / 1000 + .7):
+                # Live: a 600ms 'Spark!' became 'bark' at RMS 8303, while
+                # Parakeet returned nothing. Its later weather question then
+                # had no name and was ignored. Open the normal listening
+                # window, preserving queued speech, just as an exact name
+                # does on a silent verifier. Common decoys (bar/park/stark),
+                # long clips and ANY nonempty verifier transcript still fail.
+                print(f"[ear] name-only '{text}' accepted: verifier silent",
+                      file=sys.stderr, flush=True)
+                return WakeResult("Spark", clip_pcm=clip)
             # A rejected earlier segment must not suppress a name in the
             # next completed segment inside the same one-second interval.
             next_verify = 0.0

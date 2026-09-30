@@ -273,6 +273,37 @@ class VoiceLatencyTests(unittest.TestCase):
         self.assertFalse(listen_for_wake(iter(quiet), rec, CFG, ["spark"],
                                          noise_floor=lambda: 1000, verify_wake=verify))
 
+    def test_short_loud_name_garble_opens_listening_when_verifier_is_silent(self):
+        from spark.ear import RoomTalk
+        rec = Mock(feed=Mock(return_value=None), partial=Mock(return_value=""),
+                   finish=Mock(return_value="bark"))
+        verify = Mock(return_value="")
+        busy = RoomTalk()
+        for _ in range(3):
+            busy.note()
+        def listen(level=8303, duration=30, allow_weak=True, wake_words=("spark",)):
+            frames = [pcm(730)]*5 + [pcm(level)]*duration + [pcm(730)]*40
+            return listen_for_wake(iter(frames), rec, CFG, wake_words, room=busy,
+                                   noise_floor=lambda: 730, verify_wake=verify,
+                                   allow_weak=allow_weak)
+        result = listen()
+        self.assertEqual(result.text, "Spark")
+        self.assertFalse(result.command)  # only opens listening
+        self.assertFalse(result.prefix_pcm)
+        verify.assert_called_once_with(result.clip_pcm, keep=True)
+        self.assertFalse(listen(level=2500))
+        self.assertFalse(listen(duration=80))
+        self.assertFalse(listen(allow_weak=False))
+        self.assertFalse(listen(wake_words=("nova",)))
+        self.assertFalse(listen(wake_words=()))
+        for text in ("bar", "park", "stark", "bark [unk]"):
+            rec.finish.return_value = text
+            self.assertFalse(listen(), text)
+        rec.finish.return_value = "bark"
+        for text in ("The dog's bark.", "Yeah.", "Hey Park."):
+            verify.return_value = text
+            self.assertFalse(listen(), text)
+
     def test_park_in_background_conversation_needs_actual_name_verification(self):
         rec = Mock()
         rec.feed.return_value = None
