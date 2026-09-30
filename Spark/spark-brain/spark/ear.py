@@ -605,7 +605,14 @@ def listen_for_wake(frames, recognizer, cfg, wake_words, tap_check=None,
             next_verify = time.monotonic() + 1
             check_started = time.monotonic()
             clip = b"".join(audio)
-            verified = verify_wake(clip)
+            # A name-like segment may still wake her on the family hint below
+            # even when the verifier drops the name: keep the speech queued
+            # during the check, or the middle of the question is lost
+            # ('what's the address of Shepherd ... Allentown').
+            name_like = (family_head or head in _WEAK
+                         or (last_family_final_at > 0
+                             and time.monotonic() - last_family_final_at < 2.5))
+            verified = verify_wake(clip, keep=True) if name_like else verify_wake(clip)
             print(f"[ear] wake check {time.monotonic()-check_started:.2f}s: '{text}' -> '{verified}' "
                   f"(peak={peak} floor={floor:.0f} speech={voiced_frames*20}ms)",
                   file=sys.stderr, flush=True)
