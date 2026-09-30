@@ -516,23 +516,36 @@ class Pet:
             around = now - self.last_interaction < 30 * 60 or now - self.last_seen < 10 * 60
             if not around or now < self._next_notice:
                 return False
+            # Words she offers unasked are off by default: Matt records videos
+            # and sits in meetings. Without them she hints with eyes, arms and
+            # a small noise, and he can still ask.
+            talk = self._enabled("speak_first", False)
             if self._bedtime(clock) and self._enabled("bedtime") and self._govee() is not None:
                 night_key = (clock - datetime.timedelta(hours=12)).date().isoformat()
                 if self._bedtime_night != night_key:
                     self._bedtime_night = night_key
-                    return self._bedtime_offer(now)
+                    if talk:
+                        return self._bedtime_offer(now)
+                    self._next_notice = now + NOTICE_GAP_S
+                    self._eyes("SLEEPY")
+                    self._sound(stock("yawn"))
+                    return False
             if night:
                 return False
             if self._wx_news and self._enabled("notices"):
                 news, self._wx_news = self._wx_news, None
                 self._next_notice = now + NOTICE_GAP_S
                 self._eyes("LOOK_UP")
-                self._remark("(Spark noticed the weather change.)", news)
+                if talk:
+                    self._remark("(Spark noticed the weather change.)", news)
                 return False
             if (self._enabled("notices") and now - self.session_start >= 3 * 3600
                     and now - self.last_seen < 5 * 60 and now - self._stretch_at >= 3 * 3600):
                 self._stretch_at = now
                 self._next_notice = now + NOTICE_GAP_S
+                if not talk:
+                    self._arms(150, 20)   # she stretches: a hint, not a nag
+                    return False
                 self.pending = {"kind": "stretch", "at": now}
                 hours = int((now - self.session_start) // 3600)
                 self._eyes("LOOK_UP")
@@ -544,6 +557,8 @@ class Pet:
                 self._next_bored = now + 3 * 3600
                 self._next_notice = now + NOTICE_GAP_S
                 self._anim("bored")
+                if not talk:
+                    return False
                 self.pending = {"kind": "play_offer", "at": now}
                 self._remark("(Matt has been quiet for a long time.)",
                              "Psst. Matt? I'm bored. Wanna play a game?")

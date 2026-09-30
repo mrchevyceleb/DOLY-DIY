@@ -549,7 +549,8 @@ class Spark:
                     if pet is not None and pet.night():
                         pet.night_flourish()
                     else:
-                        self.body.idle_flourish()
+                        self.body.idle_flourish(
+                            sounds=pet is None or time.time() >= pet.hushed_until)
                     t = time.time()
                     next_flourish = t + idle_cfg.get("flourish_s", 50)
                     idle_action["act"] = None
@@ -935,8 +936,8 @@ class Spark:
             carry = time.time() - at < 90 and turn - last_turn == 1
             wanted = world.wanted(user_text, last if carry else None)
             if wanted:
-                self.body.eyes("looking")
-                extra_context = world.context(wanted)
+                with self.body.busy("looking"):
+                    extra_context = world.context(wanted)
                 self._world_last = (time.time(), wanted, turn)
                 web_hops = 0
         # The user turn enters memory only once a reply exists (see
@@ -1007,7 +1008,8 @@ class Spark:
         started = time.perf_counter()
         try:
             sentences = spoken_sentences(self.brain.chat_stream(messages), detailed=detailed)
-            first = next(sentences, "")
+            with self.body.busy("thinking"):
+                first = next(sentences, "")
             tool = websearch.parse_tool_call(first) if web_hops > 0 and first else None
             if tool is not None:
                 # kill the stream — she wants the internet, not her own words
@@ -1124,7 +1126,8 @@ class Spark:
         t.start()
         self.body.eyes("looking")
         self.body.speak(filler)
-        t.join(timeout=join_s)
+        with self.body.busy("looking"):
+            t.join(timeout=join_s)
         if t.is_alive():
             log("spark", f"web tool still running after {join_s}s — treating as failed")
         context = render(box.get("out"))

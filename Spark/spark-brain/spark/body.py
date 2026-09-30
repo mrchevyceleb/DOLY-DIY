@@ -3,6 +3,7 @@
 If a subsystem fails to init (or the module doesn't exist), Spark keeps
 running with what works. Availability is tracked in self.has[...].
 """
+import contextlib
 import os
 import re
 import sys
@@ -2406,24 +2407,84 @@ class Body:
             pass
 
     _CURIOS = ("LOOK_LEFT", "LOOK_RIGHT", "DISCOVER", "LOOK_UP", "SCAN",
-               "SNEEZE", "BLINK_BIG", "SPARKLING")
+               "SNEEZE", "BLINK_BIG", "SPARKLING", "LOOK_UP_L", "LOOK_UP_R",
+               "LOOK_DOWN_L", "LOOK_DOWN_R", "ATTENTION_LEFT", "ATTENTION_RIGHT",
+               "PUZZLED", "CHEERFUL", "SHY", "FINE", "LOOK_AHEAD_SLOW", "MOODY_LR")
+    # short, soft stock chirps (0.5 to 1.5 s): a pet's little noises, no words
+    _CHIRPS = ("/.doly/sounds/sound/idle (2).wav", "/.doly/sounds/sound/idle (3).wav",
+               "/.doly/sounds/sound/idle (4).wav", "/.doly/sounds/sound/idle (5).wav",
+               "/.doly/sounds/sound/idle (6).wav", "/.doly/sounds/sound/idle (7).wav",
+               "/.doly/sounds/sound/idle (8).wav", "/.doly/sounds/sound/happy (2).wav",
+               "/.doly/sounds/sound/happy (4).wav")
+    _FIDGETS = (
+        ((130, 130), (20, 20)),                        # a stretch
+        ((150, 20), (20, 20)),                         # one-armed reach
+        ((20, 150), (20, 20)),
+        ((60, 60), (20, 20)),                          # a little shrug
+        ((70, 20), (40, 20), (70, 20), (20, 20)),      # a tiny wave
+        ((50, 50), (30, 30), (50, 50), (20, 20)),      # a happy bounce
+        ((90, 20), (20, 90), (20, 20)),                # a sway
+    )
 
-    def idle_flourish(self):
-        """A little life while waiting: a curious glance, sometimes a small
-        stretch. NO random loud noises — a cute pet, not an annoying one.
-        Runs on the main thread, so a rare short animation is GIL-safe."""
+    def idle_flourish(self, sounds=True):
+        """A little life while waiting: a glance, sometimes a fidget, and
+        now and then a tiny chirp. Never words: Matt may be recording or
+        in a meeting. sounds=False (hushed, night) keeps her silent.
+        Runs on the main thread, so the short sound is GIL-safe."""
         import random
+        icfg = self.cfg.get("idle", {}) or {}
         try:
             self.mood_eyes(random.choice(self._CURIOS))
-            if random.random() < 0.2:
-                # a stretch, a one-armed reach, or a little shrug
-                ang = random.choice((110, 130, 150))
-                left, right = random.choice(((ang, ang), (ang, 20), (20, ang), (60, 60)))
-                self.arm_pose(left, right, speed=25, wait=False)
-                time.sleep(0.6)
-                self.arm_pose(20, 20, speed=25, wait=False)
+            if random.random() < float(icfg.get("fidget_chance", 0.3)):
+                for left, right in random.choice(self._FIDGETS):
+                    if not self.arm_pose(left, right, speed=30, wait=False):
+                        break
+                    time.sleep(0.5)
+            if (sounds and icfg.get("chirps", True) and self.has.get("sound")
+                    and not self.sleeping and not self.speaking_recently()
+                    and random.random() < float(icfg.get("chirp_chance", 0.1))):
+                path = random.choice(self._CHIRPS)
+                if os.path.exists(path):
+                    # her ears must not take her own chirp for a voice
+                    self._speaking_until = max(getattr(self, "_speaking_until", 0),
+                                               time.time() + self._wav_duration(path) + 0.25)
+                    self.play_sfx(path, defer=False)
         except Exception as e:
             _log(f"idle_flourish: {e}")
+
+    _BUSY_EXPRS = {
+        "thinking": ("THINK", "CONCENTRATE", "SCAN", "LOOK_UP_L", "LOOK_UP_R", "PUZZLED"),
+        "looking": ("DISCOVER", "FOCUS", "SCAN", "LOOK_LEFT", "LOOK_RIGHT", "ZOOM_IN"),
+    }
+
+    @contextlib.contextmanager
+    def busy(self, state="thinking"):
+        """Visibly working while an answer is on its way: her eyes keep
+        changing, and a slow one earns a hand-to-chin. Eyes and arms only,
+        from a helper thread (no sound, so no GIL clash with the ears)."""
+        import random
+        self.eyes(state)
+        stop = threading.Event()
+        box = {"arm": False}
+
+        def run():
+            names = self._BUSY_EXPRS.get(state, ())
+            started = time.monotonic()
+            while not stop.wait(1.6):
+                if names:
+                    self.mood_eyes(random.choice(names))
+                if (not box["arm"] and time.monotonic() - started > 3
+                        and self.has.get("arm") and not self.arms_held()):
+                    box["arm"] = bool(self.arm_pose(80, 20, speed=20, wait=False))
+        t = threading.Thread(target=run, daemon=True)
+        t.start()
+        try:
+            yield
+        finally:
+            stop.set()
+            t.join(1.0)
+            if box["arm"]:
+                self.arm_pose(20, 20, speed=30, wait=False)
 
     def is_on_dock(self):
         self.refresh_power()

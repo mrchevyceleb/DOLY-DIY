@@ -4,7 +4,7 @@ import socket
 import sys
 import unittest
 from pathlib import Path
-from unittest.mock import Mock, patch
+from unittest.mock import MagicMock, Mock, patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 if not hasattr(os, "getuid"):
@@ -124,7 +124,7 @@ class ToolLoopTests(unittest.TestCase):
         spark.cfg = {"prompt": "You are Spark.", "moods": False,
                      "web": {"enabled": True, "max_hops": 2,
                              "page_max_chars": 100, "page_timeout_s": 6}}
-        spark.body = Mock()
+        spark.body = MagicMock()
         spark.body.mood = "happy"
         spark.body.speak_stream.side_effect = lambda gen: list(gen)  # consume like the real pipeline
         spark._body_context = lambda: ""

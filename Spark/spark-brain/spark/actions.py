@@ -212,8 +212,8 @@ def _apply(router, plan):
 def run(router, raw):
     """Plan and carry out a compound request. False: nothing was planned,
     so the caller routes the sentence the ordinary way."""
-    router.body.eyes("thinking")
-    plan = _ask(router.brain, raw, sorted((router.cfg.get("govee", {}) or {}).get("shortcuts") or {}))
+    with router.body.busy("thinking"):
+        plan = _ask(router.brain, raw, sorted((router.cfg.get("govee", {}) or {}).get("shortcuts") or {}))
     said = _apply(router, plan) if plan else []
     if not said:
         router.body.eyes("idle")
