@@ -223,6 +223,11 @@ resumes after playback; voice interruption during a routine is not implemented.
   `?mood=good|bad|info` picks her eyes and lights, `?urgent=1` gets through
   while she is asleep, hushed or it is night. `tools/spark-say` wraps the call:
   `spark-say good "Training is done"` or `spark-say --run npm run build`.
+- **Several things at once.** "Dim the lights and wake me at seven", "make it
+  cozy", "movie night": the brain turns the sentence into a short plan (lights,
+  timer, alarm, reminder, note, cancel) and `spark/actions.py` runs it and says
+  what happened. Movement is never planned by the brain; one movement clause
+  ("... and go home") runs last through the usual strict matcher.
 - **Status display.** Eyes and LEDs show what she is doing: cyan listening,
   purple thinking, orange fetching from outside, yellow speaking, green good
   news, red bad news or brain offline.
@@ -233,6 +238,7 @@ resumes after playback; voice interruption during a routine is not implemented.
 |---|---|
 | `spark/world.py` | Matt's calendar, tasks, mail and server status from TARDIS |
 | `spark/inbox.py` | `/announce` listener and queue |
+| `spark/actions.py` | compound commands and room moods: brain plans, code acts |
 | `tools/spark-say` | say a line through Spark from any machine on the network |
 | `prompt.md` | Spark personality v4 (source of truth) |
 | `config.json` | endpoints, model, VAD thresholds, voice + FX, roam/battery |

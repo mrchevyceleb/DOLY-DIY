@@ -14,6 +14,7 @@ import threading
 import time
 import urllib.request
 
+from . import actions
 from . import commands as cmds
 from . import search as websearch
 from .govee import GoveeLights
@@ -216,6 +217,12 @@ class Router:
                         return self._set_alarm_from(parsed)
             self._last_set = None  # accepted, or not a correction
 
+        # several things in one breath, or a mood for the room: the brain
+        # plans, this code acts. Nothing planned falls through to the
+        # single-command routes below.
+        if actions.wanted(raw_text) and actions.run(self, raw_text):
+            return True
+
         # imagine prompts: she physically acts it out while narrating
         if _IMAGINE_RE.search(raw_text) and not cmds._NEGATION_RE.search(text):
             return self._imagine(raw_text)
@@ -254,10 +261,21 @@ class Router:
         if self.govee and self.govee.enabled and _GOVEE_SHUTDOWN_RE.match(low.strip()):
             self.body.speak(self.govee.turn(False))
             return True
-        if (self.govee and self.govee.enabled and _GOVEE_RE.search(low)
-                and not _HERS_LIGHTS_RE.search(low) and "eye" not in low):
-            reply = self._govee_lights(text)
+        if self.govee and self.govee.enabled and not _HERS_LIGHTS_RE.search(low):
+            reply = self.light_shortcut(low)
             if reply is not None:
+                self._lights_at = time.time()
+                self.body.speak(reply)
+                return True
+        # right after a light command the word 'lights' can be dropped:
+        # 'gaming lights' ... 'warm white' ... 'brighter'
+        follow = (time.time() - getattr(self, "_lights_at", 0) < 120
+                  and len(low.split()) <= 4)
+        if (self.govee and self.govee.enabled and (_GOVEE_RE.search(low) or follow)
+                and not _HERS_LIGHTS_RE.search(low) and "eye" not in low):
+            reply = self._govee_lights(text, named=bool(_GOVEE_RE.search(low)))
+            if reply is not None:
+                self._lights_at = time.time()
                 self.body.speak(reply)
                 return True
 
@@ -335,10 +353,44 @@ class Router:
         return True
 
     # ---------------------------------------------------------------- govee
-    def _govee_lights(self, text):
-        """Parse a room-lights request; None lets other handlers try."""
+    def light_shortcut(self, low, name=None):
+        """Matt's named looks ('gaming lights', 'gaming mode'): a scene or
+        color plus a brightness. None when the sentence asks for none."""
+        shortcuts = (self.cfg.get("govee", {}) or {}).get("shortcuts") or {}
+        look = shortcuts.get(name) if name else None
+        for key, spec in ({} if name else shortcuts).items():
+            words = "|".join(re.escape(w) for w in (spec.get("say") or [key]))
+            if re.search(rf"\b(?:{words})\s+(?:lights?|lighting|mode)\b|"
+                         rf"\blights?\s+(?:to|for|on)\s+(?:{words})\b", low):
+                name, look = key, spec
+                break
+        if not look:
+            return None
+        _log(f"light shortcut: {name}")
+        g = self.govee
+        if look.get("scene"):
+            reply = g.scene(look["scene"])
+        elif look.get("color"):
+            reply = g.color(look["color"])
+        elif look.get("temp"):
+            reply = g.color_temp(look["temp"])
+        else:
+            reply = g.turn(True)
+        failed = re.compile(r"I (?:can't|couldn't|don't)|Hmm")
+        if failed.match(str(reply)):
+            return reply
+        if look.get("brightness"):
+            dimmed = g.brightness(look["brightness"])
+            if failed.match(str(dimmed)):
+                return dimmed
+        return f"{name.capitalize()} lights on."
+
+    def _govee_lights(self, text, named=True):
+        """Parse a room-lights request; None lets other handlers try.
+        named=False: a follow-up that never said 'lights'."""
         low = text.lower()
         g = self.govee
+        normal_k = (self.cfg.get("govee", {}) or {}).get("normal_kelvin", 4000)
         # on / off
         if _GOVEE_OFF_RE.search(low):
             return g.turn(False)
@@ -347,21 +399,29 @@ class Router:
         # brightness: "dim (to N%)", "set to 40", "half", word numbers
         m = re.search(r"(?:dim|brighten|brightness|set|turn)[^0-9]{0,20}"
                       r"(\d+|" + "|".join(cmds._NUM_WORDS) + r")\s*(?:%|percent)?\b", low)
-        if m and re.search(r"\b(?:dim|brighten|brightness|percent)\b", low):
+        # 'set my lights to 40%' arrives as '... to 40': the sign is stripped
+        if m and re.search(r"\b(?:dim|brighten|brightness|percent)\b|\bto\s+\w+\s*$", low):
             pct = m.group(1)
             pct = cmds._NUM_WORDS.get(pct, pct)
             try:
                 return g.brightness(round(float(pct)))
             except (TypeError, ValueError):
                 pass
-        if re.search(r"\bdim\b", low):
+        # out of a scene or a color, back to plain white at full
+        if re.search(r"\b(?:normal|regular|plain|default|ordinary)\b", low):
+            g.color_temp(normal_k)
+            reply = g.brightness(100)
+            return "Back to normal lights." if str(reply).startswith("Lights at") else reply
+        if re.search(r"\bdim(?:mer)?\b|\bdarker\b", low):
             return g.brightness(30)
         # Matt's shortcut: 'bright lights' is both lamps at full
         if (re.search(r"\bbright\b|\bfull\b", low)
                 and not re.match(r"\s*(?:how|what|why|are|is|was|were|do|does|did)\b", low)):
+            # brightness alone leaves a scene like Aurora running
+            g.color_temp(normal_k)
             return g.brightness(100)
-        if re.search(r"\bbrighten\b", low):
-            return g.brightness(75)
+        if re.search(r"\bbrighten\b|\bbrighter\b", low):
+            return g.brightness(75 if "brighten" in low else 100)
         # white temperatures
         if re.search(r"\bwarm\s*white\b|\bwarmer\b", low):
             return g.color_temp(3200)
@@ -371,6 +431,12 @@ class Router:
         color = cmds.extract_color(text)
         if color:
             return g.color(color)
+        # one of the lamp's own scenes: 'set my lights to aurora'
+        scene = g.find_scene(low)
+        if isinstance(scene, str):
+            return g.scene(scene)
+        if not named:
+            return None
         # status / discovery check
         if re.search(r"\b(?:status|see|find|which|how many)\b", low):
             return g.status()
@@ -815,11 +881,15 @@ class Router:
         return self._set_alarm_from(parsed)
 
     def _set_alarm_from(self, parsed):
+        self.body.speak(self._arm_alarm(parsed))
+        return True
+
+    def _arm_alarm(self, parsed):
+        """Set the alarm (and its sunrise); returns the line to say."""
         hour, minute, mer = parsed
         when = next_occurrence(hour, minute, mer)
         if when is None:
-            self.body.speak("I don't think that's a valid time.")
-            return True
+            return "I don't think that's a valid time."
         self._last_set = {"kind": "alarm", "at": time.time()}
         self.alarms.add_alarm(when.timestamp(), label=fmt_clock(when.hour, when.minute))
         # morning alarms: the lamps rise like a sunrise for ten minutes first
@@ -830,8 +900,7 @@ class Router:
             if lead >= 120:
                 self.alarms.add_timer(when.timestamp() - lead - time.time(),
                                       label=str(int(lead)), kind="sunrise")
-        self.body.speak(f"Alarm set for {fmt_clock(when.hour, when.minute)}.")
-        return True
+        return f"Alarm set for {fmt_clock(when.hour, when.minute)}."
 
     def _set_reminder(self, text):
         """'remind me to X in N minutes' -> labeled timer."""
@@ -864,7 +933,8 @@ class Router:
         if secs < 3600:
             m = secs / 60
             return f"Timer set for {int(m) if m == int(m) else round(m, 1)} minutes"
-        return f"Timer set for {round(secs / 3600, 1)} hours"
+        h = round(secs / 3600, 1)
+        return f"Timer set for {h:g} hour{'' if h == 1 else 's'}"
 
     # --------------------------------------------------------------- imagine
     def _imagine(self, raw_text):

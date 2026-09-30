@@ -37,7 +37,7 @@ class Brain:
             return False
 
     # ------------------------------------------------------------------- chat
-    def chat_stream(self, messages, on_delta=None, fallback=True):
+    def chat_stream(self, messages, on_delta=None, fallback=True, **sampling):
         """Yield text deltas. Falls back to the small model on model errors.
 
         Returns a generator; total text is also fed to on_delta callback.
@@ -48,7 +48,7 @@ class Brain:
                 # An empty reply is NOT a reason to fall back: the fallback
                 # isn't resident on Moria, and loading it took 15 GB (36s)
                 # beside a training run. The caller speaks a retry prompt.
-                yield from self._stream_once(model, messages, on_delta)
+                yield from self._stream_once(model, messages, on_delta, **sampling)
                 if model != self.model:
                     self.using_fallback = True
                 return
@@ -64,9 +64,9 @@ class Brain:
                     json.JSONDecodeError, ValueError) as e:
                 raise BrainOffline(str(e)) from e
 
-    def chat(self, messages, fallback=True):
+    def chat(self, messages, fallback=True, **sampling):
         parts = []
-        for delta in self.chat_stream(messages, fallback=fallback):
+        for delta in self.chat_stream(messages, fallback=fallback, **sampling):
             parts.append(delta)
         return "".join(parts)
 
@@ -76,12 +76,12 @@ class Brain:
             cands.append(self.fallback_model)
         return cands
 
-    def _stream_once(self, model, messages, on_delta):
+    def _stream_once(self, model, messages, on_delta, temperature=None, max_tokens=None):
         payload = {
             "model": model,
             "messages": messages,
-            "max_tokens": self.max_tokens,
-            "temperature": self.temperature,
+            "max_tokens": max_tokens or self.max_tokens,
+            "temperature": self.temperature if temperature is None else temperature,
             "stream": True,
         }
         if self.reasoning_effort:

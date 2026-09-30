@@ -35,6 +35,11 @@ _DEFAULTS = {
     "govee": {
         "enabled": True,       # room-light voice control (LAN first)
         "api_key": None,       # Govee Home app: Me -> Apply for API Key
+        # named looks: "gaming lights", "gaming mode". 'say' lists the
+        # words that call one up; scene is one of the lamp's own scenes.
+        "shortcuts": {
+            "gaming": {"say": ["gaming", "game"], "scene": "Aurora", "brightness": 60},
+        },
     },
     "alerts": {
         "celebrate": True,       # fired timers/alarms party until stopped

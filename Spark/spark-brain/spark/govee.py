@@ -54,7 +54,8 @@ class GoveeLights:
     """Thread-safe facade over the LAN and cloud clients."""
 
     _CLOUD_INSTANCE = {"turn": "powerSwitch", "brightness": "brightness",
-                       "color": "colorRgb", "temp": "colorTemperatureK"}
+                       "color": "colorRgb", "temp": "colorTemperatureK",
+                       "scene": "lightScene"}
 
     def __init__(self, cfg):
         g = cfg.get("govee", {}) or {}
@@ -257,6 +258,9 @@ class GoveeLights:
             r, g, b = value
             return {"type": "devices.capabilities.color_setting",
                     "instance": "colorRgb", "value": (r << 16) + (g << 8) + b}
+        if op == "scene":
+            return {"type": "devices.capabilities.dynamic_scene",
+                    "instance": "lightScene", "value": value}
         return {"type": "devices.capabilities.color_setting",
                 "instance": "colorTemperatureK",
                 "value": max(2000, min(9000, int(value)))}
@@ -273,6 +277,11 @@ class GoveeLights:
             instance = self._CLOUD_INSTANCE.get(op)
             if caps and instance and instance not in caps:
                 return "skip"
+            if op == "scene":
+                # each model numbers its scenes differently
+                value = (self._scenes(dev).get(value) or (None, None))[1]
+                if value is None:
+                    return "skip"
             try:
                 self._cloud("POST", "/device/control",
                             {"requestId": uuid.uuid4().hex,
@@ -283,6 +292,8 @@ class GoveeLights:
             except Exception as e:
                 _log(f"cloud control failed: {e}")
                 return None
+        if op == "scene":
+            return "skip"   # named scenes exist only through the cloud
         name, val = self._lan_payload(op, value)
         payload = {"msg": {"cmd": "dev", "device": dev["device"],
                            "cmd": {"command": name, "data": val}}}
@@ -365,6 +376,53 @@ class GoveeLights:
             return why
         n = (name if isinstance(name, str) else "that color").replace("_", " ").lower()
         return f"Lights {n}."
+
+    # ------------------------------------------------------------ scenes
+    def _scenes(self, dev):
+        """The light's own scene list ('Aurora', 'Movie', ...): lowercase
+        name -> (name, value). Cloud only; fetched once per model."""
+        if not (self.api_key and "lightScene" in (dev.get("caps") or ())):
+            return {}
+        cache = self.__dict__.setdefault("_scene_cache", {})
+        if dev["model"] not in cache:
+            try:
+                reply = self._cloud("POST", "/device/scenes",
+                                    {"requestId": uuid.uuid4().hex,
+                                     "payload": {"sku": dev["model"], "device": dev["device"]}})
+                cache[dev["model"]] = {
+                    o["name"].lower(): (o["name"], o["value"])
+                    for c in reply.get("payload", {}).get("capabilities", [])
+                    if c.get("instance") == "lightScene"
+                    for o in c.get("parameters", {}).get("options", [])}
+            except Exception as e:
+                _log(f"scene list failed: {e}")
+                return {}
+        return cache[dev["model"]]
+
+    def find_scene(self, text, label="all"):
+        """The scene named in a sentence ('set my lights to aurora'), or None.
+        The longest name wins, so 'racing game' is not just 'game'."""
+        low = " " + " ".join((text or "").lower().split()) + " "
+        found = None
+        with self._lock:
+            for dev in self._targets(label):
+                for key, (name, _) in self._scenes(dev).items():
+                    if f" {key} " in low and (found is None or len(name) > len(found)):
+                        found = name
+        return found
+
+    def scene(self, name, label="all"):
+        key = (name or "").strip().lower()
+        self._user_cmd_at = time.time()
+        with self._lock:
+            devs = [d for d in self._targets(label) if key in self._scenes(d)]
+        if not devs:
+            return f"I don't have a light scene called {name}."
+        shown = self._scenes(devs[0])[key][0]
+        state, why = self._apply("scene", key, label)
+        if state == "none" or state == "error":
+            return why
+        return f"{shown} lights."
 
     def color_temp(self, kelvin, label="all"):
         kelvin = max(2000, min(9000, int(kelvin)))
