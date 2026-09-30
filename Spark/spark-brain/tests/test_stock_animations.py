@@ -134,6 +134,7 @@ class StockAnimationTests(unittest.TestCase):
             event(at, "left", "Down")
             event(at+.15, "left", "Up")
         self.assertEqual(body._pending_pet, "petting3")
+        self.assertEqual([call.args[0] for call in body.mood_eyes.call_args_list], ["HEARTS"]*4)
         body.anim.stop.assert_not_called()
         spark.talk_trigger.set.assert_not_called()
         body.anim.playing.return_value = False
@@ -150,7 +151,8 @@ class StockAnimationTests(unittest.TestCase):
     def test_pet_animation_exempts_touch_only_when_it_contains_no_motors(self):
         with tempfile.TemporaryDirectory() as tmp:
             for motor in (False, True):
-                self.program(tmp, '<block type="delay_ms"><field name="delay_ms">50</field></block>'
+                self.program(tmp, '<block type="eye_animations"><field name="animation">HAPPY</field></block>'
+                             + '<block type="delay_ms"><field name="delay_ms">50</field></block>'
                              + ('<block type="arm_set_angle"/>' if motor else ''))
                 Path(tmp, "test.xml").replace(Path(tmp, "petting1.xml"))
                 rig = Rig(tmp)
@@ -160,6 +162,8 @@ class StockAnimationTests(unittest.TestCase):
                     rig.advance(seconds)
                 rig.anim._stop.wait = wait
                 self.assertTrue(rig.play("petting1"))
+                self.assertEqual([e[2] for e in rig.events if e[0] == "eye"],
+                                 ["HAPPY" if motor else "HEARTS"])
                 self.assertTrue(flags)
                 self.assertEqual(set(flags), {not motor})
                 self.assertFalse(rig.anim.petting)

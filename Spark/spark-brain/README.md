@@ -106,7 +106,7 @@ running with `qwen/qwen3.6-35b-a3b` loaded, context 8192, TTL off.
   waits up to five seconds for a fresh IMU bump. Proximity and self-motion
   during setup do not count as contact.
 - **Petting the top touch pads** -> the three original stock pet reactions,
-  with happy eyes, lights and affectionate sounds. Start with a gentle stroke
+  with animated heart eyes, lights and affectionate sounds. Start with a gentle stroke
   lasting about a second; continued strokes build up the reaction. Petting
   reactions accept more strokes instead of cancelling, and coalesce queued
   strokes into the latest level. Touching a moving routine still stops it.

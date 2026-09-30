@@ -260,16 +260,14 @@ class Spark:
                 # Once petting has started, short continuing strokes are
                 # affection too; they must not switch to tap-to-talk.
                 self.body._bump_mood(1)
+                self.body.mood_eyes("HEARTS")
                 tstate["pets"] = [t for t in tstate["pets"] if now - t < 30] + [now]
                 n = len(tstate["pets"])
                 if n >= 4:
-                    self.body.mood_eyes("HEARTS")
                     self.body.queue_anim("petting3")
                 elif n >= 2:
-                    self.body.mood_eyes("SPARKLING")
                     self.body.queue_anim("petting2")
                 else:
-                    self.body.mood_eyes("HAPPY")
                     self.body.queue_anim("petting1")
                 log("spark", f"pet x{n}: happy")
                 return
@@ -623,7 +621,7 @@ class Spark:
                     if tap_turn:
                         # a tap and no words: it was a pat, not a question
                         log("spark", "tap with no words: a pat")
-                        self.body.mood_eyes("HAPPY")
+                        self.body.mood_eyes("HEARTS")
                         self.body._bump_mood(1)
                         self.body.queue_anim("petting1")
                         continue

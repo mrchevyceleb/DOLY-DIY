@@ -180,6 +180,8 @@ class AnimPlayer:
         if not self.body.has.get("eye"):
             return
         name = f.get("animation", "").upper().replace(" ", "_")
+        if self.petting:
+            name = "HEARTS"  # stock pet expressions must not overwrite heart eyes
         if self.body.mood_eyes("NERVOUS" if name == "SHAKY" else name) is False:
             raise RuntimeError(f"cannot show expression {name}")
         return self._state_completion(lambda: self.body._eye.is_animating(), 15, ("eye",))
