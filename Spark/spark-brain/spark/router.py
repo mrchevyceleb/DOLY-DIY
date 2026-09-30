@@ -66,6 +66,10 @@ _TIMER_QUERY_RE = re.compile(r"\b(?:how much|how long|time left|status)\b[^.]*\b
 _REMINDER_RE = re.compile(r"\bremind me\b", re.I)
 _REMINDER_PARSE_RE = re.compile(r"remind me\s+(?:to\s+|about\s+|that\s+)?(.+?)\s+(?:in|after)\s+(.+)$", re.I)
 
+_REMINDER_AT_RE = re.compile(r"remind me\s+(?:to\s+|about\s+|that\s+)?(.+?)\s+(?:at|by)\s+"
+                             r"((?:\d|noon|midnight|one|two|three|four|five|six|seven|eight|"
+                             r"nine|ten|eleven|twelve).*)$", re.I)
+
 EDGE_REFUSAL = ("I can't drive here — I'm either on my dock or too close to an edge. "
                 "Put me somewhere with room and ask again!")
 DOCK_REFUSAL = "I couldn't leave the charger safely, so I'm staying parked."
@@ -714,6 +718,10 @@ class Router:
                 ramp = 600
             threading.Thread(target=self._sunrise, args=(ramp,), daemon=True).start()
             return
+        # told goodnight, she still has to go off: asleep, her queued
+        # sounds are never played
+        if getattr(b, "sleeping", False) is True:
+            b.wake_up()
         if kind in ("timer", "alarm") and alerts.get("celebrate", True):
             line = (f"Alarm! {label or 'Time to get moving!'} Time to celebrate!"
                     if kind == "alarm" else
@@ -906,12 +914,23 @@ class Router:
         """'remind me to X in N minutes' -> labeled timer."""
         m = _REMINDER_PARSE_RE.search(text)
         if not m or not cmds.parse_timer(m.group(2)):
+            # 'remind me to call Kim at three thirty': a clock time
+            at = _REMINDER_AT_RE.search(text)
+            parsed = cmds.parse_clock_time(at.group(2)) if at else None
+            when = next_occurrence(*parsed) if parsed else None
+            if when is not None:
+                label = at.group(1).strip().strip(".,!")
+                self.alarms.add_timer(when.timestamp() - time.time(), label=label,
+                                      kind="reminder")
+                self.body.speak(f"Okay, I'll remind you to {label} at "
+                                f"{fmt_clock(when.hour, when.minute)}.")
+                return True
             self.body.speak("When should I remind you?")
             return True
         label = m.group(1).strip().strip(".,!")
         secs = cmds.parse_timer(m.group(2))
         self.alarms.add_timer(secs, label=label, kind="reminder")
-        self.body.speak(f"Okay — I'll remind you to {label} in {self._describe_timer(secs).lower()}.")
+        self.body.speak(f"Okay — I'll remind you to {label} in {self._describe_timer(secs)[len('Timer set for '):]}.")
         return True
 
     # --------------------------------------------------------------- timer
