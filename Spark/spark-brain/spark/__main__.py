@@ -397,6 +397,15 @@ class Spark:
                 raise RuntimeError("microphone probe failed")
         log("spark", "microphone verified")
         sd_notify("READY=1")
+        # A native camera call once froze the whole process while holding
+        # the interpreter lock: deaf, no thread here able to notice. The
+        # check lives in systemd (WatchdogSec): silence gets her restarted.
+        if os.environ.get("WATCHDOG_USEC"):
+            def _heartbeat():
+                while True:
+                    sd_notify("WATCHDOG=1")
+                    time.sleep(10)
+            threading.Thread(target=_heartbeat, daemon=True).start()
         inbox = getattr(self, "inbox", None)
         if inbox is not None:
             inbox.start()

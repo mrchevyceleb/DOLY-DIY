@@ -10,6 +10,9 @@ WorkingDirectory=/opt/spark/app
 ExecStart=/opt/spark/venv/bin/python -m spark
 Restart=always
 RestartSec=5
+# a frozen process (native call deadlocked holding the GIL) stops the
+# heartbeat in spark/__main__.py; systemd then restarts her
+WatchdogSec=60
 # allow generous startup: Vosk model load + mic + hardware init happen before READY=1
 TimeoutStartSec=120
 User=root
