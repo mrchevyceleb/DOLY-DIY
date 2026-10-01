@@ -273,6 +273,48 @@ class VoiceLatencyTests(unittest.TestCase):
         self.assertFalse(listen_for_wake(iter(quiet), rec, CFG, ["spark"],
                                          noise_floor=lambda: 1000, verify_wake=verify))
 
+    def test_hey_phrase_is_required_across_wake_paths(self):
+        from spark.ear import addressed_command, has_wake_name
+        words = ["hey spark", "hey sparky"]
+        for text in ("Spark.", "Sparky, hi.", "Okay Spark.", "Hey Park."):
+            self.assertFalse(has_wake_name(text, words), text)
+        self.assertTrue(has_wake_name("Hey, Spark!", words))
+        self.assertIsNone(addressed_command("Weather today, Spark?", words))
+        self.assertIsNone(addressed_command("Hello. Spark, weather today?", words))
+        self.assertEqual(addressed_command("Weather today, hey Spark?", words), "Weather today?")
+        frames = [pcm(730)]*5 + [pcm(8303)]*30 + [pcm(730)]*40
+        for local, verified, accepted in (
+            ("spark", None, False), ("hey spark", None, True),
+            ("hey spark", "", True), ("hey spark", "Spark.", False),
+            ("hey spark", "A spark.", True), ("hey sparky", "A Sparky!", True),
+            ("spark", "A spark.", False), ("bark", "A spark.", False),
+            ("hey spark", "A spark started the fire.", False),
+            ("hey spark", "Park, stop.", False), ("hey spark", "Hey Spark.", True),
+            ("bark", "", False), ("bart", "Bart.", False),
+            ("barkley", "Weather today.", False), ("bark", "Park, stop.", False),
+            ("spark", "Spark, weather today?", False),
+            ("spark", "Hello. Spark, weather today?", False),
+            ("spark", "Hey Spark, weather today?", True),
+            ("bark", "Hello. Hey Spark, weather today?", True),
+            ("bark", "Weather today, hey Spark?", True),
+        ):
+            for partial in ("", local):
+                with self.subTest(local=local, verified=verified, partial=partial), \
+                        patch("sys.stderr", new=io.StringIO()):
+                    rec = Mock(feed=Mock(return_value=None), partial=Mock(return_value=partial),
+                               finish=Mock(return_value=local))
+                    verify = None if verified is None else Mock(return_value=verified)
+                    result = listen_for_wake(iter(frames), rec, CFG, words,
+                                             noise_floor=lambda: 730, verify_wake=verify)
+                    self.assertEqual(bool(result), accepted)
+        # A partial 'A spark' must wait for the rest of background speech.
+        rec = Mock(feed=Mock(return_value=None), partial=Mock(return_value="hey spark"),
+                   finish=Mock(return_value="hey spark"))
+        verify = Mock(side_effect=["A spark.", "A spark started the fire."])
+        self.assertFalse(listen_for_wake(iter(frames), rec, CFG, words,
+                                        noise_floor=lambda: 730, verify_wake=verify))
+        self.assertEqual(verify.call_count, 2)
+
     def test_short_loud_name_garble_opens_listening_when_verifier_is_silent(self):
         from spark.ear import RoomTalk
         rec = Mock(feed=Mock(return_value=None), partial=Mock(return_value=""),

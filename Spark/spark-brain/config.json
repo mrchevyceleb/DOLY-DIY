@@ -65,9 +65,7 @@
   "wake": {
     "enabled": true,
     "words": [
-      "spark",
       "hey spark",
-      "sparky",
       "hey sparky"
     ],
     "chirp": "/.doly/sounds/wuw/wuw_1.wav",

@@ -73,13 +73,14 @@ running with `qwen/qwen3.6-35b-a3b` loaded, context 8192, TTL off.
 
 ## Runtime
 
-- **Say 'Spark'** (or tap her) -> she listens -> speak -> silence ends turn.
+- **Say 'Hey Spark'** (or 'Hey Sparky', or tap her) -> she listens -> speak -> silence ends turn.
 - A continuous 150 Hz high-pass filter removes DC/mains hum before either
   recognizer; `audio.highpass_hz: 0` disables it for diagnosis. WebRTC speech
   detection separates speech from fan/room noise for wake
   onset and the end of commands. If Vosk garbles or drops the name, a bounded
-  check of the original speech with Moria must confirm "Spark" before
-  accepting that turn; unrelated speech cannot execute a command.
+  check of the original speech with Moria must confirm "Hey Spark" before
+  accepting that turn. Bare names and fuzzy name matches cannot start a
+  conversation; follow-up replies need no wake phrase while she's listening.
   Clear wake words continue to work locally when Moria is unavailable.
   Scheduled idle actions wait for a quiet gap rather than interrupting a
   wake word already being decoded.

@@ -188,6 +188,14 @@ class ApproachTests(unittest.TestCase):
         decoder.AcceptWaveform.return_value = False
         decoder.PartialResult.return_value = '{"partial":"stop"}'
         self.assertTrue(spark._motion_stop_listener(mic, rec)())
+        spark._motion_wake_pending = Mock()
+        listener = spark._motion_stop_listener(mic, rec)
+        decoder.PartialResult.return_value = '{"partial":"spark"}'
+        self.assertFalse(listener())
+        spark._motion_wake_pending.set.assert_not_called()
+        decoder.PartialResult.return_value = '{"partial":"hey spark"}'
+        self.assertTrue(listener())
+        spark._motion_wake_pending.set.assert_called_once()
 
     def test_departure_ignores_bare_name_but_honors_stop(self):
         # trailing "Spark..." speech must not cancel a dock exit mid-step

@@ -380,7 +380,7 @@ class Spark:
         self.room = room = room_talk(self.cfg)
         wake_cfg = self.cfg.get("wake", {})
         wake_enabled = wake_cfg.get("enabled", True)
-        wake_words = wake_cfg.get("words", ["spark", "hey spark"])
+        wake_words = wake_cfg.get("words", ["hey spark", "hey sparky"])
         log("spark", f"ASR ready — wake={wake_words if wake_enabled else 'OFF'}, tap-to-talk always on")
 
         self.body.eyes("idle")
@@ -665,16 +665,18 @@ class Spark:
                     follow_pending = False
 
     def _motion_stop_listener(self, mic, recognizer, name_stops=True):
-        """Recognize STOP and her NAME while approach/roam runs.
+        """Recognize STOP and her wake phrase while approach/roam runs.
 
-        A tiny grammar maps near-name speech to 'spark' far more reliably
-        than full-vocabulary Vosk. Hearing the name stops the motion and
+        A tiny grammar recognizes STOP and the configured wake phrase.
+        Hearing the phrase stops the motion and
         arms a pending wake so the voice loop listens right after.
         name_stops=False (dock departure) keeps only an explicit 'stop':
         trailing speech around "Spark, come here" must not cancel the
         exit step the same command authorized.
         """
         import json
+        from .ear import has_wake_name
+        wake_words = self.cfg.get("wake", {}).get("words", ["hey spark", "hey sparky"])
         mic.discard()
         mic.retain(1)
         stop_rec = recognizer._kaldi_cls(recognizer.model, self.cfg["audio"]["sample_rate"],
@@ -689,10 +691,10 @@ class Spark:
                 if "stop" in words:
                     log("spark", "voice stop during motion")
                     return True
-                if any(w in ("spark", "sparky") for w in words):
+                if has_wake_name(" ".join(words), wake_words):
                     if not name_stops:
                         continue  # departure: her name is not a stop word
-                    log("spark", "wake word during motion — stopping to listen")
+                    log("spark", "wake phrase during motion — stopping to listen")
                     self._motion_wake_pending.set()
                     return True
             return False
@@ -852,7 +854,7 @@ class Spark:
             try:
                 text = self.whisper.transcribe_wake_pcm(pcm)
                 if (has_wake_name(text, wake_words) or _WAKE_GARBLE_RE.match(text or "")
-                        or addressed_command(text) is not None):
+                        or addressed_command(text, wake_words) is not None):
                     return text
             except Exception as exc:
                 log("spark", f"wake check unavailable: {exc}")
