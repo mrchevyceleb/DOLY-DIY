@@ -712,7 +712,11 @@ def listen_for_wake(frames, recognizer, cfg, wake_words, tap_check=None,
         return None
 
     recognizer.begin(wake_grammar)
-    preroll = deque(maxlen=10)
+    # 600ms pre-roll: a soft 'Spark,' that sits below the arming gate must
+    # still ride into the clip when the loud command after it triggers the
+    # onset — live miss: '[unk]' -> 'Alexa, bright lights.' (520ms speech,
+    # the name was never captured, so she slept through the govee command).
+    preroll = deque(maxlen=30)
     idle_silence = 0
     while True:
         armed = False
