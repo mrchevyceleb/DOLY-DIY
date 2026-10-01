@@ -12,6 +12,7 @@ if not hasattr(os, "getuid"):
 
 from spark import search as websearch
 from spark.__main__ import Spark
+from spark.router import Router
 
 
 def _public_dns(*args, **kwargs):
@@ -157,6 +158,35 @@ class ToolLoopTests(unittest.TestCase):
         self.assertEqual(spark.memory.add.call_args_list[1][0],
                          ("assistant", "The Chiefs won. It was close."))
         self.assertEqual(spark.body.speak.call_args[0][0], "Let me look that up.")
+
+    def test_explicit_follow_up_search_resolves_topic_and_reads_for_complete_list(self):
+        spark = self._spark()
+        spark.memory.history = [
+            {"role": "user", "content": "What are the five funniest things Bart writes on a chalkboard?"},
+            {"role": "assistant", "content": "Would you like some famous ones?"}]
+        query = "five most famous Bart Simpson chalkboard messages"
+        spark.brain.chat.return_value = query
+        spark.brain.chat_stream.side_effect = [
+            iter(["READ: https://example.com/bart."]),
+            iter(["First message. Second message. Third message. Fourth message. Fifth message."])]
+        router = Router.__new__(Router)
+        router.body, router.brain, router.memory = spark.body, spark.brain, spark.memory
+        router.llm_reply = spark._llm_reply
+        request = "Yeah, look up the five most famous."
+        with patch.object(websearch, "web_search", return_value=[
+                {"title": "Bart", "snippet": "A list", "url": "https://example.com/bart"}]) as ws, \
+             patch.object(websearch, "read_page", return_value={"title": "Bart", "text": "Five messages"}) as rp:
+            router._web_search(request)
+        ws.assert_called_once_with(query, max_results=4)
+        rp.assert_called_once()
+        rewriting = spark.brain.chat.call_args.args[0]
+        self.assertEqual(rewriting[1:3], spark.memory.history)
+        self.assertEqual(spark.memory.add.call_args_list[0].args, ("user", request))
+        self.assertIn("Fifth message.", spark.memory.add.call_args_list[-1].args[1])
+        asked = spark.brain.chat_stream.call_args_list[0].args[0][-1]["content"]
+        self.assertIn("do not ask whether to search or open a result", asked)
+        spark.brain.chat.side_effect = OSError("brain unavailable")
+        self.assertEqual(router._search_query("search for lunar eclipses"), "lunar eclipses")
 
     def test_read_tool_after_search(self):
         spark = self._spark()

@@ -981,12 +981,14 @@ class Spark:
             )
 
         detailed = bool(re.search(r"\b(explain|tell me about|in detail|step by step|"
-                                  r"tell me a story|longer answer)\b", user_text, re.I))
+                                  r"tell me a story|longer answer|list|three|four|five|six|[3-6])\b",
+                                  user_text, re.I))
         # a day's agenda needs more room than small talk
         world_turn = bool(extra_context and extra_context.startswith(_WORLD_TAG))
         web_offer = ""
         if web_hops > 0:
-            web_offer = (" WEB TOOL available this turn: "
+            web_offer = (" WEB TOOL available; public search/read need no permission. "
+                         "Finish the lookup; do not ask whether to search or open a result. "
                          + ("reply with ONLY 'READ: <url>' to open a page from the earlier "
                             "results if you need more detail — otherwise answer now from "
                             "the results you already have."
