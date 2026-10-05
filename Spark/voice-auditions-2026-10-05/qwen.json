@@ -1,0 +1,69 @@
+{
+  "backend": "qwen",
+  "model": "Qwen/Qwen3-TTS-12Hz-1.7B-VoiceDesign",
+  "host": "spark-3065",
+  "device": "cuda",
+  "request_url": null,
+  "lines": [
+    "Hey Matt. I'm Spark. What are we working on today?",
+    "Hmm, I think we can make that work. Tell me a little more about what you have in mind.",
+    "Your twenty-minute timer is set. And yes, I still remember how to dance!"
+  ],
+  "timing": "Warm full-clip synthesis, including configured Piper FX; excludes model loading, ASR, LLM and playback.",
+  "voices": [
+    {
+      "id": "qwen-warm",
+      "title": "Qwen - warm companion",
+      "file": "qwen-warm.wav",
+      "voice": "A young adult female voice with a natural American English accent. Warm, clear, friendly and conversational. Medium-high pitch, gentle smile, relaxed natural pacing. A helpful companion, with subtle personality and no theatrical delivery.",
+      "measurements": [
+        {
+          "line": 1,
+          "synthesis_s": 6.515,
+          "audio_s": 2.88,
+          "rtf": 2.262
+        },
+        {
+          "line": 2,
+          "synthesis_s": 12.383,
+          "audio_s": 5.44,
+          "rtf": 2.276
+        },
+        {
+          "line": 3,
+          "synthesis_s": 10.595,
+          "audio_s": 4.64,
+          "rtf": 2.283
+        }
+      ],
+      "audition_mode": "continuous voice design"
+    },
+    {
+      "id": "qwen-playful",
+      "title": "Qwen - playful Spark",
+      "file": "qwen-playful.wav",
+      "voice": "A bright young adult female voice with a natural American English accent. Playful, curious and affectionate, with a light, slightly higher pitch. Speak naturally and clearly at a brisk conversational pace, with expressive intonation. Friendly tiny robot companion; no metallic effects or baby voice.",
+      "measurements": [
+        {
+          "line": 1,
+          "synthesis_s": 7.683,
+          "audio_s": 3.36,
+          "rtf": 2.287
+        },
+        {
+          "line": 2,
+          "synthesis_s": 11.064,
+          "audio_s": 4.88,
+          "rtf": 2.267
+        },
+        {
+          "line": 3,
+          "synthesis_s": 9.587,
+          "audio_s": 4.24,
+          "rtf": 2.261
+        }
+      ],
+      "audition_mode": "continuous voice design"
+    }
+  ]
+}

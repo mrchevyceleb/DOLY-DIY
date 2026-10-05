@@ -1,0 +1,31 @@
+{
+  "health": {
+    "ok": true,
+    "voice": "warm-soft-robot",
+    "model": "Qwen/Qwen3-TTS-12Hz-1.7B-Base",
+    "engine": "faster-qwen3-tts",
+    "backend": "ggml",
+    "reference_sha256": "c8ea61431cef8f2da6dacd9b781dd9a10c3f0c95b40dba7fa5987922dc72c4e5",
+    "busy": false,
+    "fx": "client",
+    "last_generation_s": 2.389
+  },
+  "checks": [
+    {
+      "file": "selected-native-check-1.wav",
+      "text": "Hi Matt. I've got my new voice. What are we working on today?",
+      "transcript": "Hi Matt, I've got my new voice. What are we working on today?",
+      "complete_wav_http_s": 4.949,
+      "server_generation_s": "4.918",
+      "audio_s": 3.984
+    },
+    {
+      "file": "selected-native-check-2.wav",
+      "text": "I'm here, Matt. Ready when you are.",
+      "transcript": "I'm here, Matt. Ready when you are?",
+      "complete_wav_http_s": 2.395,
+      "server_generation_s": "2.389",
+      "audio_s": 1.839
+    }
+  ]
+}

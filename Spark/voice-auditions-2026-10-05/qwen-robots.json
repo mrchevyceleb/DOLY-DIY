@@ -1,0 +1,84 @@
+{
+  "backend": "qwen",
+  "model": "Qwen/Qwen3-TTS-12Hz-1.7B-VoiceDesign",
+  "host": "spark-3065",
+  "lines": [
+    "Hey Matt. I'm Spark. What are we working on today?",
+    "Hmm, I think we can make that work. Tell me a little more about what you have in mind.",
+    "Your twenty-minute timer is set. And yes, I still remember how to dance!"
+  ],
+  "voices": [
+    {
+      "id": "robot-warm-glow",
+      "title": "Warm - soft robot",
+      "file": "robot-warm-glow.wav",
+      "source_file": "qwen-warm.wav",
+      "pitch_semitones": 0.75,
+      "robot_mix": 0.16,
+      "description": "Original Warm Companion with a gentle lift and light electronic sheen.",
+      "measurements": []
+    },
+    {
+      "id": "robot-warm-pocket",
+      "title": "Warm - pocket robot",
+      "file": "robot-warm-pocket.wav",
+      "source_file": "qwen-warm.wav",
+      "pitch_semitones": 1.4,
+      "robot_mix": 0.3,
+      "description": "The same warm voice, smaller and brighter, with more robot texture.",
+      "measurements": []
+    },
+    {
+      "id": "robot-playful-glow",
+      "title": "Playful - soft robot",
+      "file": "robot-playful-glow.wav",
+      "source_file": "qwen-playful.wav",
+      "pitch_semitones": 0.65,
+      "robot_mix": 0.14,
+      "description": "Original Playful Spark with a subtle, friendly robot shimmer.",
+      "measurements": []
+    },
+    {
+      "id": "robot-playful-pocket",
+      "title": "Playful - pocket robot",
+      "file": "robot-playful-pocket.wav",
+      "source_file": "qwen-playful.wav",
+      "pitch_semitones": 1.25,
+      "robot_mix": 0.26,
+      "description": "The same playful voice, extra perky, with a clearer electronic character.",
+      "measurements": []
+    },
+    {
+      "id": "robot-qwen-android",
+      "title": "Qwen - little android",
+      "file": "robot-qwen-android.wav",
+      "voice": "A cute small female robot companion with a clear natural American English accent. A warm, sweet, medium-high voice, soft rounded vowels and a light crystalline synthetic timbre. Minimal breathiness. Speak with natural conversational rhythm, emotional nuance, a gentle smile and curious expressive intonation. Sound like a lovable intelligent robot with feelings, not a flat monotone. Keep every word clear; no baby talk, exaggerated cartoon acting or beeps.",
+      "pitch_semitones": 0.35,
+      "robot_mix": 0.22,
+      "description": "New continuous Qwen voice design with light robot polish.",
+      "benchmark_kind": "Full-audition generation",
+      "measurements": [
+        {
+          "synthesis_s": 36.775,
+          "audio_s": 16.150172515969615
+        }
+      ]
+    },
+    {
+      "id": "robot-qwen-bubbles",
+      "title": "Qwen - bubbly Spark",
+      "file": "robot-qwen-bubbles.wav",
+      "voice": "A bright, cute female pocket robot with a natural American English accent. Light, high but not squeaky voice, clear bell-like vowels and a subtle electronic quality. Cheerful, mischievous, affectionate and curious. Use a brisk but understandable conversational pace with realistic emotional expression, natural pauses and lively melodic intonation. Keep the delivery believable and relaxed, with no baby voice, forced cartoon acting or beeps.",
+      "pitch_semitones": 0.75,
+      "robot_mix": 0.2,
+      "description": "New continuous Qwen voice design with light robot polish.",
+      "benchmark_kind": "Full-audition generation",
+      "measurements": [
+        {
+          "synthesis_s": 31.363,
+          "audio_s": 13.559662454691804
+        }
+      ]
+    }
+  ]
+}

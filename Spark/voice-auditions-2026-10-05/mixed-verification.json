@@ -1,0 +1,31 @@
+{
+  "recognizer": "Local Parakeet on Moria",
+  "expected_transcript": "Hey Matt. I'm Spark. What are we working on today? Hmm, I think we can make that work. Tell me a little more about what you have in mind. Your twenty-minute timer is set. And yes, I still remember how to dance!",
+  "clips": [
+    {
+      "file": "robot-neutral-cinder.wav",
+      "duration_s": 15.92,
+      "transcript": "Hey Matt, I'm Spark. What are we working on today? Hmm, I think we can make that work. Tell me a little more about what you have in mind. Your 20-minute timer is set. And yes, I still remember how to dance."
+    },
+    {
+      "file": "robot-neutral-pebble.wav",
+      "duration_s": 18.88,
+      "transcript": "Hey Matt, I'm Spark. What are we working on today? Hmm. I think we can make that work. Tell me a little more about what you have in mind. Your 20-minute timer is set. And yes, I still remember how to dance."
+    },
+    {
+      "file": "robot-boyish-milo.wav",
+      "duration_s": 15.28,
+      "transcript": "Hey Matt, I'm Spark. What are we working on today? Hmm, I think we can make that work. Tell me a little more about what you have in mind. Your 20-minute timer is set, and yes, I still remember how to dance."
+    },
+    {
+      "file": "robot-boyish-pip.wav",
+      "duration_s": 14.982,
+      "transcript": "Hey Matt, I'm Spark. What are we working on today? Hmm. I think we can make that work. Tell me a little more about what you have in mind. Your 20-minute timer is set. And yes, I still remember how to dance."
+    }
+  ],
+  "preserved_sha256": {
+    "qwen-warm.wav": "c8ea61431cef8f2da6dacd9b781dd9a10c3f0c95b40dba7fa5987922dc72c4e5",
+    "qwen-playful.wav": "9ae2807453ac7ec98a752217db9423a7c6b3b97f4ef46f5d55662681cab6f924",
+    "robot-warm-glow.wav": "b8990b72c075f4865a0f512f4ab27f1be42ad46deb81f61f44e582630449a3e3"
+  }
+}

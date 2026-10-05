@@ -1,0 +1,41 @@
+{
+  "backend": "piper",
+  "model": null,
+  "host": "spark-3065",
+  "device": "CPU",
+  "request_url": "http://192.168.50.204:8398/?voice=hfc",
+  "lines": [
+    "Hey Matt. I'm Spark. What are we working on today?",
+    "Hmm, I think we can make that work. Tell me a little more about what you have in mind.",
+    "Your twenty-minute timer is set. And yes, I still remember how to dance!"
+  ],
+  "timing": "Warm full-clip synthesis, including configured Piper FX; excludes model loading, ASR, LLM and playback.",
+  "voices": [
+    {
+      "id": "piper-current",
+      "title": "Current Spark - Piper + robot effects",
+      "file": "piper-current.wav",
+      "voice": null,
+      "measurements": [
+        {
+          "line": 1,
+          "synthesis_s": 0.684,
+          "audio_s": 3.162,
+          "rtf": 0.216
+        },
+        {
+          "line": 2,
+          "synthesis_s": 0.808,
+          "audio_s": 4.111,
+          "rtf": 0.197
+        },
+        {
+          "line": 3,
+          "synthesis_s": 0.675,
+          "audio_s": 4.08,
+          "rtf": 0.165
+        }
+      ]
+    }
+  ]
+}

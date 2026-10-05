@@ -1,0 +1,16 @@
+{
+  "id": "warm-soft-robot",
+  "title": "Warm - soft robot",
+  "selected_at": "2026-10-05",
+  "reference_file": "reference.wav",
+  "reference_sha256": "c8ea61431cef8f2da6dacd9b781dd9a10c3f0c95b40dba7fa5987922dc72c4e5",
+  "reference_text": "Hey Matt. I'm Spark. What are we working on today? Hmm, I think we can make that work. Tell me a little more about what you have in mind. Your twenty-minute timer is set. And yes, I still remember how to dance!",
+  "chosen_audition_file": "chosen-audition.wav",
+  "chosen_audition_sha256": "b8990b72c075f4865a0f512f4ab27f1be42ad46deb81f61f44e582630449a3e3",
+  "model": "Qwen/Qwen3-TTS-12Hz-1.7B-Base",
+  "language": "English",
+  "pitch_semitones": 0.75,
+  "robot_mix": 0.16,
+  "fx_location": "robot, once after synthesis",
+  "identity_method": "Reusable full-context clone from the saved unprocessed Warm Companion take; do not redesign per sentence."
+}

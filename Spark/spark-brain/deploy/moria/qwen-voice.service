@@ -1,0 +1,22 @@
+[Unit]
+Description=Spark's selected Warm soft robot voice (native Qwen)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=mrchevyceleb
+WorkingDirectory=/home/mrchevyceleb/spark-qwen-voice
+Environment=QWEN_VOICE_PROFILE=/home/mrchevyceleb/spark-qwen-voice/voice/voice.json
+Environment=QWEN_BIND=192.168.50.204
+Environment=QWEN_PORT=8400
+Environment=QWEN_BACKEND=ggml
+Environment=PYTHONUNBUFFERED=1
+ExecStart=/home/mrchevyceleb/spark-qwen-voice/venv/bin/python /home/mrchevyceleb/spark-qwen-voice/qwen_voice_server.py
+Restart=on-failure
+RestartSec=10
+NoNewPrivileges=yes
+PrivateTmp=yes
+
+[Install]
+WantedBy=multi-user.target

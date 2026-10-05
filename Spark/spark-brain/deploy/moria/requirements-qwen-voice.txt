@@ -1,0 +1,8 @@
+--extra-index-url https://download.pytorch.org/whl/cu130
+--find-links https://huggingface.co/datasets/andito/qwentts-cpp-python-wheels/tree/main/whl/cu130
+torch==2.14.1+cu130
+torchaudio==2.11.0+cu130
+transformers==5.15.1
+qwen-tts-hf==0.1.1.post1
+faster-qwen3-tts @ git+https://github.com/andimarafioti/faster-qwen3-tts.git@7a729d602235462ba1c0f47565d90f50c330510e
+qwentts-cpp-python==0.5.0+cu130

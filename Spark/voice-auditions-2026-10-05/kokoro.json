@@ -1,0 +1,92 @@
+{
+  "backend": "kokoro",
+  "model": "hexgrad/Kokoro-82M",
+  "host": "spark-3065",
+  "device": "cuda",
+  "lines": [
+    "Hey Matt. I'm Spark. What are we working on today?",
+    "Hmm, I think we can make that work. Tell me a little more about what you have in mind.",
+    "Your twenty-minute timer is set. And yes, I still remember how to dance!"
+  ],
+  "timing": "Warm full-clip synthesis; excludes model loading, ASR, LLM and playback.",
+  "voices": [
+    {
+      "id": "kokoro-af_heart",
+      "title": "Kokoro - Heart",
+      "file": "kokoro-af_heart.wav",
+      "voice": "af_heart",
+      "measurements": [
+        {
+          "line": 1,
+          "synthesis_s": 0.247,
+          "audio_s": 3.425,
+          "rtf": 0.072
+        },
+        {
+          "line": 2,
+          "synthesis_s": 0.178,
+          "audio_s": 4.975,
+          "rtf": 0.036
+        },
+        {
+          "line": 3,
+          "synthesis_s": 0.177,
+          "audio_s": 4.825,
+          "rtf": 0.037
+        }
+      ]
+    },
+    {
+      "id": "kokoro-af_bella",
+      "title": "Kokoro - Bella",
+      "file": "kokoro-af_bella.wav",
+      "voice": "af_bella",
+      "measurements": [
+        {
+          "line": 1,
+          "synthesis_s": 0.147,
+          "audio_s": 3.8,
+          "rtf": 0.039
+        },
+        {
+          "line": 2,
+          "synthesis_s": 0.182,
+          "audio_s": 5.25,
+          "rtf": 0.035
+        },
+        {
+          "line": 3,
+          "synthesis_s": 0.173,
+          "audio_s": 5.125,
+          "rtf": 0.034
+        }
+      ]
+    },
+    {
+      "id": "kokoro-af_nicole",
+      "title": "Kokoro - Nicole",
+      "file": "kokoro-af_nicole.wav",
+      "voice": "af_nicole",
+      "measurements": [
+        {
+          "line": 1,
+          "synthesis_s": 0.168,
+          "audio_s": 5.05,
+          "rtf": 0.033
+        },
+        {
+          "line": 2,
+          "synthesis_s": 0.234,
+          "audio_s": 7.4,
+          "rtf": 0.032
+        },
+        {
+          "line": 3,
+          "synthesis_s": 0.243,
+          "audio_s": 7.5,
+          "rtf": 0.032
+        }
+      ]
+    }
+  ]
+}

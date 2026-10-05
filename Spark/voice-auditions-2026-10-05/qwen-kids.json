@@ -1,0 +1,60 @@
+{
+  "backend": "qwen",
+  "model": "Qwen/Qwen3-TTS-12Hz-1.7B-VoiceDesign",
+  "host": "spark-3065",
+  "lines": [
+    "Hey Matt. I'm Spark. What are we working on today?",
+    "Hmm, I think we can make that work. Tell me a little more about what you have in mind.",
+    "Your twenty-minute timer is set. And yes, I still remember how to dance!"
+  ],
+  "voices": [
+    {
+      "id": "robot-kid-chip",
+      "title": "Robot kid - gentle Chip",
+      "file": "robot-kid-chip.wav",
+      "voice": "A small boy robot with the speaking voice of a prepubescent boy around nine years old. Natural American English. A light, clear, youthful high register, small bright boyish resonance and soft rounded vowels. Warm, thoughtful and sweet, with a gentle smile. Speak like a real child having a relaxed conversation: clear words, expressive curiosity and easy pauses. A subtle crystalline robot timbre. The vocal identity is a little boy, not a grown man, woman, baby or exaggerated cartoon character.",
+      "pitch_semitones": 0,
+      "robot_mix": 0.16,
+      "description": "New continuous Qwen voice design with light robot polish.",
+      "benchmark_kind": "Full take + robot processing",
+      "measurements": [
+        {
+          "synthesis_s": 32.375,
+          "audio_s": 14.32
+        }
+      ]
+    },
+    {
+      "id": "robot-kid-pixel",
+      "title": "Robot kid - curious Pixel",
+      "file": "robot-kid-pixel.wav",
+      "voice": "A cute little boy android with the voice of an eight-year-old boy. Clear natural American English. Bright prepubescent child resonance, youthful high pitch, a little boyish nasal buzz and light clean consonants. Curious, playful and affectionate. Natural realistic childlike conversation, lively inflections and spontaneous gentle pauses. Small bell-like digital color. Sound like a little robot kid with feelings, not an adult tenor or baby.",
+      "pitch_semitones": 0.25,
+      "robot_mix": 0.2,
+      "description": "New continuous Qwen voice design with light robot polish.",
+      "benchmark_kind": "Full take + robot processing",
+      "measurements": [
+        {
+          "synthesis_s": 32.984,
+          "audio_s": 15.060333333333332
+        }
+      ]
+    },
+    {
+      "id": "robot-kid-widget",
+      "title": "Robot kid - mellow Widget",
+      "file": "robot-kid-widget.wav",
+      "voice": "A tiny robot child with a young boy's prepubescent voice, around ten years old, soft and light enough to feel gently androgynous. Natural American English. Compact bright child resonance, a clear youthful register and rounded clean vowels. Cozy, sincere, curious and slightly mischievous. Believable emotional expression, relaxed conversational timing and clear speech, with a subtle soft electronic buzz. A little robot kid rather than an adult man or woman. No baby talk or exaggerated cartoon acting.",
+      "pitch_semitones": 0,
+      "robot_mix": 0.24,
+      "description": "New continuous Qwen voice design with light robot polish.",
+      "benchmark_kind": "Full take + robot processing",
+      "measurements": [
+        {
+          "synthesis_s": 30.708,
+          "audio_s": 14.08
+        }
+      ]
+    }
+  ]
+}

@@ -1,0 +1,76 @@
+{
+  "backend": "qwen",
+  "model": "Qwen/Qwen3-TTS-12Hz-1.7B-VoiceDesign",
+  "host": "spark-3065",
+  "lines": [
+    "Hey Matt. I'm Spark. What are we working on today?",
+    "Hmm, I think we can make that work. Tell me a little more about what you have in mind.",
+    "Your twenty-minute timer is set. And yes, I still remember how to dance!"
+  ],
+  "voices": [
+    {
+      "id": "robot-neutral-cinder",
+      "title": "Neutral - warm Cinder",
+      "file": "robot-neutral-cinder.wav",
+      "voice": "An androgynous small robot companion speaking natural American English. A smooth middle-register voice between an alto and a light tenor, with balanced resonance, rounded vowels and very little breathiness. Gender ambiguous, cozy, thoughtful and quietly playful. Use realistic emotional nuance, a gentle smile, relaxed conversational timing and clear words. A subtle crystalline electronic quality, like a lovable intelligent robot.",
+      "pitch_semitones": 0,
+      "robot_mix": 0.16,
+      "description": "New continuous Qwen voice design with light robot polish.",
+      "benchmark_kind": "Full take + robot processing",
+      "measurements": [
+        {
+          "synthesis_s": 36.028,
+          "audio_s": 15.92
+        }
+      ]
+    },
+    {
+      "id": "robot-neutral-pebble",
+      "title": "Neutral - curious Pebble",
+      "file": "robot-neutral-pebble.wav",
+      "voice": "A cute gender-neutral pocket robot speaking clear American English. An androgynous light tenor with compact rounded resonance and a clean slightly buzzy timbre. Friendly, curious and gently mischievous. Speak naturally with expressive melodic inflection, easy pauses and believable warmth. A little digital sparkle while staying intelligible and relaxed.",
+      "pitch_semitones": 0,
+      "robot_mix": 0.2,
+      "description": "New continuous Qwen voice design with light robot polish.",
+      "benchmark_kind": "Full take + robot processing",
+      "measurements": [
+        {
+          "synthesis_s": 44.002,
+          "audio_s": 18.88
+        }
+      ]
+    },
+    {
+      "id": "robot-boyish-milo",
+      "title": "Boyish - gentle Milo",
+      "file": "robot-boyish-milo.wav",
+      "voice": "A cute male robot companion with a youthful young-adult masculine voice and a natural American English accent. A warm light tenor, smooth rounded male resonance, soft clear consonants and minimal breathiness. Gentle, affectionate and curious, like a friendly little android. Natural relaxed conversation with real emotional expression, a smile and subtle electronic color. Boyish charm without sounding like a baby or a deep announcer.",
+      "pitch_semitones": 0,
+      "robot_mix": 0.16,
+      "description": "New continuous Qwen voice design with light robot polish.",
+      "benchmark_kind": "Full take + robot processing",
+      "measurements": [
+        {
+          "synthesis_s": 33.096,
+          "audio_s": 15.28
+        }
+      ]
+    },
+    {
+      "id": "robot-boyish-pip",
+      "title": "Boyish - playful Pip",
+      "file": "robot-boyish-pip.wav",
+      "voice": "A cheerful small male robot speaking natural American English in a youthful masculine light tenor. Bright, compact, slightly nasal male resonance with a soft buzzy digital timbre. Playful, witty, warm and curious. Use lively but believable conversational expression, natural pauses and clear words. Cute boyish charm with a relaxed young-adult delivery and a gentle smile.",
+      "pitch_semitones": 0.25,
+      "robot_mix": 0.2,
+      "description": "New continuous Qwen voice design with light robot polish.",
+      "benchmark_kind": "Full take + robot processing",
+      "measurements": [
+        {
+          "synthesis_s": 32.948,
+          "audio_s": 14.9815
+        }
+      ]
+    }
+  ]
+}
