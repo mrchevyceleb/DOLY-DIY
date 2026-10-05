@@ -41,12 +41,23 @@ class MicStream:
         self._closed = False
         self._error = None
         self._mute = (0.0, 0.0)  # capture window of our own playback
+        self.processor = None
+        self._mixer = [("Mic PGA", a.get("mic_pga_db")), ("ADC", a.get("adc_gain_db"))]
 
     def __enter__(self):
+        for control, gain in self._mixer:
+            if gain is None:
+                continue
+            try:
+                subprocess.run(["amixer", "-q", "-c", "0", "sset", control, f"{float(gain)}dB"],
+                               check=True, timeout=2, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            except (OSError, subprocess.SubprocessError) as error:
+                print(f"[ear] cannot set {control}: {error}", file=sys.stderr, flush=True)
         self.proc = subprocess.Popen(
             [
                 "arecord", "-q", "-D", self.device,
                 "-f", "S16_LE", "-r", str(self.rate), "-c", "1", "-t", "raw",
+                "--buffer-time=80000", "--period-time=20000",
             ],
             stdout=subprocess.PIPE,
             stderr=subprocess.DEVNULL,
@@ -71,6 +82,7 @@ class MicStream:
         self.proc = None
 
     def _capture(self):
+        capture_stamp = None
         try:
             while not self._closed:
                 chunk = self.proc.stdout.read(self.bytes_per_frame)
@@ -78,8 +90,17 @@ class MicStream:
                     raise RuntimeError("arecord stopped delivering audio")
                 if self._highpass:
                     chunk = self._highpass.process(chunk)
+                arrived = time.monotonic()
+                # ALSA/pipe reads can deliver two periods together. DSP must
+                # still see a continuous sample clock, not duplicate times.
+                stamp = arrived if capture_stamp is None else capture_stamp + self.FRAME_MS/1000
+                if abs(stamp-arrived) > .1:
+                    stamp = arrived  # genuine capture stall: start a fresh clock
+                capture_stamp = stamp
+                if self.processor:
+                    chunk = self.processor.capture(chunk, stamp)
                 with self._ready:
-                    self._queue.append((time.monotonic(), chunk))
+                    self._queue.append((stamp, chunk))
                     if self._learn_noise:
                         self._levels.append(_rms(chunk))
                     self._ready.notify_all()
@@ -93,12 +114,18 @@ class MicStream:
         with self._ready:
             levels = sorted(self._levels)
         # Lower quintile rejects speech peaks. Bound it for speech-only startup.
-        return min(1500, max(260, levels[len(levels)//5])) if levels else 500
+        return min(1500, max(120, levels[len(levels)//5])) if levels else 500
 
     def discard(self):
         """Drop captured playback/idle audio before opening a new listen."""
         with self._ready:
             self._queue.clear()
+
+    def discard_before(self, stamp):
+        """Remove replayed interruption audio while retaining its live tail."""
+        with self._ready:
+            while self._queue and self._queue[0][0] <= stamp:
+                self._queue.popleft()
 
     def drain_pending(self):
         """Nonblocking audio for stop recognition while motion polls sensors."""
@@ -241,9 +268,10 @@ def record_utterance(mic, cfg, on_frame=None, should_stop=None, wait_timeout_s=N
     """
     a = cfg["audio"]
     silence_needed = a["silence_ms"] // MicStream.FRAME_MS
-    max_frames = min(a["max_utterance_ms"], 8000) // MicStream.FRAME_MS
+    hard_cap = max(8000, min(30000, a.get("hard_utterance_ms", 8000)))
+    max_frames = min(a["max_utterance_ms"], hard_cap) // MicStream.FRAME_MS
     max_frames += getattr(mic, "prefix_frames", 0)
-    max_frames = min(max_frames, 8000 // MicStream.FRAME_MS)
+    max_frames = min(max_frames, hard_cap // MicStream.FRAME_MS)
     deadline = time.monotonic() + wait_timeout_s if wait_timeout_s is not None else None
     started = time.monotonic()
 
@@ -302,7 +330,7 @@ def record_utterance(mic, cfg, on_frame=None, should_stop=None, wait_timeout_s=N
         if silent_run >= silence_needed:
             end_reason = "silence"
             break
-        if final and quiet:
+        if final and quiet and silent_run >= silence_needed:
             end_reason = "recognizer endpoint"
             break
         if len(frames) >= max_frames:
@@ -325,6 +353,7 @@ class WakeResult:
     prefix_pcm: bytes = b""
     command: str = ""  # verified speech that is all command (name heard earlier)
     clip_pcm: bytes = b""  # the verified clip, to re-decode with its continuation
+    partial: bool = False  # keyword detected before the speech endpoint
 
 
 def strip_wake_prefix(text, wake_text=""):
@@ -334,6 +363,13 @@ def strip_wake_prefix(text, wake_text=""):
     if not words:
         return ""
     tokens = [w.group() for w in words]
+    # After an authorized local wake, Parakeet can re-decode 'Hey Spark'
+    # as 'A spark.' from the replayed prefix. It is still just her name:
+    # keep capturing the command instead of sending this to conversation.
+    if (tokens in (["a", "spark"], ["a", "sparky"])
+            and re.findall(r"[\w']+", wake_text.lower()) in
+            (["hey", "spark"], ["hey", "sparky"])):
+        return ""
     count = 0
     if tokens[0] in {"hey", "okay", "ok"} and len(tokens) > 1 and tokens[1] in {"spark", "sparky"}:
         count = 2
@@ -641,6 +677,40 @@ def listen_for_wake(frames, recognizer, cfg, wake_words, tap_check=None,
                 addressed = named_elsewhere(verified, clip)
                 if addressed:
                     return addressed
+                # A quiet wake prefix can disappear when the louder command
+                # dominates ASR (live: 'a spark [unk]' -> "What's the weather?").
+                # Recheck the actual prefix, never authorize from KWS alone.
+                # Only a fast first check leaves room inside the 5s mic queue
+                # for the callback's existing 4.5s maximum hard timeout.
+                if (head in _HEADS and real_talk(verified)
+                        and time.monotonic() - check_started < .5):
+                    words = getattr(recognizer, "last_words", [])
+                    ends = [w["end"] for w in words if w.get("word") in _HEADS] if isinstance(words, list) else []
+                    prefix_s = min(1.6, ends[-1] + .12) if ends else 1.6
+                    prefix = clip[:int(a["sample_rate"] * prefix_s) * 2]
+                    if audioop is not None and prefix:
+                        gain = max(1, min(4, 16000 / max(1, audioop.max(prefix, 2))))
+                        prefix = audioop.mul(prefix, 2, gain)
+                    try:
+                        name = verify_wake(prefix, keep=True) or ""
+                    except Exception as error:
+                        print(f"[ear] wake prefix check unavailable: {error}", file=sys.stderr, flush=True)
+                        name = ""
+                    accepted = has_wake_name(name, wake_words)
+                    command = verified
+                    # Live accent confusion: both checks heard "Hate Spark"
+                    # for "Hey Spark". Require the same name-only prefix, a
+                    # configured hey phrase, and an addressed full command.
+                    prefix_words = re.findall(r"[\w']+", name.casefold())
+                    if (not accepted and len(prefix_words) == 2 and prefix_words[0] == "hate"
+                            and ["hey", prefix_words[1]] in [w.casefold().split() for w in wake_words]):
+                        addressed = re.match(r"^\s*hate\s+" + re.escape(prefix_words[1])
+                                             + r"\s*[,!?:;-]\s*(\S.*)$", verified, re.I | re.S)
+                        if addressed:
+                            accepted, command = True, addressed.group(1)
+                    print(f"[ear] wake prefix check: '{name}' accepted={accepted}", file=sys.stderr, flush=True)
+                    if accepted:
+                        return WakeResult(verified, command=command, clip_pcm=clip)
                 v_tokens = re.findall(r"[\w']+", verified.lower())
                 v_head = meaningful(v_tokens)
                 # Vosk heard her name family AND the verifier heard its own
@@ -803,6 +873,7 @@ def listen_for_wake(frames, recognizer, cfg, wake_words, tap_check=None,
                     if partial_count >= 3:
                         result = confirm_exact(partial, b"".join(audio), final=False)
                         if result:
+                            result.partial = True
                             print(f"[ear] WAKE via partial: '{partial}'", file=sys.stderr, flush=True)
                             return result
                         partial_vetoed = result is None

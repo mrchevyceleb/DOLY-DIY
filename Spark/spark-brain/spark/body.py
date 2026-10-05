@@ -12,6 +12,7 @@ import time
 import wave
 
 from .charging import DISCHARGE_COUNTS
+from .duplex import TurnInterrupted
 
 TTS_WAV = f"/tmp/spark_tts_{os.getuid()}.wav"  # per-UID: service (root) and
 # human test sessions (doly) must not fight over one sticky-bit /tmp file
@@ -37,10 +38,12 @@ class Body:
         """hw=False → software-only mode (no SDK init, never stops the doly
         service) — used by --text/--say so testing can't disturb the robot."""
         self.cfg = cfg
+        self._restore_volume()
         self.hw = hw
         self.has = {}
         self._touch_cb = None
         self._tts_lock = threading.Lock()
+        self.duplex = None  # attached to the ONE persistent microphone
         self._cmd_id = 0
         self._muted_sink = None  # text mode prints instead of speaking
         import collections
@@ -547,22 +550,79 @@ class Body:
         self._edge = edge
 
     # ------------------------------------------------------------------- TTS
-    def _produce_speech(self, text):
+    @property
+    def volume(self):
+        return max(0, min(100, int(self.cfg.get("sounds", {}).get("volume", 90))))
+
+    def _restore_volume(self):
+        """Voice preferences live in state, separate from deploys/secrets."""
+        from pathlib import Path
+        directory = self.cfg.get("state_dir")
+        if not directory:
+            return
+        try:
+            import json
+            value = json.loads((Path(directory) / "volume.json").read_text())
+            if type(value) is not int or not 0 <= value <= 100:
+                raise ValueError("volume must be an integer from 0 to 100")
+            self.cfg.setdefault("sounds", {})["volume"] = value
+        except FileNotFoundError:
+            pass
+        except (OSError, ValueError) as error:
+            _log(f"saved volume ignored: {error}")
+
+    def set_volume(self, value):
+        """Update SDK sounds and PCM gain immediately; return persistence status."""
+        value = max(0, min(100, int(value)))
+        with self._tts_lock:
+            if self.has.get("sound") and self._snd.set_volume(value) < 0:
+                raise RuntimeError("sound controller rejected volume")
+            self.cfg.setdefault("sounds", {})["volume"] = value
+            directory = self.cfg.get("state_dir")
+            if not directory:
+                return False
+            from pathlib import Path
+            import tempfile
+            path = Path(directory) / "volume.json"
+            temporary = None
+            try:
+                path.parent.mkdir(parents=True, exist_ok=True)
+                with tempfile.NamedTemporaryFile(mode="w", dir=path.parent, delete=False) as output:
+                    temporary = output.name
+                    output.write(str(value) + "\n")
+                os.replace(temporary, path)
+                return True
+            except OSError as error:
+                _log(f"volume changed but not saved: {error}")
+                return False
+            finally:
+                if temporary and os.path.exists(temporary):
+                    os.unlink(temporary)
+
+    def _produce_speech(self, text, skip_primary=False):
         """Synthesize text into TTS_WAV.
 
-        Priority: Moria's piper server (tts.server_url — ~0.4s vs 5-15s on
-        the Pi) -> local piper (tts.piper_model) -> stock doly_tts.
-        Voice FX (pitch_semitones / robot_mix) always apply on top, so
-        Spark sounds identical regardless of where the synth ran."""
+        Priority: selected server -> fallback server -> local Piper -> stock.
+        Selected pitch/robot FX apply once after raw synthesis. Fallbacks
+        retain speech availability but may use a different vocal identity."""
         tts_cfg = self.cfg.get("tts", {})
         produced = False
         server = tts_cfg.get("server_url")
-        if server and tts_cfg.get("voice_name") is not None:
+        if not skip_primary and server and tts_cfg.get("voice_name") is not None:
             try:
                 self._produce_server(text, server, tts_cfg)
                 produced = True
             except Exception as e:
                 _log(f"server TTS failed ({e}) — falling back to local synth")
+        fallback = tts_cfg.get("fallback_server_url")
+        if not produced and fallback:
+            fallback_cfg = dict(tts_cfg, voice_name=tts_cfg.get("fallback_voice_name", "hfc"),
+                                server_timeout_s=tts_cfg.get("fallback_timeout_s", 6))
+            try:
+                self._produce_server(text, fallback, fallback_cfg)
+                produced = True
+            except Exception as e:
+                _log(f"fallback server TTS failed ({e}) — using local synth")
         if not produced:
             model = tts_cfg.get("piper_model")
             try:
@@ -582,7 +642,7 @@ class Body:
             shutil.copyfile(TTS_RAW, TTS_WAV)
 
     def _produce_server(self, text, server, tts_cfg):
-        """Moria's piper HTTP server: POST plain text, receive WAV."""
+        """Local TTS server contract: POST plain text, receive raw WAV."""
         import urllib.request
         import urllib.parse
         voice = tts_cfg.get("voice_name")
@@ -591,7 +651,8 @@ class Body:
             url += "?" + urllib.parse.urlencode({"voice": voice})
         req = urllib.request.Request(url, data=text.encode("utf-8"))
         t0 = time.time()
-        with urllib.request.urlopen(req, timeout=6) as resp:
+        timeout = max(1, min(30, float(tts_cfg.get("server_timeout_s", 6))))
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
             if resp.status != 200:
                 raise RuntimeError(f"server rc={resp.status}")
             data = resp.read(4 * 1024 * 1024 + 1)  # hard cap: sentences, not novels
@@ -666,14 +727,26 @@ class Body:
                 started = time.perf_counter()
                 # strip anything the synth would read literally
                 text = re.sub(r"[*_`#>]+", "", text)
-                self._produce_speech(text)
-                self._snd.play(TTS_WAV, self._next_id())  # (file, block_id)
+                streaming = wait and self._streaming_voice_enabled()
+                if streaming:
+                    result = self._speak_pcm(text)
+                    if result:
+                        return result > 0
+                self._produce_speech(text, skip_primary=streaming)
+                if wait and self.duplex:
+                    self._speak_wav(text, TTS_WAV)
+                    return True
+                self._stock_sound(TTS_WAV)
                 dur = self._wav_duration(TTS_WAV)
                 self._speaking_until = time.time() + dur + 0.25
                 _log(f"speech: first audio {time.perf_counter()-started:.2f}s")
                 if wait:
                     time.sleep(dur + 0.15)
                 return True
+            except TurnInterrupted:
+                if self.duplex and self.duplex.active:
+                    raise
+                return False  # an idle announcement yielded to a new listen
             except Exception as e:
                 _log(f"speak failed: {e}")
                 return False
@@ -706,7 +779,7 @@ class Body:
         """True while our own TTS output might still reach the mic."""
         return time.time() < getattr(self, "_speaking_until", 0)
 
-    def speak_stream(self, sentences):
+    def speak_stream(self, sentences, on_spoken=None):
         """Pipelined TTS: synthesize sentence N+1 while sentence N plays.
 
         First word still waits for the first synth, but multi-sentence
@@ -714,7 +787,9 @@ class Body:
         """
         if not (self.has.get("tts") and self.has.get("sound")):
             for sent in sentences:
-                self.speak(sent, wait=False)
+                completed = self.speak(sent, wait=True)
+                if completed and on_spoken:
+                    on_spoken(sent)
             return
 
         import shutil
@@ -722,23 +797,53 @@ class Body:
         played = []
         started = time.perf_counter()
         with self._tts_lock:
+            pipeline = None
             try:
+                if self._streaming_voice_enabled():
+                    from .streamspeech import prefetch
+                    cancel = self.duplex.cancel if self.duplex else threading.Event()
+                    pipeline = prefetch(sentences, self.cfg["tts"], cancel)
+                else:
+                    pipeline = ((sent, None) for sent in sentences)
                 # Consume lazily: requesting the whole list buffers the LLM.
-                for i, sent in enumerate(sentences):
+                for i, (sent, prepared) in enumerate(pipeline):
                     text = re.sub(r"[*_`#>]+", "", (sent or "").strip())
                     if not text:
                         continue
+                    if self._streaming_voice_enabled():
+                        time.sleep(max(0, prev_end - time.time()))
+                        result = self._speak_pcm(text, prepared)
+                        if result < 0:
+                            break
+                        if result:
+                            if on_spoken:
+                                on_spoken(text)
+                            continue
+                        # Failure before any audio: go straight to Piper,
+                        # rather than retrying the stalled primary server.
+                        self._produce_speech(text, skip_primary=True)
+                    else:
+                        self._produce_speech(text)
+                    if self.duplex:
+                        self._speak_wav(text, TTS_WAV)
+                        if on_spoken:
+                            on_spoken(text)
+                        continue
                     tmp = f"/tmp/spark_tts_{os.getuid()}_{i}.wav"
-                    self._produce_speech(text)
                     shutil.copyfile(TTS_WAV, tmp)
                     played.append(tmp)
                     time.sleep(max(0, prev_end - time.time()))
-                    self._snd.play(tmp, self._next_id())
+                    self._stock_sound(tmp)
                     prev_end = time.time() + self._wav_duration(tmp) + 0.05
                     self._speaking_until = prev_end + 0.20
                     if len(played) == 1:
                         _log(f"stream: first audio {time.perf_counter()-started:.2f}s")
+                    if on_spoken:
+                        time.sleep(max(0, prev_end - time.time()))
+                        on_spoken(text)
             finally:
+                if pipeline is not None:
+                    pipeline.close()
                 # A broken LLM stream must still finish/clean up queued audio.
                 time.sleep(max(0, prev_end - time.time()))
                 for tmp in played:
@@ -746,6 +851,46 @@ class Body:
                         os.remove(tmp)
                     except OSError:
                         pass
+
+    def _streaming_voice_enabled(self):
+        cfg = self.cfg.get("tts", {})
+        return self.hw and cfg.get("server_streaming", False) and cfg.get("server_url")
+
+    def _speak_pcm(self, text, prepared=None):
+        from . import streamspeech
+
+        def on_audio(until):
+            self._speaking_until = until
+
+        try:
+            cfg = dict(self.cfg["tts"], stream_volume=self.cfg.get("sounds", {}).get("volume", 90))
+            if self.duplex:
+                with self.duplex.output(text) as cancel:
+                    first = streamspeech.play(text, cfg, on_audio, cancel, self.duplex.render, self.duplex.pause, prepared)
+            else:
+                first = streamspeech.play(text, cfg, on_audio, prepared=prepared)
+            _log(f"PCM speech: first packet queued {first:.2f}s")
+            return 1
+        except streamspeech.StreamSpeechError as error:
+            if error.played:
+                # Never replay a sentence after the listener heard its start.
+                _log(f"voice stream interrupted: {error}")
+                return -1
+            _log(f"PCM speech failed before audio ({error}) — using fallback")
+            return 0
+
+    def _speak_wav(self, text, path):
+        from .streamspeech import play_wav
+        cfg = dict(self.cfg.get("tts", {}), stream_volume=self.cfg.get("sounds", {}).get("volume", 90))
+        def on_audio(until):
+            self._speaking_until = until
+        with self.duplex.output(text) as cancel:
+            play_wav(path, cfg, on_audio, cancel, self.duplex.render, self.duplex.pause)
+
+    def _stock_sound(self, path):
+        if self.duplex:
+            self.duplex.block_stock_sound(self._wav_duration(path))
+        self._snd.play(path, self._next_id())
 
     def pet_pulse(self):
         """Instant 'I felt that' reaction: LED flash + listening eyes. The
@@ -1317,7 +1462,7 @@ class Body:
             self._sfx_queue.append(path)
             return True
         try:
-            self._snd.play(path, self._next_id())
+            self._stock_sound(path)
             return True
         except Exception as e:
             _log(f"play_sfx failed: {e}")
@@ -1328,7 +1473,7 @@ class Body:
         while self._sfx_queue:
             path = self._sfx_queue.popleft()
             try:
-                self._snd.play(path, self._next_id())
+                self._stock_sound(path)
             except Exception as e:
                 _log(f"flush_sfx failed: {e}")
     # real doly_eye.expressions members (verified on-robot 2024 image)

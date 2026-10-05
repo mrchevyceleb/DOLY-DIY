@@ -23,6 +23,34 @@ and rollback to stock. This is not full stock application parity.
 
 ## Her voice
 
+Volume commands: **“Hey Spark, volume 50 percent”**, **“turn it up”**, or
+**“turn it down”**. Relative changes are 15 percentage points, bounded to
+0–100. Spoken numbers such as “forty-five” work. **“What's your volume?”**
+reports the current setting. These commands run locally before games/timers
+and update both streaming speech and SDK sounds. At 0%, confirmations and
+wake chirps are silent; listening remains active, so a new volume command
+can raise it again. The value is saved atomically in `state_dir/volume.json`
+and takes precedence over `sounds.volume` after a restart. Delete that state
+file to return to the configured default.
+
+Deployed October 5, 2026; microphone and all existing hardware subsystems
+reported ready. Four focused volume checks passed locally and on the Pi,
+along with the existing scheduling/PCM/voice-latency checks. Codex-Fix's
+direct medium review returned `NO FINDINGS`. Rollback code is saved on the
+Pi in `/opt/spark/backups/volume-commands-20261005-121232/`.
+
+Wake handoff: after a verified “Hey Spark,” a name-only ASR result such as
+“A spark.” is discarded while the same listener continues capturing the
+command. It cannot become a chat request or restart an old weather topic.
+The October 5 “dim the lights” incident logged only “A spark.” as the user
+turn. The regression check now captures that fragment followed by the light
+command and verifies local Govee brightness control at 30%, without the brain.
+Three regression checks passed locally and on the Pi; the 31 existing voice
+latency and 11 Govee checks passed. Codex-Fix's small-scope direct review
+returned `NO FINDINGS`. The fix is live, both discovered lamps advertise
+brightness control, and microphone/hardware readiness was verified. Previous
+ear code is backed up at `/opt/spark/backups/light-handoff-20261005-122556/`.
+
 Default: **Robot** — HFC female +2 semitones + a subtle ring-mod sheen,
 synthesized on Moria in ~0.4s (the Pi needs 5-15s for the same model — that
 synth latency was most of her 'slow to respond').

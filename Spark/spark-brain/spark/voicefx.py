@@ -84,3 +84,54 @@ def apply_fx(in_wav, out_wav, pitch_semitones=0.0, robot_mix=0.0):
     frames = _ring_mod(frames, params[2], robot_mix)
     _write_wav(out_wav, params, frames)
     return out_wav
+
+
+class PCMEffects:
+    """The same voice effect with continuous resample and ring phase."""
+    def __init__(self, rate, pitch_semitones=0.0, robot_mix=0.0):
+        self.rate = rate
+        self.output_rate = int(rate / (2.0 ** (pitch_semitones / 12.0)))
+        self.pitch = pitch_semitones
+        self.mix = max(0.0, min(1.0, robot_mix))
+        self.state = None
+        self.offset = 0
+
+    def process(self, frames):
+        if audioop is None:
+            return frames
+        if self.pitch:
+            frames, self.state = audioop.ratecv(
+                frames, 2, 1, self.rate, self.output_rate, self.state)
+        if self.mix:
+            samples = array.array("h", frames)
+            step = 2.0 * math.pi * 45.0 / self.rate
+            gain = 1.0 - 0.5 * self.mix
+            for i in range(len(samples)):
+                mod = math.sin(step * (self.offset + i))
+                value = samples[i] * gain + samples[i] * mod * (0.5 * self.mix)
+                samples[i] = max(-32768, min(32767, int(value)))
+            self.offset += len(samples)
+            frames = samples.tobytes()
+        return frames
+
+
+def speech_gain(frames, gain_db=0):
+    """Boost speech with a smooth peak limiter, before volume and echo reference.
+
+    Stateless per sample: chunk boundaries cannot change loudness or add delay.
+    The original signal is preserved when disabled. Above 80% full scale a soft
+    knee approaches 95%, avoiding hard PCM clipping on occasional loud syllables.
+    """
+    gain_db = max(0, min(12, float(gain_db)))
+    if not gain_db:
+        return frames
+    gain = 10 ** (gain_db / 20)
+    samples = array.array("h", frames)
+    for i, sample in enumerate(samples):
+        value = sample / 32768 * gain
+        magnitude = abs(value)
+        if magnitude > .8:
+            magnitude = .8 + .15 * math.tanh((magnitude-.8)/.15)
+            value = math.copysign(magnitude, value)
+        samples[i] = int(value * 32767)
+    return samples.tobytes()

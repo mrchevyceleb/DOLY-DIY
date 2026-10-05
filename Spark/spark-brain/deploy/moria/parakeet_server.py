@@ -1,30 +1,46 @@
 """Parakeet ASR HTTP server — runs on Moria (192.168.50.204:8399).
 
-Drop-in replacement for whisper.cpp's whisper-server /inference contract
-(multipart file upload -> plain text), but backed by NVIDIA Parakeet-TDT
-0.6B v3 via whisper.cpp's parakeet-cli: ~0.5s per utterance on CPU with
-better-than-large-v3 English accuracy. The whisper-server build on Moria
-has no GPU backend; large-v3-turbo took ~8.8s per clip there, parakeet
-takes ~0.55s.
+Drop-in whisper-server /inference contract (multipart WAV -> plain text).
+NVIDIA Parakeet-TDT 0.6B v3 stays resident on CPU in a restartable worker.
+The native shim is compiled against the installed parakeet headers.
 
 Managed by systemd: parakeet-server.service (unit in this directory).
 Rollback: systemctl disable --now parakeet-server; enable --now whisper-server.
 """
 import http.server
 import os
-import subprocess
-import tempfile
 import threading
+from parakeet_engine import PersistentEngine
 
-BIN = "/opt/whisper-moria/build/bin/parakeet-cli"
 MODEL = "/opt/whisper-moria/models/ggml-parakeet-tdt-0.6b-v3-q8_0.bin"
 PORT = int(os.environ.get("PARAKEET_PORT", "8399"))
 BIND = os.environ.get("PARAKEET_BIND", "0.0.0.0")
 THREADS = os.environ.get("PARAKEET_THREADS", "16")
 LOCK = threading.Lock()
-MAX_BODY = 2 * 1024 * 1024   # robot caps utterances at 5s (~160KB); 2MB is generous
+MAX_BODY = 2 * 1024 * 1024  # WAVs also capped at 30s before native decoding
 PERMITS = threading.BoundedSemaphore(8)  # no unbounded thread pileup
 READ_TIMEOUT_S = 15
+ENGINE = None  # loaded once before accepting requests
+
+
+class BoundedHTTPServer(http.server.ThreadingHTTPServer):
+    daemon_threads = True
+
+    def process_request(self, request, client_address):
+        if not PERMITS.acquire(blocking=False):
+            self.shutdown_request(request)
+            return
+        try:
+            super().process_request(request, client_address)
+        except Exception:
+            PERMITS.release()
+            raise
+
+    def process_request_thread(self, request, client_address):
+        try:
+            super().process_request_thread(request, client_address)
+        finally:
+            PERMITS.release()
 
 
 def valid_wav(data):
@@ -34,7 +50,8 @@ def valid_wav(data):
     try:
         with wave.open(io.BytesIO(data), "rb") as w:
             return (w.getnchannels() == 1 and w.getsampwidth() == 2
-                    and 8000 <= w.getframerate() <= 48000 and w.getnframes() > 0)
+                    and 8000 <= w.getframerate() <= 48000
+                    and 0 < w.getnframes() <= 30 * w.getframerate())
     except Exception:
         return False
 
@@ -71,14 +88,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
         self.wfile.write(body)
 
     def do_POST(self):
-        if not PERMITS.acquire(blocking=False):
-            self.send_response(503)
-            self.end_headers()
-            return
-        try:
-            self._handle()
-        finally:
-            PERMITS.release()
+        self._handle()
 
     def _handle(self):
         raw_len = self.headers.get("Content-Length")
@@ -101,30 +111,20 @@ class Handler(http.server.BaseHTTPRequestHandler):
             self.end_headers()
             self.wfile.write(b"not a valid 16-bit mono wav")
             return
-        with LOCK:
-            fd, path = tempfile.mkstemp(suffix=".wav")
-            try:
-                os.write(fd, wav)
-                os.close(fd)
-                proc = subprocess.run(
-                    [BIN, "-t", THREADS, "-m", MODEL, "-f", path, "-np"],
-                    capture_output=True, text=True, timeout=30)
-                text = " ".join(proc.stdout.split())
-            except subprocess.TimeoutExpired:
-                self.send_response(500)
-                self.end_headers()
-                self.wfile.write(b"asr timeout")
-                return
-            finally:
-                try:
-                    os.unlink(path)
-                except OSError:
-                    pass
-        if proc.returncode != 0:
+        # Leave 1.5s for normal decoding inside the client's 3.5s deadline.
+        if not LOCK.acquire(timeout=2):
+            self.send_response(503)
+            self.end_headers()
+            return
+        try:
+            text = ENGINE.transcribe(wav)
+        except Exception as error:
+            print("[asr]", error, flush=True)
             self.send_response(500)
             self.end_headers()
-            self.wfile.write(proc.stderr[:200].encode())
             return
+        finally:
+            LOCK.release()
         data = text.encode()
         self.send_response(200)
         self.send_header("Content-Type", "text/plain")
@@ -137,5 +137,6 @@ class Handler(http.server.BaseHTTPRequestHandler):
 
 
 if __name__ == "__main__":
+    ENGINE = PersistentEngine(MODEL, THREADS)
     print("parakeet-asr on", BIND, PORT, flush=True)
-    http.server.ThreadingHTTPServer((BIND, PORT), Handler).serve_forever()
+    BoundedHTTPServer((BIND, PORT), Handler).serve_forever()

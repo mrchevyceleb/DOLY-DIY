@@ -17,24 +17,31 @@ class Recognizer:
         self.sample_rate = cfg["asr"]["sample_rate"]
         self._kaldi_cls = KaldiRecognizer
         self._finalized = []
+        self.last_words = []
 
     def begin(self, grammar=None):
         """Start a fresh decode; optional grammar turns Vosk into a KWS."""
         self.rec = (self._kaldi_cls(self.model, self.sample_rate, json.dumps(grammar))
                     if grammar else self._kaldi_cls(self.model, self.sample_rate))
         self._finalized = []
+        self.last_words = []
+        self.rec.SetWords(True)
 
     def feed(self, pcm):
         """Feed a frame chunk. Returns finalized text so far, or None."""
         if self.rec.AcceptWaveform(pcm):
-            text = self._clean(self.rec.Result())
+            result = self.rec.Result()
+            self.last_words.extend(json.loads(result).get("result", []))
+            text = self._clean(result)
             if text:
                 self._finalized.append(text)
                 return text
         return None
 
     def finish(self):
-        tail = self._clean(self.rec.FinalResult())
+        result = self.rec.FinalResult()
+        self.last_words.extend(json.loads(result).get("result", []))
+        tail = self._clean(result)
         if tail:
             self._finalized.append(tail)
         return " ".join(self._finalized).strip()

@@ -16,7 +16,15 @@ import urllib.request
 
 from . import actions
 from . import commands as cmds
+from .duplex import is_stop_request
+
+
+def _light_information(text):
+    return (bool(cmds._NEGATION_RE.search(text))
+            or bool(re.match(r"^(?:how|why|what|when|where|who|are|is|was|were|do|does|did)\b", text))
+            or bool(re.search(r"\b(?:tell me|let me know|explain|show me|teach me|help me understand)\s+(?:how|why|what|whether|if|about)\b", text)))
 from . import search as websearch
+from . import volume
 from .govee import GoveeLights
 from .sched import AlarmClock, fmt_clock, next_occurrence
 
@@ -148,8 +156,7 @@ class Router:
             return True
 
         # emergency stop outranks EVERY other route (search, colors, table)
-        tokens = text.split()
-        if tokens and (tokens[0] == "stop" or tokens[-1] == "stop"):
+        if is_stop_request(text):
             if getattr(self, "pet", None) is not None:
                 self.pet.cancel()
             self._stop_celebration()
@@ -159,6 +166,25 @@ class Router:
         # talking to her ends any running celebration — she attends to you
         if getattr(self, "_celebration", None) is not None:
             self._stop_celebration()
+
+        request = volume.intent(text)
+        if request is not None:
+            kind, value = request
+            if kind == "query":
+                self.body.speak(f"My volume is {self.body.volume} percent.")
+            elif kind == "invalid":
+                self.body.speak("Say volume, then a percentage from zero to one hundred.")
+            else:
+                target = max(0, min(100, self.body.volume + value)) if kind == "step" else value
+                try:
+                    saved = self.body.set_volume(target)
+                except Exception as error:
+                    _log(f"volume change failed: {error}")
+                    self.body.speak("I couldn't change my volume. Please try again.")
+                else:
+                    self.body.speak(f"Volume {target} percent."
+                                    + ("" if saved else " I couldn't save it for a restart."))
+            return True
 
         # pet life: answers to her questions, tricks, games, praise, notes
         pet = getattr(self, "pet", None)
@@ -283,6 +309,17 @@ class Router:
                 self.body.speak(reply)
                 return True
 
+        # A recognizable light order must not fall into small talk or a
+        # fuzzy weather match when its device or requested setting is missing.
+        if (not cmds._NEGATION_RE.search(low) and not _HERS_LIGHTS_RE.search(low)
+                and re.search(r"\b(?:lights?|lamps?|lighting)\b", low)
+                and re.match(r"^(?:(?:please|can you|could you|would you|actually|just) )*"
+                             r"(?:dim|brighten|turn|switch|set|make|change|put)\b", low)):
+            self.body.speak("Try lights on, lights off, or dim the lights to a percentage."
+                            if self.govee and self.govee.enabled else
+                            "Room-light control is unavailable right now.")
+            return True
+
         # color commands (need param extraction before fuzzy match)
         if ("eye" in low or "eyes" in low) and ("color" in low or "colour" in low):
             color = cmds.extract_color(text)
@@ -360,6 +397,8 @@ class Router:
     def light_shortcut(self, low, name=None):
         """Matt's named looks ('gaming lights', 'gaming mode'): a scene or
         color plus a brightness. None when the sentence asks for none."""
+        if _light_information(low):
+            return None
         shortcuts = (self.cfg.get("govee", {}) or {}).get("shortcuts") or {}
         look = shortcuts.get(name) if name else None
         for key, spec in ({} if name else shortcuts).items():
@@ -393,24 +432,34 @@ class Router:
         """Parse a room-lights request; None lets other handlers try.
         named=False: a follow-up that never said 'lights'."""
         low = text.lower()
+        if cmds._NEGATION_RE.search(low) or re.search(r"\b(?:tell me|let me know|explain|show me|teach me|help me understand)\s+(?:how|why|what|whether|if|about)\b", low):
+            return None
         g = self.govee
+        if re.match(r"^(?:how|why|what|when|where|who|are|is|was|were|do|does|did)\b", low):
+            if re.search(r"\b(?:status|which|how many)\b", low):
+                return g.status()
+            return None
         normal_k = (self.cfg.get("govee", {}) or {}).get("normal_kelvin", 4000)
         # on / off
         if _GOVEE_OFF_RE.search(low):
             return g.turn(False)
         if _GOVEE_ON_RE.search(low):
             return g.turn(True)
-        # brightness: "dim (to N%)", "set to 40", "half", word numbers
-        m = re.search(r"(?:dim|brighten|brightness|set|turn)[^0-9]{0,20}"
-                      r"(\d+|" + "|".join(cmds._NUM_WORDS) + r")\s*(?:%|percent)?\b", low)
-        # 'set my lights to 40%' arrives as '... to 40': the sign is stripped
-        if m and re.search(r"\b(?:dim|brighten|brightness|percent)\b|\bto\s+\w+\s*$", low):
-            pct = m.group(1)
-            pct = cmds._NUM_WORDS.get(pct, pct)
-            try:
-                return g.brightness(round(float(pct)))
-            except (TypeError, ValueError):
-                pass
+        # Collect the entire terminal number phrase, including invalid
+        # hundreds. Never reinterpret "one hundred fifty" as just "fifty".
+        if re.search(r"\b(?:dim|brighten|brightness|set|turn)\b", low):
+            tokens = re.sub(r"(?: percent| per cent| please)+$", "", low).split()
+            numeric_words = set(volume._ONES) | set(volume._TENS) | {"hundred", "thousand", "million", "and", "minus", "negative", "a"}
+            at = len(tokens)
+            while at and (tokens[at-1] in numeric_words or tokens[at-1].isdigit()):
+                at -= 1
+            if at < len(tokens):
+                if re.search(r"\bby\b", low):
+                    return "Say dim the lights to a percentage."
+                kind, pct = volume.intent("volume " + " ".join(tokens[at:]))
+                if kind != "set":
+                    return "Say a light brightness from zero to one hundred percent."
+                return g.brightness(pct)
         # out of a scene or a color, back to plain white at full
         if re.search(r"\b(?:normal|regular|plain|default|ordinary)\b", low):
             g.color_temp(normal_k)

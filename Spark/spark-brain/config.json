@@ -12,11 +12,20 @@
   "audio": {
     "input_device": "plughw:CARD=tlv320aic31xxso,DEV=0",
     "sample_rate": 16000,
-    "silence_ms": 460,
-    "max_utterance_ms": 5000,
-    "start_rms": 900,
-    "stop_rms": 500,
-    "wake_weak_rms": 4000
+    "silence_ms": 700,
+    "max_utterance_ms": 15000,
+    "start_rms": 250,
+    "stop_rms": 125,
+    "wake_weak_rms": 2000,
+    "wake_arm_rms": 200,
+    "wake_keyword_rms": 1250,
+    "wake_verify_fuzzy_rms": 2250,
+    "hard_utterance_ms": 20000,
+    "echo_cancellation": true,
+    "echo_tail_ms": 300,
+    "capture_latency_ms": 120,
+    "mic_pga_db": 42,
+    "adc_gain_db": 5
   },
   "asr": {
     "model_path": "/opt/spark/vosk-model-small-en-us-0.15",
@@ -27,10 +36,17 @@
   "tts": {
     "voice_model": 1,
     "volume": 1,
-    "server_url": "http://192.168.50.204:8398",
-    "voice_name": "hfc",
-    "pitch_semitones": 2,
-    "robot_mix": 0.25,
+    "server_url": "http://192.168.50.204:8400",
+    "voice_name": "warm-soft-robot",
+    "server_timeout_s": 30,
+    "server_streaming": true,
+    "stream_timeout_s": 8,
+    "speech_gain_db": 6,
+    "fallback_server_url": "http://192.168.50.204:8398",
+    "fallback_voice_name": "hfc",
+    "fallback_timeout_s": 6,
+    "pitch_semitones": 0.75,
+    "robot_mix": 0.16,
     "piper_model": "/.doly/data/piper/en_US-hfc_female-medium.onnx"
   },
   "sounds": {
@@ -94,7 +110,9 @@
   "moods": true,
   "conversation": {
     "follow_up_window_s": 12,
-    "follow_ups": 2
+    "follow_ups": 2,
+    "barge_in": true,
+    "barge_in_min_rms": 225
   },
   "govee": {
     "enabled": true,

@@ -127,7 +127,11 @@ class ToolLoopTests(unittest.TestCase):
                              "page_max_chars": 100, "page_timeout_s": 6}}
         spark.body = MagicMock()
         spark.body.mood = "happy"
-        spark.body.speak_stream.side_effect = lambda gen: list(gen)  # consume like the real pipeline
+        def play(gen, on_spoken=None):
+            for sentence in gen:
+                if on_spoken:
+                    on_spoken(sentence)
+        spark.body.speak_stream.side_effect = play
         spark._body_context = lambda: ""
         spark.memory = Mock()
         spark.memory.messages.side_effect = lambda system: [
@@ -274,7 +278,9 @@ class ToolLoopTests(unittest.TestCase):
         with patch.object(websearch, "read_page", return_value=huge):
             spark._llm_reply("read example.com/big")
         content = spark.brain.chat_stream.call_args_list[1][0][0][-1]["content"]
-        self.assertLessEqual(len(content), 9000 + 800)  # budget + prompt scaffolding
+        # Bound evidence independently of the live robot/voice scaffolding.
+        evidence = content.split("inside it:\n", 1)[1].split("\n\n(Reminder:", 1)[0]
+        self.assertLessEqual(len(evidence), 9000)
 
 
 if __name__ == "__main__":

@@ -9,6 +9,8 @@ import sys
 import time
 import urllib.error
 import urllib.request
+from .duplex import TurnInterrupted, closing_on_cancel
+import contextlib
 
 
 class BrainOffline(Exception):
@@ -54,6 +56,8 @@ class Brain:
                 return
             except BrainOffline:
                 raise
+            except TurnInterrupted:
+                raise
             except urllib.error.HTTPError as e:
                 if (e.code in (400, 404, 422) and model == self.model and self.fallback_model
                         and fallback):
@@ -76,7 +80,7 @@ class Brain:
             cands.append(self.fallback_model)
         return cands
 
-    def _stream_once(self, model, messages, on_delta, temperature=None, max_tokens=None):
+    def _stream_once(self, model, messages, on_delta, temperature=None, max_tokens=None, cancel=None):
         payload = {
             "model": model,
             "messages": messages,
@@ -110,13 +114,15 @@ class Brain:
             else:
                 raise
 
-        with resp:
+        with resp, (closing_on_cancel(resp, cancel) if cancel is not None else contextlib.nullcontext()):
             saw_done = False
             json_errors = 0
             n_out = 0
             finish, extra = None, set()
             try:
                 for raw in resp:
+                    if cancel is not None and cancel.is_set():
+                        raise TurnInterrupted()
                     line = raw.decode("utf-8", errors="replace").strip()
                     if not line.startswith("data:"):
                         continue
@@ -147,6 +153,8 @@ class Brain:
                     if on_delta:
                         on_delta(delta)
                     yield delta
+                if cancel is not None and cancel.is_set():
+                    raise TurnInterrupted()
                 if not saw_done and n_out == 0:
                     # EOF before any output and before [DONE] = dead stream
                     raise BrainOffline("stream ended before completion with no output")
@@ -156,6 +164,8 @@ class Brain:
                           file=sys.stderr)
             except BrainOffline:
                 raise
+            except TurnInterrupted:
+                raise
             except Exception as e:
                 # any transport/protocol/parse failure mid-stream = brain offline
                 raise BrainOffline(f"stream failed: {e}") from e
@@ -164,17 +174,23 @@ class Brain:
 _SENTENCE_END = re.compile(r"(?<=[.!?…])\s+")
 
 
-def iter_sentences(deltas):
+def iter_sentences(deltas, early_clause=False):
     """Buffer streamed deltas, yield complete sentences as they close."""
     buf = ""
+    first = True
     for delta in deltas:
         buf += delta
         while True:
             m = _SENTENCE_END.search(buf)
+            if early_clause and first and not re.match(r"\s*(?:SEARCH|READ):", buf, re.I):
+                clause = re.search(r"[,;—]\s+", buf)
+                if clause and len(buf[:clause.end()].split()) >= 5 and (not m or clause.end() < m.end()):
+                    m = clause
             if not m:
                 break
             sent, buf = buf[: m.end()].strip(), buf[m.end():]
             if sent:
+                first = False
                 yield sent
     tail = buf.strip()
     if tail:
@@ -188,15 +204,17 @@ def spoken_sentences(deltas, detailed=False):
     """
     max_sentences, remaining = (6, 120) if detailed else (2, 35)
     try:
-        for index, sentence in enumerate(iter_sentences(deltas)):
+        completed = 0
+        for index, sentence in enumerate(iter_sentences(deltas, early_clause=True)):
             words = sentence.split()
             if len(words) > remaining:
-                if index == 0:
+                if completed == 0:
                     yield " ".join(words[:remaining]).rstrip(",;:!?.") + "."
                 break
             yield sentence
             remaining -= len(words)
-            if index + 1 >= max_sentences or remaining == 0:
+            completed += int(bool(re.search(r"[.!?…]$", sentence)))
+            if completed >= max_sentences or remaining == 0:
                 break
     finally:
         close = getattr(deltas, "close", None)

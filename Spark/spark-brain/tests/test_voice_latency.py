@@ -27,6 +27,24 @@ def pcm(level):
 
 
 class VoiceLatencyTests(unittest.TestCase):
+    def test_word_timing_survives_finalized_name_and_resets_with_next_decode(self):
+        import json
+        from spark.asr import Recognizer
+        rec = Recognizer.__new__(Recognizer)
+        native = Mock()
+        native.AcceptWaveform.return_value = True
+        native.Result.return_value = json.dumps({"text": "hey spark", "result": [
+            {"word": "hey", "end": .3}, {"word": "spark", "end": .8}]})
+        native.FinalResult.return_value = json.dumps({"text": "weather", "result": [
+            {"word": "weather", "end": 2.0}]})
+        rec._kaldi_cls, rec.model, rec.sample_rate = Mock(return_value=native), None, 16000
+        rec.begin()
+        rec.feed(pcm(1800))
+        self.assertEqual(rec.finish(), "hey spark weather")
+        self.assertEqual([w["word"] for w in rec.last_words], ["hey", "spark", "weather"])
+        rec.begin()
+        self.assertEqual(rec.last_words, [])
+
     def test_chat_receives_live_state_instead_of_assuming_a_charger(self):
         import json
         spark = Spark.__new__(Spark)
@@ -209,8 +227,40 @@ class VoiceLatencyTests(unittest.TestCase):
                                             WakeResult("Park. What's", command="What's"))
         self.assertEqual(text, "What's the weather today?")
         with patch("spark.ear.record_utterance", side_effect=AssertionError):
-            text, _ = spark._listen_command(Mock(), Mock(), WakeResult("Spark, stop."))
+            text, _ = spark._listen_command(Mock(), Mock(), WakeResult("Spark, stop.", partial=True))
         self.assertEqual(text, "stop.")
+
+    def test_partial_wake_punctuation_keeps_the_rest_of_the_light_command(self):
+        speech, room = pcm(5000), pcm(500)
+        frames = iter([room]*5 + [speech]*60 + [room]*40)
+        rec = Mock(feed=Mock(return_value=None), partial=Mock(return_value="hey spark"))
+        wake = listen_for_wake(frames, rec, CFG, ["hey spark"],
+                               noise_floor=lambda: 500,
+                               verify_wake=Mock(return_value="Hey Spark, dimble."))
+        self.assertTrue(wake.partial)
+        spark = Spark.__new__(Spark)
+        spark.cfg = {**CFG, "asr": {"server_url": "test"}}
+        spark.whisper = Mock()
+        spark.whisper.transcribe_pcm.return_value = "Hey Spark, dim the lights to thirty."
+        mic = Mock(noise_floor=500)
+        mic.frames = lambda: frames
+        text, _ = spark._listen_command(mic, rec, wake)
+        self.assertEqual(text, "dim the lights to thirty.")
+        recording = spark.whisper.transcribe_pcm.call_args.args[0]
+        self.assertTrue(recording.startswith(wake.clip_pcm))
+        self.assertGreater(len(recording), len(wake.clip_pcm))
+        # Silence after an early completed command adds no second ASR call.
+        spark.whisper.reset_mock()
+        mic.frames = lambda: iter([room]*40)
+        wake.text = "Hey Spark, lights off."
+        text, _ = spark._listen_command(mic, rec, wake)
+        self.assertEqual(text, "lights off.")
+        spark.whisper.transcribe_pcm.assert_not_called()
+        # An endpointed command must not absorb unrelated room talk.
+        wake.partial = False
+        with patch("spark.ear.record_utterance", side_effect=AssertionError):
+            text, _ = spark._listen_command(mic, rec, wake)
+        self.assertEqual(text, "lights off.")
 
     def test_paused_okay_does_not_discard_followup_request(self):
         spark = Spark.__new__(Spark)
@@ -458,6 +508,34 @@ class VoiceLatencyTests(unittest.TestCase):
         for text in ("Be quiet.", "Spark, shut up!", "Shh.", "Okay, stop talking"):
             self.assertTrue(_hushed(text), text)
         self.assertFalse(_hushed("quiet the lights"))
+
+    def test_busy_room_rechecks_dropped_wake_prefix_without_authorizing_kws_alone(self):
+        from spark.ear import RoomTalk
+        busy = RoomTalk()
+        for _ in range(3):
+            busy.note()
+        rec = Mock(feed=Mock(return_value=None), partial=Mock(return_value=""),
+                   finish=Mock(return_value="a spark [unk]"))
+        rec.last_words = [{"word": "a", "end": .2}, {"word": "spark", "end": .75},
+                          {"word": "[unk]", "end": 1.4}]
+        frames = [pcm(400)]*5 + [pcm(1800)]*35 + [pcm(400)]*40
+        for full, prefix, accepted in (("What's the weather?", "Hey Spark.", True),
+                                       ("What's the weather?", "What's the weather?", False),
+                                       ("What's the weather?", "A spark started a fire.", False),
+                                       ("What's the weather?", "A spark.", False),
+                                       ("Hate Spark, what's the weather?", "Hate Spark.", True),
+                                       ("I hate Spark, what's the weather?", "Hate Spark.", False),
+                                       ("Hate Spark is a character.", "Hate Spark.", False),
+                                       ("Hate Spark, what's the weather?", "Hate Sparky.", False)):
+            with self.subTest(full=full, prefix=prefix):
+                verify = Mock(side_effect=[full, prefix])
+                result = listen_for_wake(iter(frames), rec, CFG, ["hey spark"], room=busy,
+                                         noise_floor=lambda: 380, verify_wake=verify)
+                self.assertEqual(bool(result), accepted)
+                if accepted:
+                    self.assertEqual(result.command.casefold(), "What's the weather?".casefold())
+                    self.assertIn(pcm(1800)*35, result.clip_pcm)
+                self.assertEqual(len(verify.call_args.args[0]), int(16000*.87)*2)
 
     def test_loud_parakeet_bart_still_wakes(self):
         rec = Mock()

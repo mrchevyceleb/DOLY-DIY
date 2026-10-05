@@ -17,6 +17,7 @@ import time
 
 from .body import Body
 from .brain import Brain, BrainOffline, spoken_sentences
+from .duplex import DuplexAudio, TurnInterrupted, interruptible
 from .config import load_config
 from .inbox import Inbox
 from .memory import Memory
@@ -273,6 +274,9 @@ class Spark:
                 return
             # quick tap -> talk
             if not self.listening:
+                duplex = getattr(self, "duplex", None)
+                if duplex:
+                    duplex.interrupt("tap")
                 self.body.pet_pulse()
                 self.talk_trigger.set()
 
@@ -414,7 +418,8 @@ class Spark:
         self.body.dock_probe()
 
         # ONE persistent mic stream: always drained (no stale buffers)
-        with MicStream(self.cfg) as mic:
+        with DuplexAudio(self.cfg, lambda pcm: self.whisper.transcribe_wake_pcm(pcm)) as duplex, MicStream(self.cfg) as mic:
+            self.duplex = self.body.duplex = mic.processor = duplex
             self.body.motion_stop_factory = lambda name_stops=True: self._motion_stop_listener(
                 mic, recognizer, name_stops=name_stops)
             idle_cfg = self.cfg.get("idle", {})
@@ -485,7 +490,7 @@ class Spark:
                 idle_action["act"] = None  # stale idle flags must never eat a wake
                 # Playback and its short echo tail finish BEFORE the window
                 # starts. The capture thread drains ALSA throughout the reply.
-                self._wait_for_playback(mic)
+                interrupted_audio = self._wait_for_playback(mic)
                 # Her name said mid-motion: she stopped to listen — take the
                 # turn now instead of demanding the name again.
                 pending = getattr(self, "_motion_wake_pending", None)
@@ -493,11 +498,17 @@ class Spark:
                                and not self.body.sleeping)
                 if motion_wake:
                     pending.clear()
-                in_followup = (follow_pending or motion_wake) and not self.body.sleeping
+                in_followup = (follow_pending or motion_wake or interrupted_audio is not None) and not self.body.sleeping
                 follow_pending = False
 
                 triggered_by_wake = None
-                if in_followup:
+                if interrupted_audio is not None:
+                    from .ear import WakeResult
+                    pcm, stamp = interrupted_audio
+                    mic.discard_before(stamp)
+                    triggered_by_wake = WakeResult("", prefix_pcm=pcm) if pcm else None
+                    log("spark", "interruption ready: preserving your words")
+                elif in_followup:
                     log("spark", f"follow-up ready: {follow_cfg.get('follow_up_window_s', 8)}s")
                 elif wake_enabled or self.body.sleeping:
                     if not self.body.sleeping:
@@ -650,7 +661,12 @@ class Spark:
                     continue  # next pass requires her name or a tap
 
                 log("spark", f"heard: '{text}'")
-                self.converse(text)
+                mic.retain(6)
+                duplex.begin(mic.noise_floor)
+                try:
+                    self.converse(text)
+                finally:
+                    duplex.end()
                 self.body.drain_anims()  # touch events during the reply
                 _, next_flourish, next_wander = _reset_idle()
                 idle_action["act"] = None
@@ -706,7 +722,7 @@ class Spark:
         Decoded alone, the tail of 'Spark, what are people ...' came back
         empty and she answered 'what are people'. Returns None when there
         is no clip or no server ASR (the caller stitches text instead)."""
-        from .ear import CommandAudio, record_utterance
+        from .ear import CommandAudio, record_utterance, strip_wake_prefix
         if not (wake.clip_pcm and getattr(self, "whisper", None)
                 and self.cfg.get("asr", {}).get("server_url")):
             return None
@@ -718,6 +734,11 @@ class Spark:
         started = time.perf_counter()
         whole = self.whisper.transcribe_pcm(wake.clip_pcm + rest).strip()
         log("spark", f"continuation {time.perf_counter()-started:.2f}s: '{whole}'")
+        # The full audio can correct the fragment's first word ('dimble' ->
+        # 'dim the'). Strip the newly decoded name before matching old words.
+        command = strip_wake_prefix(whole)
+        if command != whole and command:
+            return command
         words = list(re.finditer(r"[\w']+", whole))
         said_words = re.findall(r"[\w']+", said.lower())
         if not words or not said_words:
@@ -741,13 +762,14 @@ class Spark:
         if said:
             # The verified clip ends at the wake endpoint, often mid-sentence
             # ('Park. What's'); the rest was queued in the mic during the check.
-            # The verifier punctuates a finished sentence ('Spark, stop.'), and
-            # those must not absorb background talk.
-            # A short wh-question is the exception: 'Spark, what are the best
-            # ... ?' came back as 'What are the best?' and she answered that.
-            # The check waits at most 0.6 s for more speech.
+            # ASR also punctuates partial clips ('Hey Spark, dimble.'). Only
+            # an endpointed wake may use punctuation to skip continuation.
+            # Stops stay immediate; short questions still check for a tail.
             cut_question = bool(_CUT_QUESTION_RE.match(said.strip())) and len(said.split()) <= 6
-            if said.rstrip().endswith((".", "?", "!")) and not cut_question:
+            if re.fullmatch(r"(?:please\s+)?stop[.!?]*", said.strip(), re.I):
+                return said, b""
+            if (not wake.partial and said.rstrip().endswith((".", "?", "!"))
+                    and not cut_question):
                 return said, b""
             whole = self._wake_continuation(mic, wake, said)
             if whole is not None:
@@ -812,11 +834,21 @@ class Spark:
             # second chirp or discarding the microphone's queued command audio.
 
     def _wait_for_playback(self, mic):
-        mic.retain(1.0)
+        duplex = getattr(self, "duplex", None)
+        mic.retain(6.0 if duplex else 1.0)
         while self.body.speaking_recently():
             next(mic.frames())
+        # An interruption begun on her last word still gets verified and
+        # handed back, rather than disappearing when playback drains.
+        deadline = time.monotonic() + 4.5
+        while duplex and duplex.checking and time.monotonic() < deadline:
+            next(mic.frames())
+        pending = duplex.take_pending() if duplex else None
+        if pending is not None:
+            return pending
         mic.discard()
         mic.learn_noise(True)
+        return None
 
     def _wait_for_wake(self, mic, recognizer, wake_words, idle_check=None):
         """Block until wake word or tap. Always drains audio (keeps stream fresh)."""
@@ -953,24 +985,30 @@ class Spark:
 
     def _generate_reply(self, user_text, extra_context, web_hops):
         self.body.eyes("thinking")
-        system = self.cfg["prompt"] + self._body_context()
-        system += (f"\nCURRENT LOCAL DATE/TIME: "
+        # Keep the persona prefix stable for LM Studio's KV cache. Changing
+        # telemetry/time near its start made every turn re-evaluate history.
+        system = self.cfg["prompt"]
+        live_context = self._body_context()
+        live_context += (f"\nCURRENT LOCAL DATE/TIME: "
                    f"{datetime.datetime.now():%A, %B %d, %Y, %I:%M %p}. "
                    "Anything after your training cutoff is unknown to you — "
                    "use the web tool when this turn offers it.")
         if self.cfg.get("moods", True):
             mood_note = "(Current mood: " + self.body.mood + "; stay kind regardless of mood.)"
-            system = system + chr(10) + chr(10) + mood_note
+            live_context += "\n\n" + mood_note
         weather = self._weather_context(user_text)
-        system += weather
+        live_context += weather
         pet = getattr(self, "pet", None)
         if pet is not None:
-            system += pet.context()
+            live_context += pet.context()
         messages = self.memory.messages(system)
         # Memory only gets the user turn after a reply exists, so it must be
         # added here. Without it (since 41366f2) the brain saw her own last
         # reply as an unfinished turn: empty replies and echoed instructions.
         messages.append({"role": "user", "content": user_text})
+        messages[-1]["content"] += (
+            "\n\n[CURRENT ROBOT CONTEXT — live state for this turn]\n"
+            + live_context + "\n[END CURRENT ROBOT CONTEXT]")
         if extra_context:
             # Template-safe injection: strict chat templates (qwen etc.) break on
             # interleaved system/user roles mid-conversation, so tool data rides
@@ -1013,9 +1051,15 @@ class Spark:
             + " Reply in English only, whatever language the user text seems to be."
             + web_offer)
         reply_parts = []
+        duplex = getattr(self, "duplex", None)
         started = time.perf_counter()
+        sentences = None
         try:
-            sentences = spoken_sentences(self.brain.chat_stream(messages), detailed=detailed)
+            deltas = (self.brain.chat_stream(messages, cancel=duplex.cancel) if duplex
+                      else self.brain.chat_stream(messages))
+            sentences = spoken_sentences(deltas, detailed=detailed)
+            if duplex:
+                sentences = interruptible(sentences, duplex.cancel)
             with self.body.busy("thinking"):
                 first = next(sentences, "")
             tool = websearch.parse_tool_call(first) if web_hops > 0 and first else None
@@ -1078,18 +1122,16 @@ class Spark:
                 yield from spoken
                 yield from sentences
 
-            first_out = [True]
-
-            def _collect():
-                for sentence in _gen():
-                    if first_out[0]:
-                        log("spark", f"LLM first sentence {time.perf_counter()-started:.2f}s")
-                        self.body.eyes("speaking")
-                        first_out[0] = False
-                    reply_parts.append(sentence)
-                    yield sentence
-
-            self.body.speak_stream(_collect())  # pipelined: synth N+1 during N
+            log("spark", f"LLM first speech chunk {time.perf_counter()-started:.2f}s")
+            self.body.eyes("speaking")
+            # TTS may prepare later chunks on a worker. Only the playback
+            # thread confirms a completed chunk into conversation memory.
+            self.body.speak_stream(_gen(), on_spoken=reply_parts.append)
+        except TurnInterrupted:
+            self.memory.add("user", user_text)
+            self.memory.add("assistant", (" ".join(reply_parts) + " [Reply interrupted by the user.]").strip())
+            self.body.eyes("listening")
+            return
         except BrainOffline as e:
             log("spark", f"brain went offline: {e}")
             if reply_parts:
@@ -1100,6 +1142,12 @@ class Spark:
             self.body.eyes("idle")
             self.brain_online = False
             return
+        finally:
+            if sentences is not None:
+                try:
+                    sentences.close()
+                except ValueError:
+                    pass  # the prefetch producer owns closing an active iterator
 
         reply = " ".join(reply_parts).strip()
         if reply:
@@ -1135,7 +1183,12 @@ class Spark:
         self.body.eyes("looking")
         self.body.speak(filler)
         with self.body.busy("looking"):
-            t.join(timeout=join_s)
+            deadline = time.monotonic() + join_s
+            while t.is_alive() and time.monotonic() < deadline:
+                duplex = getattr(self, "duplex", None)
+                if duplex and duplex.cancel.is_set():
+                    raise TurnInterrupted()
+                t.join(timeout=.05)
         if t.is_alive():
             log("spark", f"web tool still running after {join_s}s — treating as failed")
         context = render(box.get("out"))
@@ -1194,6 +1247,10 @@ class Spark:
                 return
 
             self._llm_reply(text)
+        except TurnInterrupted:
+            self.memory.add("user", text)
+            self.memory.add("assistant", "[Spoken response interrupted by the user.]")
+            self.body.eyes("listening")
         finally:
             self.body.react_enabled = not self.body.sleeping
             log("spark", f"response finished {time.perf_counter()-t0:.2f}s")
