@@ -30,7 +30,7 @@ class ChargingSafetyTests(unittest.TestCase):
         self.assertEqual(len(b._edge_gaps()), 4)
 
     def body(self, charging=True, pct=0, gaps=None):
-        b = Body({"state_dir": "/unused", "idle": {}}, hw=False)
+        b = Body({"state_dir": "/unused", "idle": {"dock_connection_notice": True}}, hw=False)
         b.hw = True
         b.has = {"drive": True, "arm": True, "edge": True, "battery": True}
         b._drive = Mock()
@@ -527,6 +527,13 @@ class ChargingSafetyTests(unittest.TestCase):
         with patch("spark.body.time.monotonic", return_value=336):
             b.refresh_power()
             pct = 100  # recovered before the main loop consumes the warning
+            self.assertFalse(b.take_charge_notice())
+        pct = 50
+        b.cfg["idle"].pop("dock_connection_notice")  # quiet by default
+        with patch("spark.body.time.monotonic", return_value=350):
+            b.refresh_power()
+        with patch("spark.body.time.monotonic", return_value=366):
+            b.refresh_power()
             self.assertFalse(b.take_charge_notice())
         self.assertTrue(b.docked)
         b._drive.go_distance.assert_not_called()

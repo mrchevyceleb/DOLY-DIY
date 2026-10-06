@@ -959,3 +959,16 @@ Deployed at 14:08 EDT, backup `/opt/spark/backups/charge-notice-20261006-140822/
 All 31 charging-safety and 41 voice checks passed; local/live source hashes,
 health and microphone readiness verified. At 14:08:54, the live monitor reported
 100% battery and positive confirmed charging. Configuration/volume preserved.
+
+At 14:10 the warning recurred after the monitor reported 93% battery and
+sustained discharge. The near-full filter alone did not meet Matt's request.
+Automatic dock-connection speech is now opt-in through
+`idle.dock_connection_notice`, default false. This suppresses that reminder,
+not electrical monitoring, motor holds, explicit battery answers or critical
+low-battery handling. The ongoing current discrepancy remains a separate
+diagnostic question; silencing the reminder does not establish charger health.
+
+Deployed at 14:13 EDT, backup `/opt/spark/backups/dock-notice-optout-20261006-141310/`.
+The live flag is absent, so the quiet default applies without replacing config.
+All 31 charging checks passed. Codex-Fix: four files, 20 changed lines, one medium
+direct CLI pass, no findings. Service and microphone verified healthy.

@@ -99,6 +99,7 @@
     "wake_verify_fuzzy_rms": 4500
   },
   "idle": {
+    "dock_connection_notice": false,
     "flourish_s": 40,
     "wander_s": 15,
     "low_battery_pct": 10,

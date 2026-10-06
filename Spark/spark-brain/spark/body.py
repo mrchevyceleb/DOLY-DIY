@@ -1127,6 +1127,8 @@ class Body:
                 _log(f"exit back-off persistence failed: {exc}")
 
     def _charge_notice_delay(self):
+        if not self.cfg.get("idle", {}).get("dock_connection_notice", False):
+            return None
         # Full/tapering docks need no unsolicited reseat prompt. Keep the
         # warning for meaningful depletion; motor protection is unchanged.
         pct = self.battery_pct()
