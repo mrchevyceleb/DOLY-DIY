@@ -1480,6 +1480,7 @@ class Body:
     # ------------------------------------------------------------------ eyes
     _EXPR_CANDIDATES = {
         "listening": ["ATTENTION", "WAKE_WORD", "LOOK_AHEAD"],
+        "followup": ["ATTENTION", "WAKE_WORD", "LOOK_AHEAD"],
         "thinking": ["SCAN", "CONCENTRATE", "THINK"],
         "speaking": ["HAPPY", "CHEERFUL", "EXCITED"],
         "idle": ["BLINK", "FINE", "BLINK_ONLY"],
@@ -1493,6 +1494,7 @@ class Body:
 
     _LED_MOODS = {  # (color, fade ms) — ambient moods per state
         "listening": ("Cyan", 600),
+        "followup": ("Green", 0),
         "thinking": ("Purple", 900),
         "speaking": ("Yellow", 500),
         "idle": ("Blue", 2000),

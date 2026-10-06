@@ -914,3 +914,18 @@ Temporary human WAVs and metadata were removed from Pi, Moria and local
 workspace after diagnosis; diagnostic recording remains off. No human
 recording was added to model training. The final combined-listener user
 test is pending; no improved real-room success rate is claimed yet.
+
+## Follow-up listening indicator
+
+Green side lights and attentive eyes indicate the actual follow-up listening
+window: Matt can reply without the wake phrase. This cue begins after playback
+and echo settling, when capture starts. It returns to the normal blue idle
+state when capture ends or times out; exceptions also clear the cue. Sleeping
+returns to the dark sleepy state. A fresh wake remains cyan, thinking purple
+and speaking yellow. No chirp, audio processing or timeout settings change.
+
+Deployed October 6 at 09:58 EDT, with backup
+`/opt/spark/backups/followup-status-20261006-095815/`. Live source hashes and
+health verified; configuration and volume preserved. All 41 scoped voice
+checks passed, and the medium Codex-Fix review found no issues. Matt confirmed
+the visual indicator works well.

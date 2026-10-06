@@ -906,7 +906,11 @@ class VoiceLatencyTests(unittest.TestCase):
         spark.talk_trigger = Mock()
         spark.talk_trigger.is_set.return_value = False
         spark._wait_for_wake = Mock(side_effect=[WakeResult("spark stop"), StopIteration])
-        spark._listen_command = Mock(side_effect=[("stop", b""), ("", b"")])
+        def capture(*args, **kwargs):
+            state = 'followup' if kwargs['followup'] else 'listening'
+            self.assertEqual(spark.body.eyes.call_args.args, (state,))
+            return ('', b'') if kwargs['followup'] else ('stop', b'')
+        spark._listen_command = Mock(side_effect=capture)
         spark.converse = Mock()
         mic = Mock()
         mic.__enter__ = Mock(return_value=mic)
@@ -918,6 +922,10 @@ class VoiceLatencyTests(unittest.TestCase):
         self.assertEqual([c.kwargs["timeout_s"] for c in spark._listen_command.call_args_list], [6, 8])
         spark.body.wake_reaction.assert_called_once()
         spark.body.speak.assert_not_called()
+        states = [c.args[0] for c in spark.body.eyes.call_args_list]
+        self.assertIn('followup', states)
+        self.assertEqual(states[states.index('followup')+1], 'idle')
+        self.assertEqual(Body._LED_MOODS['followup'], ('Green', 0))
 
     def test_plural_wake_and_name_only_handoff_do_not_mute_the_next_command(self):
         from spark.ear import has_wake_name, strip_wake_prefix

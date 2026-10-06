@@ -571,7 +571,7 @@ class Spark:
                     self.body.wake_up()
                     _, next_flourish, next_wander = _reset_idle()
                 self.listening = True
-                self.body.eyes("listening")
+                self.body.eyes("followup" if in_followup else "listening")
                 if triggered_by_wake:
                     # A name-only decode does not mean the user stopped:
                     # command speech can arrive during remote verification.
@@ -596,6 +596,8 @@ class Spark:
                 finally:
                     self.listening = False
                     self.body.react_enabled = True
+                    if in_followup:
+                        self.body.eyes("sleepy" if self.body.sleeping else "idle")
 
                 # noise guards: sound events and weak hallucinations are not
                 # user speech — drop them without counting a "miss"
