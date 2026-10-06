@@ -802,3 +802,115 @@ Codex-Fix: large tier, 139 changed lines, seven scoped files: `spark/ear.py`,
 and this document. One medium direct CLI review, no findings; clean exit
 without a redundant verify. Prior dirty changes were excluded using fresh
 per-file baselines. No ignored findings or fixes from review.
+
+## October 6: dedicated acoustic wake detector
+
+Spark now has a custom CPU ONNX detector for Hey Spark / Hey Sparks /
+Hey Sparky, built on openWakeWord speech embeddings. It consumes the
+existing processed microphone stream without another SDK or ALSA owner.
+The detector can catch a greeting while the existing listener remains a live
+backstop, including while the model is healthy but misses a greeting. Eligible
+legacy wake checks still call the configured ASR servers. Parakeet still
+transcribes requests, and the existing playback echo protection,
+interruptions, movement stops, tap controls and stock actions remain.
+Load/checksum/inference failures fall back to the legacy wake listener.
+Shadow mode logs candidates without changing who decides to wake.
+
+The 2.5-second rolling prefix preserves consumed words. Neural handoff
+consumes through that prefix before accepting a silence endpoint, then
+extracts the request after an explicitly transcribed greeting, including
+when earlier room speech shares the audio. Prefix replay happens once.
+
+Training generated 2,260 unique Piper clips across 109 VCTK speaker IDs
+plus four existing voices. Training speakers are separate from evaluation
+speakers. Sliding hard-negative and positive windows corrected errors that
+end-of-clip tests missed. The evaluation voices were used for development
+feedback; this is not a blind benchmark or a real-room success rate.
+Final two-frame streaming checks at threshold .95: 162/168 greetings
+detected, 0/392 confusing phrases triggered. The separate upstream ambient
+features cover 10.697 hours and produced one debounced candidate (.093/hour).
+The scripts enforce a 95% synthetic recall and 1% hard-negative ceiling.
+Original-to-stream feature comparison matches exactly after warmup.
+
+SDK-free Pi measurement: 65 MB peak process RSS, 17.85 ms p99 and 17.97 ms
+maximum per feed, approximately 22% of one CPU core against the 80 ms
+inference cadence. Initial load including deterministic silence warmup
+took .91 seconds. The robot already has compatible NumPy and ONNX Runtime;
+no training dependencies are installed there. Model hashes, attribution,
+rebuild and disable instructions live in `models/hey-spark/README.md`.
+
+Installed shadow mode at 09:19 EDT, backup
+`/opt/spark/backups/neural-20261006-091959/`. Matt reported both normal-volume
+requests answered; logs confirm legacy wake decisions in that test. Shadow
+can stop observing when the legacy listener wins early, so that result
+does not independently establish the neural detector's field recall.
+An info-only cached speaker test completed without self-interruption or
+a neural wake. Enabled primary neural mode at 09:23 EDT, backup
+`/opt/spark/backups/neural-20261006-092332/`. Health and reviewed source/model
+hashes match. Live Gemma, Warm soft robot, volume 100, speech gain 6 dB and
+disabled PCM diagnostics are preserved. The repository sample defaults to
+shadow mode so a fresh installation does not bypass its field rollout.
+Matt reported neither of the two independent primary-listener attempts caught.
+Restored shadow mode immediately; on the next pair the legacy recognizer
+answered one. The initial shadow success had tested the legacy recognizer,
+not independent neural recall, and did not justify removing that backstop.
+
+One short paired microphone sample of the correctly addressed greeting was
+captured through the existing microphone and copied to Matt's local training
+host. Diagnostic capture was disabled and Pi recording slots deleted after
+capture. That recording scores .99 before and after AEC in quiet replay.
+Adding preceding speech lowers it below .95, and overlapping speech can lower
+it to .001. This reproduces a context sensitivity of the quiet synthetic head;
+it does not prove every live miss had the same cause. Additional mixed-room
+training remains experimental until its false-trigger and recall gates pass.
+The previous model remains the selected bundle; failed candidates are not
+installed. The harness now retains the legacy listener in all modes and
+silently rejects neural candidates with no transcribed addressed greeting,
+so incidental room speech cannot become a command or repeated miss prompts.
+
+Codex-Fix: large tier, 705 changed lines, 12 text files scoped against fresh
+baselines (config, requirements, main, ear, neural_wake, voice_latency tests,
+this document, three training/evaluation helpers and model manifest/README).
+Three binary model hashes were separately verified. Two medium reviews
+through direct Codex CLI; success with notes. Fixed P1 shadow-first sample
+configuration and P2 manifest/runtime consecutive-frame policy mismatch.
+New P2 notes from verification are retained under the skill's two-review
+cap: ambient data both calibrates the threshold and supplies its reported
+candidate rate, and feed p99 samples include the three non-inference calls
+per inference cycle. Consequently the ambient number is a calibration
+check, not independent unseen-room performance; feed p99 is a percentile
+of all 20ms feeds, not exclusively ONNX calls. The measured worst feed
+time (17.97ms) still stays below the 80ms inference interval. No remaining
+P0/P1 or additional review loop. No commit or push in this task.
+
+Field-regression follow-up: a final high-effort direct CLI pass found two
+P1s in the follow-up changes: greeting-only independent confirmation could
+discard the primary decoded command, and the candidate gate still tested
+only quiet greetings. Preserved the primary command when confirmation has
+no suffix, explicitly accept a leading configured greeting, and added
+held-out preceding/overlapping speech cases to the candidate gate. Focused
+checks cover neural misses reaching legacy, leading greetings, preserving
+a decoded command and silently rejecting room commands. Three review passes
+total; no fourth review. Final focused checks: 41 voice, 8 duplex, 4 volume,
+2 selected-voice and 10 stock-animation checks pass (65 total).
+
+Final mixed-room candidate: threshold .99 selected on 3.566 calibration
+hours; zero events on a disjoint 3.566 evaluation hours, 144/168 quiet
+greetings and 268/336 mixed-room greetings detected, zero hard-negative
+events in 392 clips. It fails the required 95% recall gates and is not
+installed. Its measured inference-call p99 is 2.45ms on Moria. The earlier
+mixed versions likewise failed their gates. These results remain development
+benchmarks; the selected quiet model's original full ambient result is a
+calibration check, not independent field accuracy.
+
+Combined neural plus legacy listening deployed at 09:48 EDT, backup
+`/opt/spark/backups/neural-20261006-094823/`. The final reviewed fixes are
+applied; source/model hashes and live health verified. Primary-only neural
+operation is no longer used. Neural candidates require a transcribed
+configured greeting, using the independent recognizer only when needed.
+Unconfirmed candidates are silent and do not increment miss prompts.
+Another cached speaker check completed without an interruption or underrun.
+Temporary human WAVs and metadata were removed from Pi, Moria and local
+workspace after diagnosis; diagnostic recording remains off. No human
+recording was added to model training. The final combined-listener user
+test is pending; no improved real-room success rate is claimed yet.

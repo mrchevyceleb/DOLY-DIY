@@ -27,6 +27,83 @@ def pcm(level):
 
 
 class VoiceLatencyTests(unittest.TestCase):
+    def test_neural_wake_keeps_consumed_audio_and_command_after_room_speech(self):
+        spark = Spark.__new__(Spark)
+        spark.cfg = {**CFG, 'asr': {'server_url': 'test'}, 'wake': {'words': ['hey spark']}}
+        spark.body = Mock(sleeping=False)
+        spark.talk_trigger = Mock()
+        spark.talk_trigger.is_set.return_value = False
+        spark.whisper = Mock(last_source='server')
+        spark.whisper.transcribe_pcm.return_value = 'Room chatter. Hey Spark, dim the lights.'
+        spark._neural_wake = Mock(shadow=False, phrase='hey spark', last_score=.99)
+        spark._neural_wake.feed.side_effect = [False]*19+[True]
+        quiet_greeting = pcm(200)*20  # below the old absolute onset gate
+        mic = Mock(noise_floor=40)
+        mic.frames = lambda: iter([pcm(200)]*20)
+        rec = Mock(feed=Mock(return_value=None),partial=Mock(return_value=''))
+        with patch('spark.ear._speech_detector',return_value=None):
+            wake = spark._wait_for_wake(mic,rec,['hey spark'])
+        self.assertTrue(wake.neural)
+        self.assertEqual(wake.prefix_pcm,quiet_greeting)
+        spark.whisper.transcribe_wake_pcm.assert_not_called()
+        def capture(audio, *args, **kwargs):
+            prefix = [next(audio.frames()) for _ in range(20)]
+            self.assertEqual(b''.join(prefix),quiet_greeting)
+            return quiet_greeting+pcm(300)*20
+        with patch('spark.ear.record_utterance',side_effect=capture):
+            text,_ = spark._listen_command(mic,rec,wake)
+        self.assertEqual(text,'dim the lights.')
+        # An earlier sentence and pause in the rolling audio must not end
+        # capture before the greeting and its request are replayed.
+        previous = pcm(2000)*10+pcm(0)*30
+        greeting = pcm(2000)*20
+        mic.frames = lambda: iter([pcm(2000)]*15+[pcm(0)]*25)
+        audio = CommandAudio(mic,previous+greeting)
+        with patch('spark.ear._speech_detector',return_value=None):
+            captured = record_utterance(audio,CFG,endpoint_after_frames=audio.prefix_frames)
+        self.assertGreater(len(captured),len(previous+greeting))
+        spark.whisper.transcribe_pcm.return_value = 'Hey Spark, are you there?'
+        with patch('spark.ear.record_utterance',return_value=pcm(2000)*30):
+            text,_ = spark._listen_command(mic,rec,wake)
+        self.assertEqual(text,'are you there?')
+        spark.whisper.confirm_wake_pcm.assert_not_called()
+        spark.cfg['asr']['wake_server_url'] = 'test'
+        spark.whisper.transcribe_pcm.return_value = 'Dim the lights.'
+        spark.whisper.confirm_wake_pcm.return_value = 'Hey Spark.'
+        with patch('spark.ear.record_utterance',return_value=pcm(2000)*30):
+            text,_ = spark._listen_command(mic,rec,wake)
+        self.assertEqual(text,'Dim the lights.')
+        # High classifier confidence without an addressed greeting must not
+        # execute an incidental room command or lead to repeated miss prompts.
+        spark.cfg['asr']['wake_server_url'] = 'test'
+        spark.whisper.transcribe_pcm.return_value = 'Dim the lights.'
+        spark.whisper.confirm_wake_pcm.return_value = 'Dim the lights.'
+        with patch('spark.ear.record_utterance',return_value=pcm(2000)*30):
+            text,_ = spark._listen_command(mic,rec,wake)
+        self.assertEqual(text,'')
+        self.assertTrue(wake.neural_unconfirmed)
+
+    def test_neural_inference_failure_and_shadow_keep_legacy_listener(self):
+        spark = Spark.__new__(Spark)
+        spark.cfg = CFG
+        spark.body = Mock(sleeping=False)
+        spark.talk_trigger = Mock()
+        spark.talk_trigger.is_set.return_value = False
+        mic = Mock(noise_floor=40)
+        mic.frames = lambda: iter([pcm(200)]*10)
+        legacy = WakeResult('hey spark')
+        def fallback(frames,*args,**kwargs):
+            list(frames)
+            return legacy
+        for shadow,failure in ((True,False),(True,True),(False,False)):
+            neural = Mock(shadow=shadow,last_score=.99)
+            neural.feed.side_effect = RuntimeError('bad model') if failure else None
+            neural.feed.return_value = shadow
+            spark._neural_wake = neural
+            with patch('spark.ear.listen_for_wake',side_effect=fallback):
+                self.assertIs(spark._wait_for_wake(mic,Mock(),['hey spark']),legacy)
+            if failure:self.assertIsNone(spark._neural_wake)
+
     def test_prompt_history_keeps_its_prefix_and_prunes_in_bounded_batches(self):
         import tempfile
         from spark.memory import Memory

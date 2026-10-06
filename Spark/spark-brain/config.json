@@ -83,6 +83,9 @@
   },
   "wake": {
     "enabled": true,
+    "neural_enabled": true,
+    "neural_shadow": true,
+    "neural_model_dir": "/opt/spark/wake",
     "words": [
       "hey spark",
       "hey sparky",

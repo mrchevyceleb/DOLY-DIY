@@ -615,6 +615,9 @@ class Spark:
 
                 if not text:
                     self.body.eyes("idle")
+                    if getattr(triggered_by_wake, 'neural_unconfirmed', False):
+                        log('spark', 'neural candidate dismissed: no addressed greeting')
+                        continue
                     if in_followup:
                         log("spark", "follow-up closed quietly")
                         if pet is not None:
@@ -743,7 +746,7 @@ class Spark:
         return whole[words[skip].start():] if skip < len(words) else said
 
     def _listen_command(self, mic, recognizer, wake=None, timeout_s=6.0, followup=False):
-        from .ear import CommandAudio, record_utterance, strip_wake_prefix
+        from .ear import CommandAudio, record_utterance, strip_wake_prefix, addressed_command, has_wake_name
 
         said = ""
         if wake and wake.command:
@@ -773,6 +776,10 @@ class Spark:
         mic.retain(timeout_s + 45)
         audio = CommandAudio(mic, wake.prefix_pcm if wake else b"",
                              self.cfg["audio"]["sample_rate"])
+        # A neural rolling prefix may include earlier room speech and a
+        # pause. Consume through the detected greeting before endpointing.
+        replay_frames = audio.prefix_frames if wake and wake.neural else 0
+        neural_greeted = False
         remote_asr = bool(getattr(self, "whisper", None)
                           and self.cfg.get("asr", {}).get("server_url"))
         while True:
@@ -780,7 +787,9 @@ class Spark:
                 recognizer.begin()
             pcm = record_utterance(audio, self.cfg,
                                    on_frame=None if remote_asr else recognizer.feed,
-                                   wait_timeout_s=max(0, deadline-time.monotonic()))
+                                   wait_timeout_s=max(0, deadline-time.monotonic()),
+                                   endpoint_after_frames=replay_frames)
+            replay_frames = 0
             if not pcm:
                 return "", b""
             started = time.perf_counter()
@@ -803,6 +812,32 @@ class Spark:
             # a name-only segment. Its queued command still deserves a decode.
             deadline += time.perf_counter() - started
             command = strip_wake_prefix(text, wake.text if wake else "")
+            if wake and wake.neural:
+                words = self.cfg.get('wake', {}).get('words')
+                addressed = addressed_command(text, words)
+                if has_wake_name(text, words):
+                    neural_greeted = True
+                if addressed is not None:
+                    command = addressed
+                    neural_greeted = True
+                elif not neural_greeted:
+                    # An acoustic candidate alone must not turn incidental
+                    # room speech into a robot command or a spoken reply.
+                    checked = ''
+                    try:
+                        if self.cfg.get('asr', {}).get('wake_server_url'):
+                            checked = self.whisper.confirm_wake_pcm(pcm,timeout_s=2)
+                    except Exception as error:
+                        log('spark', f'neural greeting check unavailable: {error}')
+                    addressed = addressed_command(checked, words)
+                    if has_wake_name(checked, words):
+                        command = strip_wake_prefix(checked,wake.text) or command
+                    elif addressed is not None:
+                        command = addressed or command
+                    else:
+                        wake.neural_unconfirmed = True
+                        return '', pcm
+                    neural_greeted = True
             # A paused "okay ... set a timer" may endpoint twice. Do not
             # dismiss or answer the first segment and discard the second.
             if followup and command.casefold().strip(" .,!?'") in ("ok", "okay"):
@@ -847,6 +882,30 @@ class Spark:
         if self.talk_trigger.is_set():
             return False
 
+        # Load once, reset between listening windows; legacy detection remains
+        # available if a dependency/model is missing or inference fails.
+        if not hasattr(self, '_neural_wake'):
+            self._neural_wake = None
+            if self.cfg.get('wake', {}).get('neural_enabled', False):
+                try:
+                    from .neural_wake import NeuralWake
+                    self._neural_wake = NeuralWake(self.cfg)
+                    log('spark', 'dedicated Hey Spark detector ready'+
+                        (' (shadow)' if self._neural_wake.shadow else ''))
+                except Exception as error:
+                    log('spark', f'neural wake unavailable; legacy listener active: {error}')
+        neural = self._neural_wake
+        if neural:
+            try:
+                neural.reset()
+            except Exception as error:
+                log('spark', f'neural wake reset failed; legacy listener active: {error}')
+                self._neural_wake = neural = None
+        from collections import deque
+        wake_audio = deque(maxlen=125)  # 2.5s of the consumed greeting/command
+        class NeuralWakeDetected(Exception):
+            pass
+
         # tap-aware frame source: stops when a tap arrives
         import random as _random
         blink_state = {"next": time.time() + _random.uniform(3, 7)}
@@ -864,6 +923,19 @@ class Spark:
                     blink_state["next"] = now + _random.uniform(3.5, 8)
                 if self.talk_trigger.is_set():
                     return
+                wake_audio.append(f)
+                if self._neural_wake:
+                    try:
+                        hit = self._neural_wake.feed(f)
+                    except Exception as error:
+                        log('spark', f'neural wake inference failed; legacy listener active: {error}')
+                        self._neural_wake = None
+                        hit = False
+                    if hit:
+                        log('spark', f'neural wake score={neural.last_score:.3f}'+
+                            (' (shadow)' if neural.shadow else ''))
+                        if not neural.shadow:
+                            raise NeuralWakeDetected()
                 yield f
 
         # NOTE: queued sfx from sensor threads flush inside tap_frames() loop
@@ -918,14 +990,26 @@ class Spark:
 
         verifier = (verify_wake if getattr(self, "whisper", None)
                     and self.cfg.get("asr", {}).get("server_url") else None)
-        return listen_for_wake(tap_frames(), recognizer, self.cfg, wake_words,
+        try:
+            frames = tap_frames()
+            # A functioning acoustic model can still miss real room speech.
+            # Keep the proven listener as a live backstop, not just an error
+            # fallback. A neural hit may wake immediately through tap_frames;
+            # a neural miss must never discard a legacy-confirmed greeting.
+            return listen_for_wake(frames, recognizer, self.cfg, wake_words,
                                tap_check=lambda: self.talk_trigger.is_set(),
                                idle_check=idle_check,
                                allow_weak=not self.body.sleeping,
                                noise_floor=lambda: mic.noise_floor, verify_wake=verifier,
                                verify_exact=(lambda pcm, text, final: verify_wake(
                                    pcm, keep=True, local_wake=text, local_final=final)) if verifier else None,
-                               room=getattr(self, "room", None))
+                                   room=getattr(self, "room", None))
+        except NeuralWakeDetected:
+            from .ear import WakeResult
+            mic.retain(5)
+            clip = b''.join(wake_audio)
+            return WakeResult(neural.phrase, prefix_pcm=clip, clip_pcm=clip,
+                              partial=True, neural=True)
 
     
 

@@ -1,0 +1,14 @@
+{
+  "phrases": [
+    "hey spark",
+    "hey sparks",
+    "hey sparky"
+  ],
+  "threshold": 0.95,
+  "consecutive_frames": 2,
+  "sha256": {
+    "melspectrogram.onnx": "ba2b0e0f8b7b875369a2c89cb13360ff53bac436f2895cced9f479fa65eb176f",
+    "embedding_model.onnx": "70d164290c1d095d1d4ee149bc5e00543250a7316b59f31d056cff7bd3075c1f",
+    "hey_spark.onnx": "0b7a62da692871e4c6cfd2f2576d441c648586b12a9902f7d448739bb1cf6f50"
+  }
+}

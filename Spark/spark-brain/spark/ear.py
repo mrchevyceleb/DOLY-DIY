@@ -290,7 +290,8 @@ class CommandAudio:
         return self._frames
 
 
-def record_utterance(mic, cfg, on_frame=None, should_stop=None, wait_timeout_s=None):
+def record_utterance(mic, cfg, on_frame=None, should_stop=None, wait_timeout_s=None,
+                     endpoint_after_frames=0):
     """Capture speech with onset pre-roll and a room-relative silence endpoint.
 
     CommandAudio can replay an early wake's audio before the live stream.
@@ -317,7 +318,7 @@ def record_utterance(mic, cfg, on_frame=None, should_stop=None, wait_timeout_s=N
     onset_age = 0
     end_reason = "source ended"
 
-    for frame in mic.frames():
+    for frame_index, frame in enumerate(mic.frames(), 1):
         if should_stop is not None and should_stop():
             return b""
         if deadline is not None and not spoke and time.monotonic() >= deadline:
@@ -374,11 +375,9 @@ def record_utterance(mic, cfg, on_frame=None, should_stop=None, wait_timeout_s=N
         else:
             silent_run = 0
         # end conditions
-        if silent_run >= silence_needed:
+        if (silent_run >= silence_needed
+                and frame_index >= endpoint_after_frames):
             end_reason = "silence"
-            break
-        if final and quiet and silent_run >= silence_needed:
-            end_reason = "recognizer endpoint"
             break
         if len(frames) >= max_frames:
             end_reason = "length cap"
@@ -401,6 +400,7 @@ class WakeResult:
     command: str = ""  # verified speech that is all command (name heard earlier)
     clip_pcm: bytes = b""  # the verified clip, to re-decode with its continuation
     partial: bool = False  # keyword detected before the speech endpoint
+    neural: bool = False  # acoustic greeting approval; replay consumed audio
 
 
 def strip_wake_prefix(text, wake_text=""):
