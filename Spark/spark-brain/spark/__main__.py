@@ -524,7 +524,8 @@ class Spark:
                     continue
 
                 if idle_action["act"] == "charge_notice":
-                    self.body.speak("I'm parked, but I'm not charging. Please reseat me on my powered dock.")
+                    log("spark", "idle: sustained dock discharge warning")
+                    self.body.speak("I'm parked, and charging may have paused. Please check my dock connection.")
                     continue
 
                 if idle_action["act"] == "wander":

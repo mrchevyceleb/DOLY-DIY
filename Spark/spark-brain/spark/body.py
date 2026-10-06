@@ -1042,22 +1042,24 @@ class Body:
                     or not self._charging.healthy()):
                 self._full_charge_since = None
             # The dock latch is a motor interlock, never proof of charging.
-            if self.docked and charging is False and not self._leaving_home:
+            notice_delay = self._charge_notice_delay()
+            if (self.docked and charging is False and self._charging.healthy()
+                    and not self._leaving_home and notice_delay is not None):
                 if self._dock_discharge_since is None:
                     self._dock_discharge_since = now
                 # Only when she still reads as seated. Lifted onto a surface
                 # her floor sensors can't see (the black mat), the latch
                 # never clears and she asked Matt to reseat her every time.
                 seated = self.reads_seated(gaps)
-                if (now - self._dock_discharge_since >= 15 and seated
-                        and not self._charge_notice_sent):
+                if (now - self._dock_discharge_since >= notice_delay and seated
+                        and not self._charge_notice_sent and not self._charge_notice_pending):
                     self._charge_notice_pending = True
-                    self._charge_notice_sent = True
-                    _log("charger contact lost: sustained discharge; motors remain parked")
+                    _log("dock warning queued: sustained discharge; motors remain parked")
             else:
                 # Mixed or tapering evidence breaks the run: two brief dips
                 # 15s apart are not sustained discharge.
                 self._dock_discharge_since = None
+                self._charge_notice_pending = False
                 if charging is True or not self.docked:
                     self._charge_notice_pending = self._charge_notice_sent = False
             if now >= getattr(self, "_next_power_log", 0):
@@ -1124,12 +1126,30 @@ class Body:
             except OSError as exc:
                 _log(f"exit back-off persistence failed: {exc}")
 
+    def _charge_notice_delay(self):
+        # Full/tapering docks need no unsolicited reseat prompt. Keep the
+        # warning for meaningful depletion; motor protection is unchanged.
+        pct = self.battery_pct()
+        return 15 if pct is not None and pct < 95 else None
+
     def take_charge_notice(self):
-        """One spoken notice per loss of contact, delivered on the main thread."""
+        """Recheck a queued warning before the main thread speaks it."""
         with self._power_lock:
+            if not self._charge_notice_pending:
+                return False
+            charging = self.refresh_power()
             pending = self._charge_notice_pending
             self._charge_notice_pending = False
-            return pending
+            notice_delay = self._charge_notice_delay()
+            ready = bool(pending and charging is False and self._charging.healthy()
+                        and self.docked and not self._leaving_home
+                        and notice_delay is not None
+                        and self._dock_discharge_since is not None
+                        and time.monotonic() - self._dock_discharge_since >= notice_delay
+                        and self.reads_seated(self._edge_gaps()))
+            if ready:
+                self._charge_notice_sent = True
+            return ready
 
     def actuators_held(self):
         """Keep arms and wheels still on charge or with uncertain power."""

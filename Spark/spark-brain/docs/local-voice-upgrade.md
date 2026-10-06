@@ -929,3 +929,33 @@ Deployed October 6 at 09:58 EDT, with backup
 health verified; configuration and volume preserved. All 41 scoped voice
 checks passed, and the medium Codex-Fix review found no issues. Matt confirmed
 the visual indicator works well.
+
+## Automatic dock warning — October 6
+
+At 13:59 EDT, an automatic idle notice followed sustained negative shunt
+readings while parked at 99–100% battery. No recognized user request triggered
+it. Near-zero/tapering readings resumed by 14:00. This establishes a temporary
+battery discharge interval, not whether the dock cycled or briefly lost contact.
+The old announcement overstated that evidence as definitely not charging.
+
+Matt reported a second unsolicited warning at 14:03 while still docked;
+the old code was still live. Unsolicited warnings are now suppressed at 95%
+battery or above, retaining 15 seconds below that level. Mixed, recovered or unhealthy
+readings clear queued warnings; the main thread refreshes evidence before
+dispatch. Only a dispatched notice consumes the episode's warning. Wording now
+says charging may have paused and asks to check the connection. Motor holds,
+charging classification and automatic movement rules are unchanged.
+
+Codex-Fix's first small review noted P2 that an interrupted/failed speech attempt
+consumes a warning. This is intentionally one unsolicited speech attempt per
+episode; retrying canceled speech would conflict with stopping/repetition control.
+Canceled queued warnings do not consume that attempt. The final full-battery
+suppression follows Matt's second report, replacing the proposed delay.
+Its separate small steering review (52 lines, four files, one medium direct
+CLI pass) found P2 that unknown battery telemetry still allowed a warning;
+fixed by requiring a known battery below 95%. No verify on either small patch.
+
+Deployed at 14:08 EDT, backup `/opt/spark/backups/charge-notice-20261006-140822/`.
+All 31 charging-safety and 41 voice checks passed; local/live source hashes,
+health and microphone readiness verified. At 14:08:54, the live monitor reported
+100% battery and positive confirmed charging. Configuration/volume preserved.

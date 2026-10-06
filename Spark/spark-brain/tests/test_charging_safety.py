@@ -481,6 +481,56 @@ class ChargingSafetyTests(unittest.TestCase):
         b.refresh_power()
         self.assertFalse(b._charge_notice_sent)
 
+    def test_full_dock_warning_is_silent_and_drops_recovered_or_stale_evidence(self):
+        b = self.body(pct=100, gaps=["Front_Left", "Front_Right"])
+        pct = 100
+        b.battery_pct = lambda: pct
+        b.refresh_power()
+        b._charging.sample.return_value = False
+        b._charging.average = -650
+        for now in (100, 116, 144, 161):
+            with patch("spark.body.time.monotonic", return_value=now):
+                b.refresh_power()
+                self.assertFalse(b.take_charge_notice())
+        pct = None  # unknown battery is not evidence of depletion
+        with patch("spark.body.time.monotonic", return_value=168):
+            b.refresh_power()
+            self.assertFalse(b.take_charge_notice())
+        pct = 94
+        with patch("spark.body.time.monotonic", return_value=170):
+            b.refresh_power()
+        with patch("spark.body.time.monotonic", return_value=186):
+            b.refresh_power()
+            self.assertTrue(b._charge_notice_pending)
+            b._charging.sample.return_value = None  # recovered/tapering before speech
+            self.assertFalse(b.take_charge_notice())
+        b._charging.sample.return_value = False
+        for now in (195, 211):
+            with patch("spark.body.time.monotonic", return_value=now):
+                b.refresh_power()
+                if now == 211:
+                    self.assertTrue(b.take_charge_notice())  # recovery didn't consume a warning
+                    b.refresh_power()
+                    self.assertFalse(b.take_charge_notice())  # one delivered notice per episode
+        b._charging.sample.return_value = True
+        b.refresh_power()
+        b._charging.sample.return_value = False
+        with patch("spark.body.time.monotonic", return_value=300):
+            b.refresh_power()
+        with patch("spark.body.time.monotonic", return_value=316):
+            b.refresh_power()
+            b._charging.healthy.return_value = False
+            self.assertFalse(b.take_charge_notice())
+        b._charging.healthy.return_value = True
+        with patch("spark.body.time.monotonic", return_value=320):
+            b.refresh_power()
+        with patch("spark.body.time.monotonic", return_value=336):
+            b.refresh_power()
+            pct = 100  # recovered before the main loop consumes the warning
+            self.assertFalse(b.take_charge_notice())
+        self.assertTrue(b.docked)
+        b._drive.go_distance.assert_not_called()
+
     def test_sleep_holds_all_actuators_without_a_stock_animation(self):
         b = self.body(pct=50)
         b.anim = Mock()
