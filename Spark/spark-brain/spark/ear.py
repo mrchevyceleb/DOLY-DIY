@@ -43,6 +43,13 @@ class MicStream:
         self._mute = (0.0, 0.0)  # capture window of our own playback
         self.processor = None
         self._mixer = [("Mic PGA", a.get("mic_pga_db")), ("ADC", a.get("adc_gain_db"))]
+        self._minimum_floor = 40 if a.get("adaptive_sensitivity", False) else 120
+        self.diagnostics = None
+        if a.get('wake_diagnostics_until', 0) > time.time():
+            from pathlib import Path
+            from .wake_diagnostics import WakeDiagnostics
+            self.diagnostics = WakeDiagnostics(self.rate, a['wake_diagnostics_until'],
+                Path(cfg.get('state_dir', '/opt/spark/state')) / 'wake-diagnostics')
 
     def __enter__(self):
         for control, gain in self._mixer:
@@ -97,8 +104,11 @@ class MicStream:
                 if abs(stamp-arrived) > .1:
                     stamp = arrived  # genuine capture stall: start a fresh clock
                 capture_stamp = stamp
+                raw_pcm = chunk
                 if self.processor:
                     chunk = self.processor.capture(chunk, stamp)
+                if self.diagnostics:
+                    self.diagnostics.append(raw_pcm, chunk)
                 with self._ready:
                     self._queue.append((stamp, chunk))
                     if self._learn_noise:
@@ -114,12 +124,16 @@ class MicStream:
         with self._ready:
             levels = sorted(self._levels)
         # Lower quintile rejects speech peaks. Bound it for speech-only startup.
-        return min(1500, max(120, levels[len(levels)//5])) if levels else 500
+        return min(1500, max(self._minimum_floor, levels[len(levels)//5])) if levels else 500
 
     def discard(self):
         """Drop captured playback/idle audio before opening a new listen."""
         with self._ready:
             self._queue.clear()
+
+    def save_wake_diagnostic(self, clip, primary, secondary):
+        if self.diagnostics:
+            self.diagnostics.save(clip, primary, secondary)
 
     def discard_before(self, stamp):
         """Remove replayed interruption audio while retaining its live tail."""
@@ -247,6 +261,21 @@ def _speech_detector(cfg):
     return webrtcvad.Vad(cfg["audio"].get("vad_mode", 2))
 
 
+def _speech_levels(audio, floor):
+    if audio.get("adaptive_sensitivity", False):
+        # Absolute legacy gates made clean, soft speech inaudible to VAD.
+        # Room noise still raises both gates; this does not boost SNR.
+        return max(90, floor * 1.8), max(60, floor * 1.5)
+    return audio.get("start_rms", 900), max(audio.get("stop_rms", 500), floor * 1.5)
+
+
+def _vad_speech(vad, pcm, rate, audio):
+    if audio.get("adaptive_sensitivity", False) and audioop is not None:
+        level = _rms(pcm)
+        pcm = audioop.mul(pcm, 2, min(4, max(1, 300 / max(1, level))))
+    return vad.is_speech(pcm, rate)
+
+
 class CommandAudio:
     """Retain consumed wake audio, even across a pause after just the name."""
 
@@ -284,6 +313,8 @@ def record_utterance(mic, cfg, on_frame=None, should_stop=None, wait_timeout_s=N
     vad = _speech_detector(cfg)
     voiced_run = 0
     energy = deque(maxlen=5)
+    baseline_energy = deque(maxlen=10)
+    onset_age = 0
     end_reason = "source ended"
 
     for frame in mic.frames():
@@ -294,16 +325,31 @@ def record_utterance(mic, cfg, on_frame=None, should_stop=None, wait_timeout_s=N
         rms = _rms(frame)
         peak_rms = max(peak_rms, rms)
 
+        # A changed fan/electrical baseline can be VAD-positive. Recover an
+        # underestimated floor from 200ms of steady levels before committing
+        # an onset; varying speech keeps the original baseline and pre-roll.
+        baseline_energy.append(rms)
+        if spoke:
+            onset_age += 1
+        if (a.get("adaptive_sensitivity", False) and len(baseline_energy) == 10
+                and (not spoke or onset_age <= 10)
+                and min(baseline_energy) > floor * 1.5
+                and max(baseline_energy) <= min(baseline_energy) * 1.08):
+            floor = max(floor, min(baseline_energy))
+            spoke = False
+            frames.clear()
+            voiced_run = 0
+
         # learn the room: quiet-ish frames pull the floor toward themselves
         if not spoke and rms < floor * 1.5:
             floor = floor * 0.97 + rms * 0.03
-        eff_stop = max(a.get("stop_rms", 500), int(floor * 1.5))
+        eff_start, eff_stop = _speech_levels(a, floor)
         energy.append(rms)
         # VAD can classify steady electrical/fan noise as voiced. The median
         # rejects isolated noise spikes without clipping a consonant's onset.
         median_rms = sorted(energy)[len(energy)//2]
-        voiced = (vad.is_speech(frame, a["sample_rate"])
-                  and median_rms >= max(a.get("stop_rms", 500), floor*1.8)) if vad else rms >= eff_stop
+        voiced = (median_rms >= max(eff_stop, floor*1.8)
+                  and _vad_speech(vad, frame, a["sample_rate"], a)) if vad else rms >= eff_stop
 
         final = None
         if on_frame is not None:
@@ -312,10 +358,11 @@ def record_utterance(mic, cfg, on_frame=None, should_stop=None, wait_timeout_s=N
         if not spoke:
             preroll.append(frame)
             # Three frames avoid opening a follow-up on a tap or fan spike.
-            onset = voiced and rms >= (a["start_rms"] if vad else max(a["start_rms"], eff_stop * 1.3))
+            onset = voiced and rms >= (eff_start if vad else max(eff_start, eff_stop * 1.3))
             voiced_run = voiced_run + 1 if onset else 0
             if voiced_run >= (3 if vad else 1):
                 spoke = True
+                onset_age = 0
                 frames.extend(preroll)
                 silent_run = 0
             continue
@@ -359,7 +406,7 @@ class WakeResult:
 def strip_wake_prefix(text, wake_text=""):
     """Remove an optional name, including the alias that actually woke us."""
     words = list(re.finditer(r"[\w']+", text.lower()))
-    heard = wake_text.lower().split()
+    heard = re.findall(r"[\w']+", wake_text.lower())
     if not words:
         return ""
     tokens = [w.group() for w in words]
@@ -371,9 +418,9 @@ def strip_wake_prefix(text, wake_text=""):
             (["hey", "spark"], ["hey", "sparky"])):
         return ""
     count = 0
-    if tokens[0] in {"hey", "okay", "ok"} and len(tokens) > 1 and tokens[1] in {"spark", "sparky"}:
+    if tokens[0] in {"hey", "okay", "ok"} and len(tokens) > 1 and tokens[1] in {"spark", "sparky", "sparks"}:
         count = 2
-    elif tokens[0] in {"spark", "sparky"}:
+    elif tokens[0] in {"spark", "sparky", "sparks"}:
         count = 1
     elif heard:
         count = 2 if heard[0] in {"hey", "the", "a"} and len(heard) > 1 else 1
@@ -499,9 +546,43 @@ def addressed_command(text, wake_words=None):
     return None
 
 
+@dataclass(frozen=True)
+class DeferredWake:
+    text: str
+
+
+def _exact_local_phrase(local, wake_words):
+    observed = local.casefold().split()
+    return next((w for w in wake_words if w.casefold().split() == observed[:2]
+                 and all(token == '[unk]' for token in observed[2:])), None)
+
+
+def corroborated_local_wake(local, primary, secondary, wake_words):
+    """Recover a dropped s-cluster only with an exact local greeting and
+    two independent, matching vocative commands. No bare-name authorization.
+    """
+    phrase = _exact_local_phrase(local, wake_words)
+    parts = phrase.lower().split() if phrase else []
+    if len(parts) != 2 or parts[0] != 'hey' or parts[1] not in {'spark', 'sparky'}:
+        return None
+    names = rf"(?:{parts[1]}|{parts[1][1:]})"
+    pattern = re.compile(rf"^\s*(?:(?P<prefix>[\w']+)[,\s]+)?{names}"
+                         r"\s*[,!.?:;]+\s*(?P<command>\S.*)$", re.I | re.S)
+    commands = []
+    for text in (primary, secondary):
+        hit = pattern.match(text)
+        if not hit or (hit.group('prefix') or '').casefold() not in {'', 'hey', 'hi', 'a', 'face', 'thanks'}:
+            return None
+        commands.append(hit.group('command'))
+    tokens = [re.findall(r"[\w']+", command.casefold()) for command in commands]
+    if len(tokens[0]) < 2 or tokens[0] != tokens[1]:
+        return None
+    return f'{phrase}, {commands[0]}'
+
+
 def listen_for_wake(frames, recognizer, cfg, wake_words, tap_check=None,
                     noise_floor=None, verify_wake=None, idle_check=None, allow_weak=True,
-                    room=None):
+                    room=None, verify_exact=None):
     """Listen for the wake word on ONE frame iterator.
 
     `frames` is a single iterator/generator of 20ms PCM frames (NOT a
@@ -539,6 +620,7 @@ def listen_for_wake(frames, recognizer, cfg, wake_words, tap_check=None,
     wake_grammar.append("[unk]")
     keyword_min_peak = a.get("wake_keyword_rms", 2500)
     keyword_max_ms = a.get("wake_keyword_max_ms", 1400)
+    verification_frames = 3 if require_hey and a.get('adaptive_sensitivity', False) else 5
 
     def _is_wake(tokens, peak=0, exact_only=False, speech_ms=0):
         if not tokens:
@@ -548,6 +630,7 @@ def listen_for_wake(frames, recognizer, cfg, wake_words, tap_check=None,
                 and short_enough and peak >= keyword_min_peak)
 
     next_verify = 0.0
+    pending_exact = None
     last_family_final_at = 0.0   # a strong name-family token finalized recently
     vad = _speech_detector(cfg)
     energy = deque(maxlen=5)
@@ -586,12 +669,20 @@ def listen_for_wake(frames, recognizer, cfg, wake_words, tap_check=None,
         talk into an exact 'sparky' (live: 'sparky' -> 'Fucking background.').
         The verifier vetoes the hit when it heard real words without her
         name; when it is silent or unavailable the local hit stands."""
+        nonlocal pending_exact
+        if (final and pending_exact and clip.startswith(pending_exact[0])
+                and _exact_local_phrase(text, wake_words) == pending_exact[1]):
+            return WakeResult(pending_exact[2], clip_pcm=clip)
         if not verify_wake:
             return WakeResult(text, clip)
         started = time.monotonic()
-        verified = verify_wake(clip, keep=True) or ""
+        verified = (verify_exact(clip, text, final) if verify_exact
+                    else verify_wake(clip, keep=True)) or ""
         print(f"[ear] exact check {time.monotonic()-started:.2f}s: '{text}' -> '{verified}'",
               file=sys.stderr, flush=True)
+        if isinstance(verified, DeferredWake) and not final:
+            pending_exact = (clip, _exact_local_phrase(text, wake_words), verified.text)
+            return False  # require the finalized local greeting for consensus
         if has_wake_name(verified, wake_words):
             return WakeResult(verified, clip_pcm=clip)
         # Live: both deliberate 'Hey Spark' attempts became 'A spark.' on
@@ -651,11 +742,11 @@ def listen_for_wake(frames, recognizer, cfg, wake_words, tap_check=None,
         # 'sparky' -> 'More softly.' (1717) and 'spark' -> 'That's fine.' were
         # background talk.
         quiet_family = family_head and peak < weak_min_peak
-        verify_floor = a.get("start_rms", 900)
-        if (family_head and not (voiced_frames >= 5 and peak >= verify_floor)):
+        verify_floor = _speech_levels(a, floor)[0]
+        if (family_head and not (voiced_frames >= verification_frames and peak >= verify_floor)):
             print(f"[ear] name-like '{text}' not checked (peak={peak} "
                   f"speech={voiced_frames*20}ms)", file=sys.stderr, flush=True)
-        if (verify_wake and voiced_frames >= 5 and peak >= verify_floor
+        if (verify_wake and voiced_frames >= verification_frames and peak >= verify_floor
                 and time.monotonic() >= next_verify):
             next_verify = time.monotonic() + 1
             check_started = time.monotonic()
@@ -789,12 +880,17 @@ def listen_for_wake(frames, recognizer, cfg, wake_words, tap_check=None,
     preroll = deque(maxlen=30)
     idle_silence = 0
     while True:
+        pending_exact = None
         armed = False
         silence_run = 0
         peak = 0
         audio = deque(maxlen=400)
         floor = float(noise_floor()) if noise_floor else 500
-        stop_rms = max(a["stop_rms"], floor * 1.3)
+        if a.get("adaptive_sensitivity", False):
+            arm_rms, stop_rms = _speech_levels(a, floor)
+            keyword_min_peak = max(180, floor * 3)
+        else:
+            stop_rms = max(a["stop_rms"], floor * 1.3)
         onset_rms = max(arm_rms, stop_rms * 1.1)
         partial_candidate = None
         partial_count = 0
@@ -812,8 +908,8 @@ def listen_for_wake(frames, recognizer, cfg, wake_words, tap_check=None,
             rms = _rms(frame)
             energy.append(rms)
             median_rms = sorted(energy)[len(energy)//2]
-            voiced = (vad.is_speech(frame, a["sample_rate"])
-                      and median_rms >= max(arm_rms, floor*1.8)) if vad else rms >= onset_rms
+            voiced = (median_rms >= max(arm_rms, floor*1.8)
+                      and _vad_speech(vad, frame, a["sample_rate"], a)) if vad else rms >= onset_rms
             idle_silence = 0 if voiced else idle_silence + 1
             if not armed:
                 preroll.append(frame)
@@ -856,6 +952,7 @@ def listen_for_wake(frames, recognizer, cfg, wake_words, tap_check=None,
                 voiced_frames = 0
                 recognizer.begin(wake_grammar)
                 audio.clear()
+                pending_exact = None
                 partial_candidate = None
                 partial_count = 0
                 partial_vetoed = False

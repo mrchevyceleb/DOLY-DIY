@@ -60,7 +60,7 @@ _HALLUCINATION_MIN_PEAK = 2500  # 16-bit amplitude; ambient noise peaks ~1000
 # real command is either multi-word, a known one-word command, or loud.
 _ONE_WORD_COMMANDS = {"stop", "dance", "spin", "yes", "no", "time", "date",
                       "sleep", "wake", "party", "left", "right", "forward",
-                      "back", "thanks", "yeah", "okay"}
+                      "back", "thanks", "yeah", "okay", "joke", "jokes", "weather"}
 _IMPLAUSIBLE_MIN_PEAK = 8000    # a lone LOUD word may still be real speech
 
 
@@ -573,19 +573,10 @@ class Spark:
                 self.listening = True
                 self.body.eyes("listening")
                 if triggered_by_wake:
-                    # An early wake can overlap the command: eyes acknowledge
-                    # immediately without putting a chirp over the user's words.
-                    # Muted from before playback through output latency and
-                    # room tail: her own chirp must never become the command.
-                    # The chirp only answers her name said alone. Mid-sentence
-                    # ('Spark, what are people ...') it talked over Matt, and
-                    # the mute that keeps it out of the mic erased his words.
-                    from .ear import strip_wake_prefix
-                    w = triggered_by_wake
-                    talking = bool(w.prefix_pcm or w.command
-                                   or strip_wake_prefix(w.text, w.text))
-                    self.body.wake_reaction(audible=not talking,
-                                            before_chirp=lambda s: mic.mute(s + .25))
+                    # A name-only decode does not mean the user stopped:
+                    # command speech can arrive during remote verification.
+                    # Visual acknowledgement never blanks those next words.
+                    self.body.wake_reaction(audible=False)
                 elif not in_followup:
                     # a tap: the same soft 'I'm listening' chirp as her name
                     self.body.wake_reaction(before_chirp=lambda s: mic.mute(s + .25))
@@ -695,9 +686,9 @@ class Spark:
         wake_words = self.cfg.get("wake", {}).get("words", ["hey spark", "hey sparky"])
         mic.discard()
         mic.retain(1)
+        grammar = sorted(set(wake_words) | {"stop", "spark stop", "spark", "sparky", "[unk]"})
         stop_rec = recognizer._kaldi_cls(recognizer.model, self.cfg["audio"]["sample_rate"],
-                                        '["stop", "spark stop", "spark", '
-                                        '"hey spark", "sparky", "hey sparky", "[unk]"]')
+                                        json.dumps(grammar))
 
         def check():
             for frame in mic.drain_pending():
@@ -876,20 +867,51 @@ class Spark:
                 yield f
 
         # NOTE: queued sfx from sensor threads flush inside tap_frames() loop
-        def verify_wake(pcm, keep=False):
+        def verify_wake(pcm, keep=False, local_wake=None, local_final=True):
             # Preserve a command spoken during the bounded server check.
             # Keep the larger buffer after success until _listen_command takes it.
             # keep: an exact local name that stands unless vetoed still needs
             # the command queued behind it.
             mic.retain(5)  # covers the 3.5s wake-check timeout plus handoff
             text = ""
+            checked = ""
+            started = time.monotonic()
             try:
-                text = self.whisper.transcribe_wake_pcm(pcm)
+                text = self.whisper.transcribe_wake_pcm(pcm, normalize=True)
+                # A second model must hear the configured wake phrase, rather
+                # than accepting an ever-growing list of sound-alike words.
+                remaining = 3.5 - (time.monotonic() - started)
+                if (not has_wake_name(text, wake_words)
+                        and self.cfg.get('asr', {}).get('wake_server_url')):
+                    if remaining >= 1.75:
+                        mic.retain(5)
+                        try:
+                            checked = self.whisper.confirm_wake_pcm(pcm, timeout_s=min(2, remaining - 1))
+                            log('spark', f"wake second opinion: '{text}' -> '{checked}'")
+                            if has_wake_name(checked, wake_words):
+                                return checked
+                            if local_wake:
+                                from .ear import DeferredWake, corroborated_local_wake
+                                recovered = corroborated_local_wake(local_wake, text, checked, wake_words)
+                                if recovered:
+                                    if not local_final:
+                                        return DeferredWake(recovered)
+                                    log('spark', f'local wake + both addressed commands agreed: {recovered!r}')
+                                    return recovered
+                        except Exception as exc:
+                            log('spark', f'wake second opinion unavailable: {exc}')
+                    if not keep:
+                        mic.retain(1)
+                    # Empty means unavailable and lets an exact local wake
+                    # stand. A nonempty explicit rejection must veto it.
+                    return '[wake unconfirmed]'
                 if (has_wake_name(text, wake_words) or _WAKE_GARBLE_RE.match(text or "")
                         or addressed_command(text, wake_words) is not None):
                     return text
             except Exception as exc:
                 log("spark", f"wake check unavailable: {exc}")
+            finally:
+                mic.save_wake_diagnostic(pcm, text, checked)
             if not keep:
                 mic.retain(1)
             return text
@@ -901,6 +923,8 @@ class Spark:
                                idle_check=idle_check,
                                allow_weak=not self.body.sleeping,
                                noise_floor=lambda: mic.noise_floor, verify_wake=verifier,
+                               verify_exact=(lambda pcm, text, final: verify_wake(
+                                   pcm, keep=True, local_wake=text, local_final=final)) if verifier else None,
                                room=getattr(self, "room", None))
 
     

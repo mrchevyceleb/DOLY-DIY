@@ -108,7 +108,7 @@ class WhisperASR:
         import os
         return bool(self.model) and os.path.exists(self.bin)
 
-    def _transcribe_http(self, pcm, sample_rate=16000, timeout_s=8):
+    def _transcribe_http(self, pcm, sample_rate=16000, timeout_s=8, normalize=True, server_url=None):
         """Moria's whisper server (~0.3s) via curl (bulletproof multipart)."""
         import os
         import subprocess
@@ -117,10 +117,18 @@ class WhisperASR:
         fd, path = tempfile.mkstemp(suffix=".wav", dir="/tmp")
         os.close(fd)
         try:
+            if normalize and self.cfg.get("audio", {}).get("adaptive_sensitivity", False):
+                from .voicefx import audioop
+                if audioop is not None and pcm:
+                    # One gain for the entire clip; preserve its dynamics and
+                    # keep transients below clipping. Noise is not removed here.
+                    gain = min(4, 12000 / max(1, audioop.max(pcm, 2)),
+                               1000 / max(1, audioop.rms(pcm, 2)))
+                    pcm = audioop.mul(pcm, 2, max(1, gain))
             w = wave.open(path, "wb")
             w.setnchannels(1); w.setsampwidth(2); w.setframerate(sample_rate)
             w.writeframes(pcm); w.close()
-            url = self.cfg.get("asr", {}).get("server_url",
+            url = server_url or self.cfg.get("asr", {}).get("server_url",
                                              "http://192.168.50.204:8399/inference")
             out = subprocess.run(
                 ["curl", "--fail", "--silent", "--show-error", "--connect-timeout", "1", "-m", str(timeout_s), "-X", "POST", url,
@@ -133,11 +141,21 @@ class WhisperASR:
             except Exception:
                 pass
 
-    def transcribe_wake_pcm(self, pcm):
+    def transcribe_wake_pcm(self, pcm, normalize=False):
         """Short server-only check; never start expensive local fallback at idle."""
         # Parakeet runs ~1.4s (p90 1.5s, spikes past 2.5s) while Moria trains;
         # 1.5s and 2.5s both dropped checks. The mic retains 5s meanwhile.
-        return self._transcribe_http(pcm, self.cfg["audio"]["sample_rate"], timeout_s=3.5)
+        # Interruption verification keeps raw/clean levels comparable. Only
+        # the idle wake wrapper opts into quiet-speech gain.
+        return self._transcribe_http(pcm, self.cfg["audio"]["sample_rate"], timeout_s=3.5, normalize=normalize)
+
+    def confirm_wake_pcm(self, pcm, timeout_s=2):
+        """Independent CPU Whisper check; no local model startup or fallback."""
+        url = self.cfg.get('asr', {}).get('wake_server_url')
+        if not url:
+            return ''
+        return self._transcribe_http(pcm, self.cfg['audio']['sample_rate'],
+                                     timeout_s=timeout_s, normalize=True, server_url=url)
 
     def transcribe_pcm(self, pcm, sample_rate=16000):
         """Raw 16-bit mono PCM -> text. Moria first, local whisper fallback."""
@@ -151,7 +169,10 @@ class WhisperASR:
         if self.cfg.get("asr", {}).get("server_url"):
             try:
                 t0 = time.time()
-                text = self._transcribe_http(self._trim_silence(pcm), sample_rate)
+                # Capture already endpoints the request. The legacy 600-RMS
+                # trim can discard quiet words beside a louder word.
+                clip = pcm if self.cfg.get("audio", {}).get("adaptive_sensitivity", False) else self._trim_silence(pcm)
+                text = self._transcribe_http(clip, sample_rate)
                 self.last_source = "server"
                 print(f"[asr] moria {time.time()-t0:.2f}s: '{text}'", file=sys.stderr, flush=True)
                 # The server ANSWERED: empty means "no speech", not "try

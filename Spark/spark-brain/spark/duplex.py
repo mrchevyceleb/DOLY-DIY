@@ -389,7 +389,8 @@ class DuplexAudio:
             self.pause_run = self.pause_run + 1 if strong_voice else 0
             # Pause after 160ms of coherent near-end voice. This is reversible:
             # echo/noise resumes the same buffered PCM, never executes actions.
-            if self.pause_run >= 8 and stamp - self.last_check >= .75:
+            if (self.settings.get('barge_in_early_pause', False)
+                    and self.pause_run >= 8 and stamp - self.last_check >= .75):
                 self.pause.set()
             ready = self.voiced >= 25 or (self.voiced >= 6 and self.quiet >= 5)
             # Keep capture alive through the pause (and during brain thinking),

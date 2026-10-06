@@ -1,0 +1,20 @@
+[Unit]
+Description=Spark independent CPU wake-phrase verifier
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=sparksvc
+Group=nogroup
+WorkingDirectory=/opt/whisper-moria
+ExecStart=/opt/whisper-moria/build/bin/whisper-server -m /opt/whisper-moria/models/ggml-base.en.bin --host 192.168.50.204 --port 8397 --threads 8 --no-gpu -nt
+Restart=on-failure
+RestartSec=2
+MemorySwapMax=0
+NoNewPrivileges=yes
+ProtectSystem=full
+PrivateTmp=yes
+
+[Install]
+WantedBy=multi-user.target

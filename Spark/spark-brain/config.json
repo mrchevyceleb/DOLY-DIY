@@ -12,6 +12,7 @@
   "audio": {
     "input_device": "plughw:CARD=tlv320aic31xxso,DEV=0",
     "sample_rate": 16000,
+    "adaptive_sensitivity": true,
     "silence_ms": 700,
     "max_utterance_ms": 15000,
     "start_rms": 250,
@@ -31,7 +32,8 @@
     "model_path": "/opt/spark/vosk-model-small-en-us-0.15",
     "sample_rate": 16000,
     "whisper_model": "/opt/spark/whisper.cpp/models/ggml-tiny.en.bin",
-    "server_url": "http://192.168.50.204:8399/inference"
+    "server_url": "http://192.168.50.204:8399/inference",
+    "wake_server_url": "http://192.168.50.204:8397/inference"
   },
   "tts": {
     "voice_model": 1,
@@ -82,7 +84,8 @@
     "enabled": true,
     "words": [
       "hey spark",
-      "hey sparky"
+      "hey sparky",
+      "hey sparks"
     ],
     "chirp": "/.doly/sounds/wuw/wuw_1.wav",
     "wait_timeout_s": 6.0,
@@ -112,6 +115,7 @@
     "follow_up_window_s": 12,
     "follow_ups": 2,
     "barge_in": true,
+    "barge_in_early_pause": false,
     "barge_in_min_rms": 225
   },
   "govee": {

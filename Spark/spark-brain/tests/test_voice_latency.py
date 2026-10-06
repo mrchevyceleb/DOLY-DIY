@@ -27,6 +27,53 @@ def pcm(level):
 
 
 class VoiceLatencyTests(unittest.TestCase):
+
+
+
+    def test_exact_greeting_needs_two_matching_addressed_commands_for_name_recovery(self):
+        from spark.ear import DeferredWake, corroborated_local_wake
+        words = ['hey spark']
+        good = ("Face Park, come here.", "Thanks, Park. Come here.")
+        self.assertEqual(corroborated_local_wake('hey spark [unk]', *good, words), 'hey spark, come here.')
+        for local, first, second in (
+            ('spark', *good), ('a spark', *good),
+            ('hey spark', good[0], 'Park, turn around.'),
+            ('hey spark', 'Park the car.', 'Park the car.'),
+            ('hey spark', 'Central Park, come here.', 'Central Park, come here.'),
+            ('hey spark', good[0], ''),
+            ('hey spark extra', *good), ('okay hey spark', *good),
+        ):
+            self.assertIsNone(corroborated_local_wake(local, first, second, words))
+        cfg = {'audio': dict(CFG['audio'], adaptive_sensitivity=True)}
+        frames = [pcm(40)]*20 + [pcm(180)]*30 + [pcm(40)]*40
+        rec = Mock(feed=Mock(return_value=None), partial=Mock(return_value='hey spark'),
+                   finish=Mock(return_value='hey spark'))
+        exact = Mock(side_effect=[DeferredWake('hey spark, come here.'), AssertionError('confirmation decoded twice')])
+        with patch('spark.ear._speech_detector', return_value=Mock(is_speech=lambda *args: True)):
+            result = listen_for_wake(iter(frames), rec, cfg, words, noise_floor=lambda:40,
+                                     verify_wake=Mock(), verify_exact=exact)
+        self.assertTrue(result)
+        self.assertEqual([call.args[2] for call in exact.call_args_list], [False])
+
+    def test_soft_speech_is_captured_without_treating_room_noise_as_speech(self):
+        from spark.ear import _rms
+        audio = dict(CFG['audio'], start_rms=250, stop_rms=125)
+        vad = Mock(is_speech=lambda frame, rate: _rms(frame) >= 200)
+        for adaptive, heard in ((False, False), (True, True)):
+            cfg = {'audio': dict(audio, adaptive_sensitivity=adaptive)}
+            source = Mock(noise_floor=40, prefix_frames=0)
+            source.frames = lambda: iter([pcm(40)]*20 + [pcm(n) for n in [110,140,120]*10] + [pcm(40)]*40)
+            with patch('spark.ear._speech_detector', return_value=vad):
+                self.assertEqual(bool(record_utterance(source, cfg)), heard)
+        source = Mock(noise_floor=140, prefix_frames=0)
+        source.frames = lambda: iter([pcm(140)]*100)
+        with patch('spark.ear._speech_detector', return_value=vad):
+            self.assertFalse(record_utterance(source, cfg))
+        source.noise_floor = 40  # fan baseline rises after the previous estimate
+        source.frames = lambda: iter([pcm(40)]*20 + [pcm(100)]*100)
+        with patch('spark.ear._speech_detector', return_value=Mock(is_speech=lambda *args: True)):
+            self.assertFalse(record_utterance(source, cfg))
+
     def test_word_timing_survives_finalized_name_and_resets_with_next_decode(self):
         import json
         from spark.asr import Recognizer
@@ -593,6 +640,56 @@ class VoiceLatencyTests(unittest.TestCase):
             spark.whisper.transcribe_wake_pcm.side_effect = TimeoutError("offline")
             self.assertEqual(spark._wait_for_wake(mic, Mock(), ["spark"]), "")
             self.assertEqual(mic.retain.call_args.args, (1,))
+            spark.cfg['asr']['wake_server_url'] = 'secondary'
+            spark.whisper.transcribe_wake_pcm.side_effect = None
+            spark.whisper.transcribe_wake_pcm.return_value = "East Park, what's the weather?"
+            spark.whisper.confirm_wake_pcm.return_value = "Hey Spark, what's the weather?"
+            self.assertEqual(spark._wait_for_wake(mic, Mock(), ['hey spark']),
+                             "Hey Spark, what's the weather?")
+            # Live: Vosk [unk], primary "Burke, how did you sleep?" skipped
+            # the second model. No spelling hint is needed to consult it.
+            spark.whisper.transcribe_wake_pcm.return_value = 'Burke, how did you sleep?'
+            spark.whisper.confirm_wake_pcm.return_value = 'Hey Spark, how did you sleep?'
+            self.assertEqual(spark._wait_for_wake(mic, Mock(), ['hey spark']),
+                             'Hey Spark, how did you sleep?')
+            mic.save_wake_diagnostic.assert_called_with(pcm(3000)*20,
+                'Burke, how did you sleep?', 'Hey Spark, how did you sleep?')
+            spark.whisper.confirm_wake_pcm.return_value = 'The park is open today.'
+            self.assertEqual(spark._wait_for_wake(mic, Mock(), ['hey spark']),
+                             "[wake unconfirmed]")  # vetoes even an exact local hit
+            spark.whisper.confirm_wake_pcm.reset_mock()
+            with patch('spark.__main__.time.monotonic', side_effect=[0, 3]):
+                spark._wait_for_wake(mic, Mock(), ['hey spark'])
+            spark.whisper.confirm_wake_pcm.assert_not_called()  # total check budget
+        spark.whisper.transcribe_wake_pcm.return_value = 'Face Park, come here.'
+        spark.whisper.confirm_wake_pcm.return_value = 'Thanks, Park. Come here.'
+        def check_exact(*args, **kwargs):
+            return kwargs['verify_exact'](pcm(3000)*20, 'hey spark', True)
+        with patch('spark.ear.listen_for_wake', side_effect=check_exact):
+            self.assertEqual(spark._wait_for_wake(mic, Mock(), ['hey spark']),
+                             'hey spark, come here.')
+
+    def test_wake_diagnostics_pairs_audio_rotates_and_expires(self):
+        import json, tempfile, wave
+        from spark.wake_diagnostics import WakeDiagnostics
+        with tempfile.TemporaryDirectory() as folder, \
+                patch('spark.wake_diagnostics.time.time', return_value=100) as clock:
+            diagnostic = WakeDiagnostics(16000, 150, folder)
+            diagnostic.append(pcm(300), pcm(100))
+            diagnostic.append(pcm(400), pcm(200))
+            for _ in range(21):
+                diagnostic.save(pcm(100)+pcm(200), 'Burke.', 'Hey Spark.')
+            self.assertEqual(len(list(Path(folder).glob('*.json'))), 20)
+            with wave.open(str(Path(folder)/'00-raw.wav')) as wav:
+                self.assertEqual(wav.readframes(wav.getnframes()), pcm(300)+pcm(400))
+            diagnostic.save(pcm(999), 'unmatched', '')
+            self.assertFalse(json.loads((Path(folder)/'01.json').read_text())['raw_matched'])
+            self.assertFalse((Path(folder)/'01-raw.wav').exists())
+            clock.return_value = 151
+            diagnostic.append(pcm(500), pcm(300))
+            diagnostic.save(pcm(300), 'expired', '')
+            self.assertFalse(diagnostic.frames)
+            self.assertEqual(diagnostic.count, 22)
 
     def test_name_said_to_her_mid_or_end_of_sentence_wakes_her(self):
         from spark.ear import addressed_command
@@ -685,6 +782,37 @@ class VoiceLatencyTests(unittest.TestCase):
         self.assertEqual([c.kwargs["timeout_s"] for c in spark._listen_command.call_args_list], [6, 8])
         spark.body.wake_reaction.assert_called_once()
         spark.body.speak.assert_not_called()
+
+    def test_plural_wake_and_name_only_handoff_do_not_mute_the_next_command(self):
+        from spark.ear import has_wake_name, strip_wake_prefix
+        from spark.__main__ import _plausible_speech
+        words = ['hey spark', 'hey sparky', 'hey sparks']
+        self.assertTrue(has_wake_name('Hey Sparks.', words))
+        self.assertFalse(has_wake_name('Sparks.', words))
+        self.assertFalse(has_wake_name('He sparks a discussion.', words))
+        self.assertEqual(strip_wake_prefix('Hey Sparks.', 'Hey Sparks.'), '')
+        self.assertEqual(strip_wake_prefix('Hey Sparks, tell me a joke.'), 'tell me a joke.')
+        self.assertTrue(_plausible_speech('Joke.', 3449))
+        self.assertFalse(_plausible_speech('Ta.', 3449))
+        spark = Spark.__new__(Spark)
+        spark.cfg = {**CFG, 'conversation': {'follow_up_window_s': 0}}
+        spark.body = Mock(sleeping=False, has={k: True for k in ('helper','touch','tts','sound')})
+        spark.body.speaking_recently.return_value = False
+        spark.talk_trigger = Mock()
+        spark.talk_trigger.is_set.return_value = False
+        spark._wait_for_wake = Mock(side_effect=[WakeResult('Hey Sparks.', clip_pcm=pcm(3000)*20), StopIteration])
+        spark._listen_command = Mock(return_value=('Joke.', pcm(3449)*30))
+        spark.converse = Mock()
+        mic = Mock()
+        mic.__enter__ = Mock(return_value=mic)
+        mic.__exit__ = Mock(return_value=False)
+        with patch('spark.asr.Recognizer'), patch('spark.ear.MicStream', return_value=mic), \
+                patch('spark.__main__.threading.Thread'), patch('spark.__main__.sd_notify'):
+            with self.assertRaises(StopIteration):
+                spark.voice_loop()
+        spark.body.wake_reaction.assert_called_once_with(audible=False)
+        mic.mute.assert_not_called()
+        spark.converse.assert_called_once_with('Joke.')
 
     def test_short_signoff_closes_followup_without_reply_or_another_window(self):
         from spark.__main__ import _followup_done

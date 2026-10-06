@@ -13,6 +13,7 @@ Environment=PARAKEET_BIND=192.168.50.204
 ExecStart=/usr/bin/python3 /opt/whisper-moria/parakeet_server.py
 Restart=on-failure
 RestartSec=2
+MemorySwapMax=0
 NoNewPrivileges=yes
 ProtectSystem=full
 PrivateTmp=yes

@@ -115,13 +115,14 @@ class DuplexTests(unittest.TestCase):
         self.assertGreater(len(pcm)/32000, 10)
         self.assertIn(voice*250 + bytes(640)*25 + voice*250, pcm)
 
-    def test_near_voice_pauses_before_slow_verification_and_echo_resumes(self):
+    def test_unconfirmed_voice_keeps_playing_during_slow_verification(self):
         release, requested = threading.Event(), threading.Event()
         verified_sizes = []
         def slow_asr(clip):
             verified_sizes.append(len(clip))
-            requested.set()
-            release.wait(1)
+            if len(verified_sizes) == 2:
+                requested.set()
+            release.wait()
             return "the lights are on"
         with patch("spark.ear._speech_detector", return_value=Mock(is_speech=lambda *args: True)):
             duplex = DuplexAudio(CFG, slow_asr)
@@ -133,7 +134,7 @@ class DuplexTests(unittest.TestCase):
             duplex.capture(bytes(640), 98+n*.02)
         for n in range(8):
             duplex.capture(voice, 100+n*.02)
-        self.assertTrue(duplex.pause.is_set())
+        self.assertFalse(duplex.pause.is_set())
         self.assertFalse(duplex.cancel.is_set())
         for n in range(8, 26):
             duplex.capture(voice, 100+n*.02)

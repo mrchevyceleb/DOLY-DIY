@@ -513,3 +513,245 @@ as echo. Matt confirmed she finished. No commit or push.
 Final ASR backup: `/opt/whisper-moria/backups/asr-queue-20261005-152624/`.
 The repaired queue handled two concurrent “Stop talking” decodes successfully
 in 0.29s. Spark health remains OK and the selected voice/loudness remain active.
+
+## Quiet speech within three feet
+
+Matt reported that Spark still needed a loud voice within three feet. With
+`audio.adaptive_sensitivity=true`, wake and command energy gates now follow the
+measured ambient floor instead of imposing the previous loudness minimums.
+The lower floor clamp is 40 RMS; start is at least 90 RMS and 1.8 times the
+floor. WebRTC VAD receives at most four times gain for quiet frames, while
+captured PCM remains unchanged. Wake authorization still requires her name
+and the configured “Hey”; the existing echo and raw-microphone cross-checks
+remain enabled.
+
+Remote ASR receives bounded per-clip gain (at most four times, targeting 1000
+RMS with peak headroom). Adaptive commands bypass the old 600-RMS silence trim,
+which could remove quiet words beside a louder word. Gain does not improve
+signal-to-noise ratio or change microphone hardware gain.
+Wake checks opt into this gain; interruption confirmation does not, preserving
+the raw/clean comparison. A steady 200ms level can recover an underestimated
+command noise floor before committing an onset.
+
+A real Vosk/WebRTC VAD/Parakeet probe on the Pi using attenuated synthesized
+“Hey Spark. What is the weather?” at 100 RMS missed the wake with the old
+settings and recognized it with adaptive sensitivity. This is a software
+fixture result, not a measured distance or confirmation of Alexa parity.
+
+Matt's first normal-volume retry still missed. The log captured
+“He sparked what's the weather?” at peak 199 RMS, floor 40, with 240ms of
+voiced frames. This was a pronunciation rejection rather than absent capture.
+An opening “he spark/he sparked” now needs an addressed query and a second,
+bounded check of the first 900ms confirming the same name sounds or an exact
+“Hey Spark”. The full query must end with a question mark in the transcript.
+Bare “he sparked” and narrative “he sparked a discussion”
+remain rejected. Slow/unavailable confirmation fails closed.
+
+Codex-Fix: initial quiet-speech patch, six files, small tier (91 changed lines),
+one medium direct CLI review. Fixed P1 stale-floor recovery and unintended
+gain on interruption verification, plus P2 concurrent-check test timing.
+`__main__.py` was added to the fix scope for explicit idle-wake gain opt-in.
+The new failed-retry pronunciation patch had a separate small review of three
+files: fixed P1 narrative query false wakes with interrogative punctuation,
+and P2 prefix identity by requiring “Hey Spark” specifically. No verify rounds
+on either small patch. Existing protections remain active; 84 checks pass.
+
+Matt's next retry missed first (“East Park, what's the weather?”, peak 405 RMS)
+and worked second (“Hey Spark”, peak 647 RMS), finishing in 9.39s. This still
+does not establish reliable normal-volume hearing. Adaptive sensitivity now
+also bypasses Speex residual suppression when no speaker reference or aligned
+echo tail is active. The adaptive filter continues to update; suppression
+stays enabled during output and its tail. Idle microphone audio reaches VAD
+and ASR intact, so quiet consonants are not subjected to speaker-echo removal.
+
+The idle bypass was reverted after Matt missed both attempts: the raw noise
+floor rose to 227 RMS and the first clip had only 100ms admitted by VAD.
+The reviewed bypass patch had no findings, but field evidence rejected it.
+The “he sparked” recovery was also removed in favor of independent model
+verification rather than accumulating pronunciation aliases.
+
+`spark-wake-verifier.service` runs whisper.cpp base.en on Moria's CPU, port
+8397, alongside Parakeet on 8399. No GPU or prompt bias. When local keyword
+spotting suggests her name or Parakeet hears a known nearby opening, the
+idle wake wrapper asks this second recognizer to confirm the exact configured
+wake phrase. Ordinary conversation is not sent for a second opinion. Slow
+primary recognition skips the extra check; both checks fit the existing
+request budget, reserving 1s for subprocess overhead. Failed or skipped
+secondary confirmation returns an explicit nonempty rejection: an empty
+result would let an exact local keyword stand. Voice interruption keeps its
+existing two Parakeet raw/clean checks and never uses this extra model.
+
+CPU sample checks at 100 RMS: “Hey Spark, what is the weather?” was exact in
+0.71s; ordinary weather question, “he sparked a discussion” and “the park is
+open today” stayed unchanged in 0.58–0.68s. These are synthesized fixtures.
+Soft adaptive “Hey” sessions now require three voiced frames rather than five
+to request remote recognition; that lowers the check threshold, not wake
+authorization. Armed clips previously fell short of the five-frame gate.
+
+Matt also reported a playback glitch during the next answer. ALSA logged
+3269ms, 2498ms and 920ms underruns while two purported interruptions
+(“Clear Scott”, “Eyes. Hi and see”) failed raw microphone corroboration.
+`conversation.barge_in_early_pause=false` keeps playing until ASR confirms an
+actual interruption; tap stop remains immediate. This avoids starving ALSA
+while an unconfirmed candidate is decoded. Verified voice interruption still
+cancels the player, with the existing recognition delay.
+
+Final field check: Matt confirmed both normal-volume requests within three
+feet were heard and both answers were smooth. Logs show complete weather
+answers in 9.31s and 7.46s, with speaker fragments classified as echo and no
+ALSA underrun. The second wake had peak 273 RMS. “Okay, thanks” closed each
+follow-up window correctly. A separate mixed-audio real-ASR probe confirmed
+“Stop talking” in 1.19s, without an early pause, and retained the complete
+stop command. This is not a quiet-over-speaker or far-field parity claim.
+
+Codex-Fix for the independent verifier: seven files (`asr.py`, `ear.py`,
+`__main__.py`, `config.json`, `test_voice_latency.py`, this document,
+`spark-wake-verifier.service`), large tier (153 lines at verification), two
+medium direct CLI reviews. Fixed P1 rejection handling with a nonempty veto
+and P1 timeout overhead reservation. Limited success at the verify stop:
+the new P1 requesting a second opinion even for a primary exact wake was
+disputed because the second model is deliberately for unclear candidates;
+primary exact configured names remain authoritative. New P2 noted, not fixed:
+nearby “he sparked” may cause an extra check on narrative speech. That check
+cannot authorize the homophone: Whisper must hear the exact configured wake,
+and its synthesized narrative negative stayed unchanged.
+
+Codex-Fix for cutouts: four files (`duplex.py`, `test_duplex.py`, `config.json`,
+this document), small tier, 16 lines, one medium direct CLI review, no findings.
+All 83 targeted checks pass. Nine unique files changed in the final worktree;
+failed pronunciation-alias and idle-bypass experiments were removed. The
+current backup is `/opt/spark/backups/quiet-listening-20261005-163725/`.
+Spark, Parakeet, Qwen and the enabled CPU wake verifier are healthy. The live
+Gemma brain, Warm soft robot voice, +6dB speech gain, volume 100, stock actions
+and configuration overlay remain intact. No commit or push for this task.
+
+To reproduce the optional verifier on Moria with the existing whisper.cpp
+binary and `models/ggml-base.en.bin`: install `deploy/moria/spark-wake-verifier.service`
+to `/etc/systemd/system/`, run `systemctl daemon-reload` and
+`systemctl enable --now spark-wake-verifier`. Its port is separate from Parakeet.
+
+## Finalized local greeting with agreeing name/command evidence
+
+The next missed request was confirmed by Matt as “Hey Spark, come here”.
+Local KWS heard “hey spark”; Parakeet heard “Face Park, come here” and CPU
+Whisper heard “Thanks, Park. Come here”. Exact phrase matching vetoed this.
+The exact-wake callback now retains the local greeting as evidence. A
+finalized, configured “Hey Spark” plus two independently recognized vocative
+Spark/Park commands with identical word tokens can recover the dropped s.
+Only a short greeting/noise prefix is tolerated; “Central Park” and “park the
+car”, missing/contradictory evidence and bare local “Spark” stay rejected.
+Partial agreement defers until a local final rather than authorizing early.
+The agreed command is preserved verbatim; no robot action runs in recognition.
+
+The partial confirmation is cached with that listening attempt's PCM prefix
+and exact local greeting. A matching final releases it without decoding the
+same phrase twice; a new segment clears it. The observed local tokens must be
+the configured two-word greeting followed only by `[unk]` artifacts. Extra
+words cannot qualify as an exact greeting.
+
+Codex-Fix for this follow-up: four files (`ear.py`, `__main__.py`,
+`test_voice_latency.py`, this document), small tier (86 changed lines when
+reviewed), one medium direct CLI review. Fixed P1 discarded partial evidence
+and P2 insufficient validation of observed local tokens. No second review per
+the small-tier rule. All 84 targeted checks pass, including the actual
+Face/Thanks Park case, rejection cases and a final that cannot decode twice.
+This is recognition/state verification, not a new physical-distance result.
+
+The corrected build is live and healthy, with backup
+`/opt/spark/backups/quiet-listening-20261005-165526/`. Awaiting another
+normal-volume field check; the earlier two successes did not establish
+consistent wake reliability. No commit or push for this follow-up.
+
+## Reported repeated “Hey Sparks” misses
+
+Matt reported four or five missed “Hey Sparks” wakes. Configured greetings
+were only “Hey Spark” and “Hey Sparky”; the plural greeting is now explicitly
+included, still requiring “Hey”. The movement stop listener also uses the
+configured greetings, and plural greeting removal handles punctuation.
+The logs cannot identify all the reported attempts individually.
+
+A separate logged failure woke on “Hey Spark”, decoded only “Joke” at peak
+3449, then dropped it as an implausible fragment. The name-only wake chime
+blanked 199ms of playback plus 250ms of tail, which can erase command speech.
+Voice wakes now acknowledge through eyes and cyan LEDs without playing that
+chime or muting the mic, including name-only remote confirmations. Tap-to-talk
+keeps its stock chime. “Joke”, “jokes” and “weather” are recognized short
+requests inside the already authorized listening window; arbitrary quiet
+one-word fragments remain rejected. This does not establish that every wake
+miss was caused by the plural greeting or chime.
+
+Validation: 87 focused checks passed. A native Vosk/Parakeet SDK-free probe
+accepted a synthetic “Hey Sparks. Tell me a joke” at 100 RMS and rejected
+“He sparks a discussion” and “The park is open today”. This synthetic probe
+does not measure Matt's actual wake success rate. Codex-Fix scoped five files
+(ear, main, config, voice-latency test, this document), small tier: 81 changed
+lines, one medium direct CLI review, no findings. Deployed with live brain,
+selected voice and saved volume preserved; backup:
+`/opt/spark/backups/wake-handoff-20261005-212239/`.
+
+Matt subsequently reported only one in four “Hey Spark” attempts working.
+Two name-like segments were rejected before an exact greeting succeeded;
+the text logs cannot distinguish missing consonants from ambiguous audio.
+A temporary bounded diagnostic in the existing microphone thread records
+paired hardware/processed PCM without opening a second microphone or SDK
+owner. The first 60-second sample contained no recognizable test greeting
+on either path; it cannot establish the cause of the reported wake misses.
+The second sample also contained no recognizable greeting. Temporary
+instrumentation was removed, diagnostic PCM deleted, and the reviewed
+production listener restored healthy at 21:29 EDT. A timed field sample
+remains necessary; no further gain or wake-authorization change was made
+without one. The one-in-four report remains unresolved.
+Codex-Fix for this diagnostic follow-up: documentation only, small tier
+(22 lines), one medium direct CLI review, no findings. Production ear/main
+hashes match the reviewed local files; health is OK, Gemma brain and Warm
+soft robot voice preserved, volume 100.
+
+## October 6: verification coverage and idle paging
+
+Matt reports roughly 20% wake success. At 08:14 the CPU second-opinion
+recognizer timed out at two seconds after an overnight idle; its process
+had 45MB swapped and Parakeet had 49MB swapped. Paging is a plausible
+contributor to that timeout, not proof of the whole reported failure rate.
+Both ASR service units now disallow swapping. Deployment restarts and
+warms these two ASR services to remove the existing swapped pages.
+
+At 08:28 a successful “Hey Spark, good morning” was followed by Vosk
+`[unk]` and Parakeet “Burke, how did you sleep?”. The second recognizer
+was never called because the first result didn't match a spelling hint.
+Now every eligible failed primary wake check consults the independent
+recognizer within the existing total budget. Wake approval still requires
+the configured phrase; “Burke” is not an authorized alias.
+
+Opt-in paired audio snapshots use the existing microphone stream, after
+high-pass and before/after AEC. A 15-second RAM ring covers wake capture
+and ASR delay; snapshots retain the most recent 20 checks, at most 8 seconds
+each, in a local private state folder. An absolute live-config deadline
+expires capture within ten minutes, including across restarts. Raw audio
+is omitted if the processed clip cannot be matched to the ring. No second
+ALSA or SDK owner is opened. This is disabled in the repository config.
+88 focused checks pass, including actual greeting approval versus room
+speech and bounded diagnostic pairing, rotation, unmatched clips and expiry.
+
+Deployed October 6 at 08:36 EDT. ASR backup:
+`/opt/whisper-moria/backups/ram-20261006-083601/`; Pi backup:
+`/opt/spark/backups/wake-reliability-20261006-083635/`.
+Both ASR units are active with current swapped bytes and swap limits zero.
+Native SDK-free 100-RMS samples accepted singular/plural greetings and
+rejected “Hey Mark” and talk about the park. Primary calls took 0.215–0.219s,
+independent calls 0.560–0.580s after restart; these are synthetic tests.
+Matt reported all four normal-volume attempts caught after deployment.
+The logs also show independent explicit wakes and follow-up requests,
+without playback underruns or self-interruption in that test window.
+This small field sample does not establish a long-term wake success rate.
+Temporary capture was disabled, collected PCM/metadata removed, and the
+service returned healthy with diagnostics absent from live config.
+Reviewed local/live source hashes matched; Gemma, Warm soft robot and
+volume 100 remain intact.
+
+Codex-Fix: large tier, 139 changed lines, seven scoped files: `spark/ear.py`,
+`spark/__main__.py`, new `spark/wake_diagnostics.py`,
+`deploy/moria/parakeet-server.service`,
+`deploy/moria/spark-wake-verifier.service`, `tests/test_voice_latency.py`,
+and this document. One medium direct CLI review, no findings; clean exit
+without a redundant verify. Prior dirty changes were excluded using fresh
+per-file baselines. No ignored findings or fixes from review.
