@@ -17,6 +17,7 @@ Restart=on-failure
 RestartSec=10
 NoNewPrivileges=yes
 PrivateTmp=yes
+MemorySwapMax=0
 
 [Install]
 WantedBy=multi-user.target

@@ -195,6 +195,13 @@ class Router:
             if result:
                 return True
 
+        # Availability questions need no model reasoning or invented health
+        # report: this very request establishes that we are listening now.
+        if re.fullmatch(r"(?:are you (?:still )?(?:there|awake|listening|(?:okay|ok|alright)(?: now)?)"
+                        r"|(?:can|do) you hear me)[?.!]*", text):
+            self.body.speak("I'm here, Matt. I'm listening.")
+            return True
+
         # she asked "how long?" / "for what time?" — this utterance is the answer
         low = text.lower()
         pending = getattr(self, "_pending", None)

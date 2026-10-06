@@ -33,6 +33,13 @@ backend uses the 1.7B Base model and caches the reference features. Health is
 available only after warmup. Concurrent generation returns 503 immediately
 so the robot can use Piper. Completed lines have a bounded 32-entry cache.
 Request readers are capped at eight; excess connections close immediately.
+`MemorySwapMax=0` keeps the voice service's host allocations out of swap;
+ensure Moria has RAM headroom for its concurrent workloads. For the current
+LM Studio app, copy `protect_brain_ram.py` to `~/spark-qwen-voice/` and run it
+with `python3` as its desktop owner after
+loading the model. It validates that the app scope contains only LM Studio
+descendants, then applies a runtime swap limit without restarting the model.
+Reapply after relaunching LM Studio; existing swapped pages fault in on use.
 Pitch +0.75 semitone and robot mix 0.16 are applied on the Pi exactly once;
 the server returns unprocessed audio. A clone is conditioned on the chosen
 take; new wording need not reproduce every detail of the audition delivery.

@@ -27,7 +27,66 @@ def pcm(level):
 
 
 class VoiceLatencyTests(unittest.TestCase):
+    def test_prompt_history_keeps_its_prefix_and_prunes_in_bounded_batches(self):
+        import tempfile
+        from spark.memory import Memory
+        with tempfile.TemporaryDirectory() as state:
+            memory = Memory({'brain': {'history_turns': 2, 'history_context_batch_turns': 2},
+                             'state_dir': state})
+            for i in range(4):
+                prefix = memory.messages('Spark')
+                memory.add('user', f'Question {i}')
+                memory.add('assistant', f'Answer {i}')
+                self.assertEqual(memory.messages('Spark')[:len(prefix)], prefix)
+            memory.add('user', 'Question 4')
+            memory.add('assistant', 'Answer 4')
+            sent = memory.messages('Spark')
+            self.assertEqual(sent[1]['content'], 'Question 2')
+            self.assertEqual(sent[-1]['content'], 'Answer 4')
+            self.assertEqual(len(memory.history), 4)
+            self.assertLessEqual(len(sent), 9)
+            loaded = Memory({'brain': {'history_turns': 2}, 'state_dir': state})
+            self.assertEqual(loaded.messages('Spark')[1:], list(memory.history))
+            memory.clear()
+            self.assertEqual(memory.messages('Spark'), [{'role': 'system', 'content': 'Spark'}])
+            for i in range(2):
+                memory.add('user', f'Question {i}')
+                memory.add('assistant', f'Answer {i}')
+            memory.add('user', 'Long question ' + 'x' * 6000)
+            self.assertEqual(memory.messages('Spark')[1]['role'], 'user')
 
+    def test_availability_question_is_fast_but_does_not_swallow_more_instructions(self):
+        from spark.router import Router
+        router = Router.__new__(Router)
+        router.body, router.brain = Mock(), Mock()
+        router.cfg = {'govee': {'enabled': False}}
+        router.govee = None
+        for text in ('Are you okay now?', 'Can you hear me?', 'Are you still there?'):
+            self.assertTrue(router.handle(text))
+            router.body.speak.assert_called_with("I'm here, Matt. I'm listening.")
+        with patch('spark.router.actions.wanted', return_value=False), \
+                patch.object(router, '_motion_followup', return_value=False):
+            for text in ('Are you okay with that plan?', 'Can you hear me and dim the lights?'):
+                router.body.reset_mock()
+                self.assertFalse(router.handle(text))
+                router.body.speak.assert_not_called()
+        router.brain.chat.assert_not_called()
+        # The same voice stays available even after ordinary LRU eviction.
+        import importlib.util
+        import wave
+        module_path = Path(__file__).resolve().parents[1] / 'deploy/moria/qwen_voice_server.py'
+        spec = importlib.util.spec_from_file_location('voice_server_latency_check', module_path)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        voice = module.Voice.__new__(module.Voice)
+        output = io.BytesIO()
+        with wave.open(output, 'wb') as wav:
+            wav.setparams((1, 2, 24000, 0, 'NONE', 'not compressed'))
+            wav.writeframes(pcm(1000))
+        voice.fixed_cache = {"I'm here, Matt. I'm listening.": output.getvalue()}
+        voice.cache = {}
+        self.assertEqual(voice.generate("I'm here, Matt. I'm listening.")[1], 0)
+        self.assertEqual(b''.join(voice.stream("I'm here, Matt. I'm listening.")), pcm(1000))
 
 
     def test_exact_greeting_needs_two_matching_addressed_commands_for_name_recovery(self):

@@ -662,6 +662,53 @@ The corrected build is live and healthy, with backup
 normal-volume field check; the earlier two successes did not establish
 consistent wake reliability. No commit or push for this follow-up.
 
+## Response latency after a long idle period
+
+The 18:32 availability request used the already loaded Gemma model. Brain
+first-content time was 4.557s; first playable voice packet took another 2.20s.
+LM Studio re-evaluated 1,557 tokens in 2.195s. Its GPU also serves an unrelated
+training job; that job was left running. The model has no idle TTL now.
+
+The prompt history can keep up to four extra exchanges, then prune four at
+once, retaining the original twelve recent exchanges. This preserves the
+cached prefix between pruning points; saved history remains twelve turns.
+Extra history is dropped if it exceeds 6,000 characters. Clearing memory
+clears both windows. A real-server, text-only replay with the actual persona
+and saved history measured later-turn mean TTFT 1.082s with the old sliding
+window and 0.617s with a stable prefix (three samples each, shared busy GPU).
+This establishes a warm-turn improvement, not a long-idle guarantee.
+
+Exact availability questions now answer locally: “I'm here, Matt. I'm
+listening.” That selected-voice take is generated at voice-server startup
+and pinned separately from its ordinary LRU cache. It reports current
+presence, not overall hardware/model health. Pet/game routing remains first;
+questions with additional instructions do not match the fast route.
+The 960ms synthesis buffer, speaker pacing and interruption rules are intact.
+
+Installed and healthy: Pi backup `response-latency-20261005-184636`; Moria
+voice source backup `qwen_voice_server.py.backup-20261005-184637`. The physical
+speaker probe queued the pinned availability reply's first PCM in 0.10s,
+without an underrun or self-interruption. This announcement probe exercises
+playback, not the microphone/intent route. Normal voiced checks are pending.
+Codex-Fix: six files, large tier (115 lines), two medium direct CLI reviews;
+fixed P2 orphan assistant at long-history trimming, verification clean.
+All 86 targeted checks pass. No commit or push.
+
+Memory paging was also observed: the LM Studio worker had about 1.9GB in
+swap, and the previous Qwen service peaked at 844MB swapped. Its freshly
+restarted replacement had already accumulated 232MB. The voice unit now has
+persistent `MemorySwapMax=0`; the current dedicated LM Studio desktop scope
+has the same runtime protection. Existing pages fault in on use; the limit
+prevents further swap, without evicting/reloading a model or pausing training.
+`deploy/moria/protect_brain_ram.py` verifies the loaded worker's owner, its
+dedicated app scope and every member's descent from LM Studio before changing
+that scope. Reapply after relaunching LM Studio. Paging is a plausible source
+of long-idle delay, not a measured attribution of every prior second.
+Codex-Fix for paging: four files, small tier (86 lines), one medium direct
+CLI review. Fixed P1 descendant-cgroup validation and P2 optimized-Python
+assertion bypass. No verify per the small-tier rule. The deployed helper also
+passed with `python3 -O`; both exact scopes report a zero swap limit.
+
 ## Reported repeated “Hey Sparks” misses
 
 Matt reported four or five missed “Hey Sparks” wakes. Configured greetings

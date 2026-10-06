@@ -64,9 +64,14 @@ class Voice:
         self.cache = collections.OrderedDict()
         self.permit = threading.Lock()
         self.last_generation_s = None
+        self.fixed_cache = {}
         self.generate("Hi Matt. I'm Spark.")  # warm model and reusable reference prompt
+        line = "I'm here, Matt. I'm listening."
+        self.fixed_cache[line] = self.generate(line)[0]
 
     def generate(self, text):
+        if text in self.fixed_cache:
+            return self.fixed_cache[text], 0.0
         if text in self.cache:
             self.cache.move_to_end(text)
             return self.cache[text], 0.0
@@ -87,9 +92,9 @@ class Voice:
 
     def stream(self, text):
         """Yield PCM16 packets; a completed take also populates the WAV cache."""
-        if text in self.cache:
+        if text in self.fixed_cache or text in self.cache:
             import wave
-            with wave.open(io.BytesIO(self.cache[text]), "rb") as wav:
+            with wave.open(io.BytesIO(self.fixed_cache.get(text) or self.cache[text]), "rb") as wav:
                 while True:
                     pcm = wav.readframes(15360)
                     if not pcm:
